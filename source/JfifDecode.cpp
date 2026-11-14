@@ -7751,9 +7751,6 @@ void CjfifDecode::PrepareSignatureSingle(bool bRotate)
   QString strSet;
   QString strHashIn;
 
-//  unsigned char pHashIn[2000];
-  unsigned char *pHashIn;
-
   QString strDqt;
 
   MD5_CTX sMd5;
@@ -7763,7 +7760,6 @@ void CjfifDecode::PrepareSignatureSingle(bool bRotate)
 
   Q_ASSERT(m_eImgLandscape != ENUM_LANDSCAPE_UNSET);
 
-  pHashIn = new unsigned char[2000];
   // -----------------------------------------------------------
   // Calculate the MD5 hash for online/internal database!
   // signature "00" : DQT0,DQT1,CSS
@@ -7847,17 +7843,14 @@ void CjfifDecode::PrepareSignatureSingle(bool bRotate)
 #endif
   }
 
-  // Copy into buffer
-  Q_ASSERT(nLenHashIn < 2000);
-
-  for(int32_t i = 0; i < nLenHashIn; i++)
-  {
-    pHashIn[i] = strHashIn[i].toLatin1();
-  }
+  // Hash the Latin-1 bytes of the string. (This used a fixed 2000-byte
+  // buffer, checked only by a Q_ASSERT that release builds compile out; the
+  // image-signature copy was also allocated per call and never freed.)
+  QByteArray baHashIn = strHashIn.toLatin1();
 
   // Calculate the hash
   MD5Init(&sMd5, 0);
-  MD5Update(&sMd5, pHashIn, nLenHashIn);
+  MD5Update(&sMd5, reinterpret_cast<unsigned char *>(baHashIn.data()), static_cast<int32_t>(baHashIn.size()));
   MD5Final(&sMd5);
 
   // Overwrite top 8 bits for signature version number
@@ -7907,7 +7900,6 @@ void CjfifDecode::PrepareSignatureThumbSingle(bool bRotate)
   QString strSet;
   QString strHashIn;
 
-  unsigned char pHashIn[2000];
 
   QString strDqt;
 
@@ -8004,17 +7996,14 @@ void CjfifDecode::PrepareSignatureThumbSingle(bool bRotate)
 #endif
   }
 
-  // Copy into buffer
-  Q_ASSERT(nLenHashIn < 2000);
-
-  for(int32_t i = 0; i < nLenHashIn; i++)
-  {
-    pHashIn[i] = strHashIn[i].toLatin1();
-  }
+  // Hash the Latin-1 bytes of the string. (This used a fixed 2000-byte
+  // buffer, checked only by a Q_ASSERT that release builds compile out; the
+  // image-signature copy was also allocated per call and never freed.)
+  QByteArray baHashIn = strHashIn.toLatin1();
 
   // Calculate the hash
   MD5Init(&sMd5, 0);
-  MD5Update(&sMd5, pHashIn, nLenHashIn);
+  MD5Update(&sMd5, reinterpret_cast<unsigned char *>(baHashIn.data()), static_cast<int32_t>(baHashIn.size()));
   MD5Final(&sMd5);
 
   // Overwrite top 8 bits for signature version number
@@ -10321,6 +10310,7 @@ bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
       msgBox.exec();
     }
 
+    delete pFileOutput;         // (was leaked)
     pFileOutput = nullptr;
 
     return false;
@@ -10524,6 +10514,7 @@ bool CjfifDecode::ExportJpegDoRange(QString strFileIn, QString strFileOut, uint3
       msgBox.exec();
     }
 
+    delete pFileOutput;         // (was leaked)
     pFileOutput = nullptr;
 
     return false;

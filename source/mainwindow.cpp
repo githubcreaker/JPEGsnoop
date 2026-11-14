@@ -47,6 +47,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new QPla
   if(DEBUG_EN)
     qDebug() << "MainWindow::MainWindow() Begin";
 
+  m_pFile = nullptr;            // AnalyzeFile() replaces it; freed in the destructor
+
   QWidget *widget = new QWidget;
   setCentralWidget(widget);
   setGeometry(100, 100, 800, 700);
@@ -149,6 +151,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new QPla
 
 MainWindow::~MainWindow()
 {
+  // The preview window and the decoders are QObject children that QObject
+  // would delete after this body; delete them first, since they use the
+  // helpers below, then the helpers, which have no parent.
+  delete imgWindow;
+  imgWindow = nullptr;
+  delete m_pJfifDec;
+  m_pJfifDec = nullptr;
+  delete m_pImgDec;
+  m_pImgDec = nullptr;
+
+  delete m_pDbSigs;
+  m_pDbSigs = nullptr;
+  delete m_pWBuf;
+  m_pWBuf = nullptr;
+  delete m_pDocLog;
+  m_pDocLog = nullptr;
+  delete m_pFile;
+  m_pFile = nullptr;
 }
 
 //-----------------------------------------------------------------------------
@@ -633,6 +653,8 @@ void MainWindow::openFile(const QString &strPath)
 
 void MainWindow::AnalyzeFile()
 {
+  // One QFile per analysis; free the previous one (this used to leak per open)
+  delete m_pFile;
   m_pFile = new QFile(m_currentFile);
 
   if(m_pFile->open(QIODevice::ReadOnly) == false)
@@ -649,6 +671,7 @@ void MainWindow::AnalyzeFile()
       msgBox.exec();
     }
 
+    delete m_pFile;
     m_pFile = nullptr;
   }
   else
@@ -888,9 +911,10 @@ void MainWindow::reprocess()
       msg = strLoRes;
     }
 
-    Q_Note *note = new Q_Note(msg);
-    note->exec();
-    m_pAppConfig->setCoachIdct(!note->hideStatus());
+    // On the stack: a new dialog per tip used to leak
+    Q_Note note(msg);
+    note.exec();
+    m_pAppConfig->setCoachIdct(!note.hideStatus());
   }
 
   emit ImgSrcChanged();

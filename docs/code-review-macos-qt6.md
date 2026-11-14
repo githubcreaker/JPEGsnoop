@@ -103,8 +103,41 @@ as reviewed, before the fixes below.
 - **Decode output unchanged:** reports are identical for 21 valid JPEGs.
 - **No slowdown:** decode time with the status updates is unchanged (within noise).
 
+### Leaks
+
+**Fixed:** everything in section 6, plus these:
+- `~MainWindow` was empty, so `CDocLog`, `CDbSigs` and `CwindowBuf` were never freed.
+- `m_pFile` was uninitialised.
+- `DatabaseExtraLoad` leaked its buffer on one early return.
+
+In detail:
+- **Preview and histograms:** they are freed when replaced and in the destructor, and
+  initialised to null.
+- **One `QFile` per open:** it is freed at the next open, on a failed open and at exit.
+- **Dialogs:** the Reprocess tip, the auto-reprocess tip and the first-run notice are stack
+  objects. (The Configuration dialog was fixed with the settings work; the print dialog was
+  already freed.)
+- **Signature hashing:** it uses a `QByteArray` instead of a 2000-byte buffer. The buffer
+  was leaked per call for the image signature and was bounded only by a compiled-out
+  `Q_ASSERT`.
+- **Smaller fixes:** `delete[]` for the file buffer, and the export output file is freed
+  when it can't be opened.
+- **Left alone:** the PSD image allocation at `DecodePs.cpp:385` belongs to the disabled,
+  unfinished PSD decoder (see section 7).
+
+**Checks:**
+- **Measured growth:** after the first open, memory grew 75.9 MB over 20 re-opens of a
+  1024×768 file, and 144.3 MB over 5 re-opens with histograms on and every channel
+  shown. It now levels off at about 15 MB, the allocator keeping freed pages: the same
+  after 20 and 60 re-opens.
+- **Tests:** two new cases check this with a 30 MB limit (66 in all). Both fail against
+  the previous commit.
+- **All 66 pass** with and without ASan/UBSan, including GUI runs that destroy the main
+  window.
+- **Decode output unchanged:** reports, signatures included, are identical for 32 files.
+
 **Still open:** the rest of C7; the inherited R13–R15, R17 and R18; U4; the macOS items;
-leaks; latent code.
+latent code.
 
 ## How this was reviewed
 

@@ -50,6 +50,11 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
   m_bImgDecoded = false;        // Image has not been decoded yet
   m_bDibTempReady = false;
   m_bPreviewIsJpeg = false;
+
+  // Preview and histogram images (owned; replaced on each render)
+  m_pDibTemp = nullptr;
+  m_pDibHistRgb = nullptr;
+  m_pDibHistY = nullptr;
   m_bDibHistRgbReady = false;
   m_bDibHistYReady = false;
 
@@ -266,6 +271,13 @@ CimgDecode::~CimgDecode()
     delete[]m_pPixValCr;
     m_pPixValCr = 0;
   }
+
+  delete m_pDibTemp;
+  m_pDibTemp = nullptr;
+  delete m_pDibHistRgb;
+  m_pDibHistRgb = nullptr;
+  delete m_pDibHistY;
+  m_pDibHistY = nullptr;
 }
 
 // Reset the major parameters
@@ -4578,6 +4590,8 @@ void CimgDecode::DrawHistogram(bool bQuiet, bool bDumpHistoY)
 
   m_bDibHistRgbReady = false;
 
+  // Replace the previous histogram (this used to leak one per decode)
+  delete m_pDibHistRgb;
   m_pDibHistRgb = new QImage(HISTO_BINS * HISTO_BIN_WIDTH, 3 * HISTO_BIN_HEIGHT_MAX, QImage::Format_RGB32);
   m_pDibHistRgb->fill(Qt::white);
 
@@ -4663,6 +4677,8 @@ void CimgDecode::DrawHistogram(bool bQuiet, bool bDumpHistoY)
 
   if(bDumpHistoY)
   {
+    // Replace the previous histogram (this used to leak one per decode)
+    delete m_pDibHistY;
     m_pDibHistY = new QImage(SUBSET_HISTO_BINS * HISTO_BIN_WIDTH, HISTO_BIN_HEIGHT_MAX, QImage::Format_RGB32);
     m_pDibHistY->fill(Qt::white);
 
@@ -5511,6 +5527,9 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
   nNumPixels = (nRngY2 - nRngY1 + 1) * (nRngX2 - nRngX1 + 1);
 
   qDebug() << QString("CimgDecode::CalcChannelPreviewFull() new QImage X=%1 Y=%2").arg(m_nImgSizeX).arg(m_nImgSizeY);
+  // Replace the previous preview (this used to leak one per decode and per
+  // View > Image Chan change)
+  delete m_pDibTemp;
   m_pDibTemp = new QImage(m_nImgSizeX, m_nImgSizeY, QImage::Format_RGB32);
 
   // Step through the image

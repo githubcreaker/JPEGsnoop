@@ -408,6 +408,17 @@ case("S5_reprocess_no_file", "S5", "gui", ["ok_444.jpg"], "--reprocess-first", t
      expect="harness: done")
 case("S5_status_messages", "S5", "decode", "ok_444.jpg", "--ac", expect="status=[1-9]")
 
+# --- L: leaks -------------------------------------------------------------------
+# Re-open a 1024x768 file and re-render its preview: memory measured after the
+# first round must level off (it plateaus around 15 MB from allocator caching;
+# each leaked preview was ~3 MB, so 20 re-opens leaked 70+ MB). Not measured
+# under ASan, which keeps freed memory in quarantine.
+name = write("l_1024x768.jpg", jpeg(gradient(1024, 768), quality=85, subsampling=2))
+case("L1_reopen", "L1", "gui", name, "--repeat 21 --max-growth-mb 30", timeout=60,
+     expect="memory growth.*: ok$")
+case("L1_histograms_and_channels", "L1", "gui", name, "--histo --cycle-channels --repeat 6 --max-growth-mb 30",
+     timeout=90, expect="memory growth.*: ok$")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

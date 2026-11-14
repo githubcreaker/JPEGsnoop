@@ -216,13 +216,13 @@ void CSnoopConfig::RegistryLoad()
 
   if(!bEulaAccepted)
   {
-    Q_Eula *eulaDlg = new Q_Eula;
-    eulaDlg->exec();
+    Q_Eula eulaDlg;               // on the stack (was never deleted)
+    eulaDlg.exec();
 
-    if(eulaDlg->result())
+    if(eulaDlg.result())
     {
       bEulaAccepted = true;
-      bUpdateAuto = eulaDlg->updateStatus();
+      bUpdateAuto = eulaDlg.updateStatus();
       bDirty = true;
       RegistryStore();
     }
@@ -650,10 +650,10 @@ void CSnoopConfig::HandleAutoReprocess()
   {
     if(bCoachReprocessAuto)
     {
-      // Show the coaching dialog
-      Q_Note *note = new Q_Note(strReprocess);
-      note->exec();
-      bCoachReprocessAuto = !note->hideStatus();
+      // Show the coaching dialog (on the stack: a new one per tip used to leak)
+      Q_Note note(strReprocess);
+      note.exec();
+      bCoachReprocessAuto = !note.hideStatus();
       Dirty();
     }
   }

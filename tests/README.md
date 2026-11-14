@@ -20,10 +20,15 @@ when it is installed, so Pillow needn't be installed separately).
   - `decode <file> [--ac] [--histo] [--unknown-exif]` decodes one file in
     non-interactive mode and prints the report (`--unknown-exif` also reports
     unknown EXIF tags, which the app hides by default);
-  - `gui <file>... [--mouse] [--log] [--reprocess-first]` opens the files in the
+  - `gui <file>... [--mouse] [--log] [--reprocess-first] [--histo]
+    [--cycle-channels] [--repeat N] [--max-growth-mb N]` opens the files in the
     real `MainWindow` like a fresh install. `--mouse` moves and clicks over the
-    preview window, `--log` prints the report after each file, and
-    `--reprocess-first` runs Reprocess before opening anything;
+    preview window, `--log` prints the report after each file,
+    `--reprocess-first` runs Reprocess before opening anything, `--histo` turns
+    the histograms on, `--cycle-channels` shows every View > Image Chan channel
+    after each file, `--repeat` opens the files N times, and `--max-growth-mb`
+    reports whether memory grew by more than N MB after the first round (a leak
+    check; skipped under ASan);
   - `settings` exercises settings load/store, option toggles and the
     Configuration dialog.
 
@@ -39,8 +44,8 @@ when it is installed, so Pillow needn't be installed separately).
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
 (`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
-GUI behaviour; `XP` covers the UTF-16 EXIF tags); `ok_*` cases are valid files
-that must keep decoding.
+GUI behaviour, `L` leaks; `XP` covers the UTF-16 EXIF tags); `ok_*` cases are
+valid files that must keep decoding.
 
 ## Adding a case
 

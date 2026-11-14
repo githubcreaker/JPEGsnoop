@@ -58,7 +58,7 @@ CwindowBuf::~CwindowBuf()
 {
   if(m_pBuffer != nullptr)
   {
-    delete m_pBuffer;
+    delete[] m_pBuffer;      // allocated with new[]
 
     m_pBuffer = nullptr;
     m_bBufOK = false;

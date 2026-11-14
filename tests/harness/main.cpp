@@ -6,12 +6,17 @@
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
 //     histograms; --unknown-exif: also report unknown EXIF tags.
 //
-// gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]
+// gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
+//     [--cycle-channels] [--repeat N] [--max-growth-mb N]
 //     Build the real MainWindow, open each file in turn as File > Open does,
 //     and print a "harness:" line per file. With --mouse, move the mouse over
 //     the preview window and click at points inside, at the edges of and
 //     outside the image after each file; --log prints the report after each
-//     file; --reprocess-first runs Reprocess before opening anything.
+//     file; --reprocess-first runs Reprocess before opening anything;
+//     --histo turns the histograms on; --cycle-channels shows each
+//     View > Image Chan channel after each file; --repeat opens the files N
+//     times; --max-growth-mb reports whether memory grew by more than N MB
+//     after the first round (a leak check).
 //
 // settings
 //     Exercise settings load/store, option toggles and the Configuration
@@ -37,6 +42,12 @@
 #include <QTextStream>
 #include <cstdio>
 
+#ifdef Q_OS_MACOS
+#include <mach/mach.h>
+#else
+#include <sys/resource.h>
+#endif
+
 #include "DbSigs.h"
 #include "DocLog.h"
 #include "ImgDecode.h"
@@ -53,6 +64,7 @@ static void usage()
   fprintf(stderr,
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
+          "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
           "       jpegsnoop-harness settings\n");
 }
 
@@ -250,8 +262,53 @@ static void exerciseMouse()
   QCoreApplication::processEvents();
 }
 
-static int runGui(const QStringList &files, bool bMouse, bool bLog, bool bReprocessFirst,
-                  const QString &strSettingsDir)
+struct GuiOptions
+{
+  bool bMouse = false;            // --mouse
+  bool bLog = false;              // --log
+  bool bReprocessFirst = false;   // --reprocess-first
+  bool bHisto = false;            // --histo: RGB and Y histograms on
+  bool bCycleChannels = false;    // --cycle-channels
+  int nRepeat = 1;                // --repeat N
+  int nMaxGrowthMb = -1;          // --max-growth-mb N (-1: don't measure)
+};
+
+// Memory the process is using, as Activity Monitor shows it ("Memory")
+static double memoryMb()
+{
+#ifdef Q_OS_MACOS
+  task_vm_info_data_t info;
+  mach_msg_type_number_t nCount = TASK_VM_INFO_COUNT;
+  if(task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &nCount) != KERN_SUCCESS)
+    return 0.0;
+  return static_cast<double>(info.phys_footprint) / 1048576.0;
+#else
+  struct rusage sUsage;
+  getrusage(RUSAGE_SELF, &sUsage);
+  return static_cast<double>(sUsage.ru_maxrss) / 1024.0;    // KB on Linux
+#endif
+}
+
+// View > Image Chan: show each channel in turn (each re-renders the preview)
+static void cycleChannels(MainWindow &window)
+{
+  static const char *apszChannels[] = { "YCC", "R", "G", "B", "Y (Greyscale)", "Cb", "Cr", "RGB" };
+  const QList<QAction *> actions = window.findChildren<QAction *>();
+  for(const char *pszName : apszChannels)
+  {
+    for(QAction *pAction : actions)
+    {
+      if(pAction->text() == QLatin1String(pszName))
+      {
+        pAction->trigger();
+        QCoreApplication::processEvents();
+        break;
+      }
+    }
+  }
+}
+
+static int runGui(const QStringList &files, const GuiOptions &opts, const QString &strSettingsDir)
 {
   // Otherwise a fresh install (so "Decode Image" etc. take their defaults),
   // minus the coach tips, which are modal and can't be clicked away here
@@ -260,6 +317,11 @@ static int runGui(const QStringList &files, bool bMouse, bool bLog, bool bReproc
     QSettings settings;
     settings.setValue("Coach\\ReprocessAuto", false);
     settings.setValue("Coach\\DecodeIdct", false);
+    if(opts.bHisto)
+    {
+      settings.setValue("General\\DecScanHisto", true);
+      settings.setValue("General\\DumpHistoY", true);
+    }
   }
 
   MainWindow window;
@@ -270,28 +332,58 @@ static int runGui(const QStringList &files, bool bMouse, bool bLog, bool bReproc
 
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
-  if(bReprocessFirst)
+  if(opts.bReprocessFirst)
   {
     window.reprocess();
     out << "harness: reprocessed with no file\n";
   }
 
-  for(const QString &strFile : files)
+  double dMemAfterFirst = 0.0;
+
+  for(int nRound = 0; nRound < opts.nRepeat; nRound++)
   {
-    window.openFile(strFile);
-    QCoreApplication::processEvents();
+    for(const QString &strFile : files)
+    {
+      window.openFile(strFile);
+      QCoreApplication::processEvents();
 
-    const QString strLog = window.textEdit->toPlainText();
-    out << QString("harness: file=%1 scan=%2\n")
-             .arg(QFileInfo(strFile).fileName())
-             .arg(strLog.contains("*** Decoding SCAN Data ***") ? 1 : 0);
-    if(bLog)
-      out << strLog << "\n";
-    out.flush();
+      if(nRound == 0)
+      {
+        const QString strLog = window.textEdit->toPlainText();
+        out << QString("harness: file=%1 scan=%2\n")
+                 .arg(QFileInfo(strFile).fileName())
+                 .arg(strLog.contains("*** Decoding SCAN Data ***") ? 1 : 0);
+        if(opts.bLog)
+          out << strLog << "\n";
+        out.flush();
+      }
 
-    if(bMouse)
-      exerciseMouse();
+      if(opts.bMouse)
+        exerciseMouse();
+      if(opts.bCycleChannels)
+        cycleChannels(window);
+    }
+
+    // Measure from the end of the first round, once caches have warmed up
+    if(nRound == 0)
+      dMemAfterFirst = memoryMb();
   }
+
+  if(opts.nMaxGrowthMb >= 0)
+  {
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+    // ASan keeps freed memory in quarantine, so growth means nothing here
+    out << "harness: memory growth not measured under AddressSanitizer: ok\n";
+#else
+    const double dGrowth = memoryMb() - dMemAfterFirst;
+    out << QString("harness: memory growth %1 MB over %2 more rounds (limit %3 MB): %4\n")
+             .arg(dGrowth, 0, 'f', 1)
+             .arg(opts.nRepeat - 1)
+             .arg(opts.nMaxGrowthMb)
+             .arg(dGrowth <= opts.nMaxGrowthMb ? "ok" : "too much");
+#endif
+  }
+
   out << "harness: done\n";
   return 0;
 }
@@ -316,9 +408,32 @@ int main(int argc, char **argv)
   const bool bAc = args.removeAll("--ac") > 0;
   const bool bHisto = args.removeAll("--histo") > 0;
   const bool bUnknownExif = args.removeAll("--unknown-exif") > 0;
-  const bool bMouse = args.removeAll("--mouse") > 0;
-  const bool bLog = args.removeAll("--log") > 0;
-  const bool bReprocessFirst = args.removeAll("--reprocess-first") > 0;
+  GuiOptions guiOpts;
+  guiOpts.bMouse = args.removeAll("--mouse") > 0;
+  guiOpts.bLog = args.removeAll("--log") > 0;
+  guiOpts.bReprocessFirst = args.removeAll("--reprocess-first") > 0;
+  guiOpts.bHisto = bHisto;
+  guiOpts.bCycleChannels = args.removeAll("--cycle-channels") > 0;
+
+  // Options with a numeric value
+  for(const char *pszOpt : { "--repeat", "--max-growth-mb" })
+  {
+    const int nInd = args.indexOf(QLatin1String(pszOpt));
+    if(nInd < 0)
+      continue;
+    bool bOk = false;
+    const int nVal = (nInd + 1 < args.size()) ? args.at(nInd + 1).toInt(&bOk) : 0;
+    if(!bOk || nVal < 0)
+    {
+      usage();
+      return 2;
+    }
+    args.remove(nInd, 2);
+    if(QLatin1String(pszOpt) == QLatin1String("--repeat"))
+      guiOpts.nRepeat = qMax(1, nVal);
+    else
+      guiOpts.nMaxGrowthMb = nVal;
+  }
 
   QTemporaryDir tmpDir;
   if(!tmpDir.isValid())
@@ -330,7 +445,7 @@ int main(int argc, char **argv)
   if(strMode == "decode" && args.size() == 1)
     return runDecode(args.first(), bAc, bHisto, bUnknownExif, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
-    return runGui(args, bMouse, bLog, bReprocessFirst, tmpDir.path());
+    return runGui(args, guiOpts, tmpDir.path());
   if(strMode == "settings" && args.isEmpty())
     return runSettings(tmpDir.path());
 

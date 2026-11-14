@@ -471,6 +471,7 @@ void CDbSigs::DatabaseExtraLoad()
 		// Notify user
     strTmp = QString("Created default User Signature Database. Backup of old DB in [%1]").arg(m_strDbDir + QString(DAT_FILE) + ".bak");
 //@@		AfxMessageBox(strTmp);
+    delete[] pBuf;              // (was leaked on this path)
 		return;
 	}
 	
