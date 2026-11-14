@@ -29,6 +29,14 @@ QString Uint2DotByte(uint32_t nVal);
 bool TestBit(uint32_t nVal, uint32_t nBit);
 //QString ByteStr2Unicode(quint8* pBuf, uint32_t nBufLen);
 bool Str2Uint32(QString strVal, uint32_t nBase, uint32_t & nVal);
+
+// Printable ASCII (0x20-0x7E). Use this rather than isprint(), which accepts
+// bytes above 0x7F in a UTF-8 locale (Qt sets the user's locale at startup);
+// master's Windows build showed those bytes as '.' or left them out.
+inline bool IsPrintAscii(uint32_t nVal)
+{
+  return (nVal >= 0x20) && (nVal < 0x7F);
+}
 //bool Uni2AscBuf(quint8* pBuf,QString strIn,uint32_t nMaxBytes,uint32_t &nOffsetBytes);
 
 // General Global Constants

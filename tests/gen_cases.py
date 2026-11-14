@@ -229,6 +229,170 @@ case("U2_undecodable_after_decoded", "U2", "gui", ["ok_444.jpg", "ok_progressive
      expect="harness: done")
 case("U3_mouse_small_image", "U3", "gui", ["ok_small.jpg"], "--mouse", timeout=30, expect="harness: done")
 
+
+# --- R: report output (port regressions) --------------------------------------
+# Minimal TIFF/EXIF builder: each IFD sits at a fixed offset with its
+# out-of-line values right after it.
+def tiff_ifd(bo, base, entries, next_off=0):
+    """entries: (tag, type, count, payload bytes); payloads over 4 bytes are stored after the IFD."""
+    data_off = base + 2 + 12 * len(entries) + 4
+    out, data = struct.pack(bo + "H", len(entries)), b""
+    for tag, typ, count, payload in sorted(entries):
+        if len(payload) <= 4:
+            field = payload.ljust(4, b"\x00")
+        else:
+            field = struct.pack(bo + "I", data_off + len(data))
+            data += payload + (b"\x00" if len(payload) % 2 else b"")
+        out += struct.pack(bo + "HHI", tag, typ, count) + field
+    return out + struct.pack(bo + "I", next_off) + data
+
+
+def tiff(bo, ifds):
+    """ifds: {offset: bytes}. Returns the TIFF block (header + IFDs)."""
+    hdr = (b"II*\x00" if bo == "<" else b"MM\x00*") + struct.pack(bo + "I", 8)
+    size = max(off + len(b) for off, b in ifds.items())
+    t = bytearray(size)
+    t[0:8] = hdr
+    for off, b in ifds.items():
+        assert all(x == 0 for x in t[off:off + len(b)]), "IFD overlap"
+        t[off:off + len(b)] = b
+    return bytes(t)
+
+
+def ascii_(s):
+    return (2, len(s) + 1, s.encode("latin-1") + b"\x00")
+
+
+def shorts(bo, *v):
+    return (3, len(v), struct.pack(bo + "H" * len(v), *v))
+
+
+def longs(bo, *v):
+    return (4, len(v), struct.pack(bo + "I" * len(v), *v))
+
+
+def rationals(bo, *v):
+    return (5, len(v), b"".join(struct.pack(bo + "II", n, d) for n, d in v))
+
+
+def entry(tag, value):
+    return (tag,) + value
+
+
+def app1_exif(t):
+    return seg(0xE1, b"Exif\x00\x00" + t)
+
+
+# EXIF with GPS, an unknown GPS tag, a 2-value ISO, a light source and an XP tag
+bo = "<"
+SUB, GPS = 0x100, 0x200
+xp = "Hello XP comment".encode("utf-16-le") + b"\x00\x00"
+ifd0 = tiff_ifd(bo, 8, [entry(0x010F, ascii_("TestMake")), entry(0x0110, ascii_("TestModel")),
+                        (0x9C9C, 1, len(xp), xp), entry(0x8769, longs(bo, SUB)), entry(0x8825, longs(bo, GPS))])
+sub = tiff_ifd(bo, SUB, [entry(0x8827, shorts(bo, 100, 200)), entry(0x9208, shorts(bo, 12))])
+gps = tiff_ifd(bo, GPS, [(0x0000, 1, 4, bytes([2, 2, 0, 0])), entry(0x0001, ascii_("N")),
+                         entry(0x0002, rationals(bo, (37, 1), (48, 1), (3012, 100))),
+                         entry(0x0006, rationals(bo, (1234, 10))),
+                         entry(0x0007, rationals(bo, (12, 1), (34, 1), (5678, 100))),
+                         entry(0x000D, rationals(bo, (555, 10))),
+                         entry(0x0050, shorts(bo, 7))])
+name = write("r_exif.jpg", insert_after_app0(c444, app1_exif(tiff(bo, {8: ifd0, SUB: sub, GPS: gps}))))
+for cid, finding, pattern in (
+        ("R1_gps_latitude", "R1", "37 deg 48' 30\\.120\""),
+        ("R1_gps_altitude", "R1", "GPSAltitude +\\] = 123\\.400 m"),
+        ("R1_gps_timestamp", "R1", "GPSTimeStamp +\\] = 12:34:56\\.78"),
+        ("R1_gps_speed", "R1", "GPSSpeed +\\] = 55\\.500"),
+        ("R11_two_shorts", "R11", "ISOSpeedRatings +\\] = 100, 200"),
+        ("R12_unknown_gps_tag", "R12", "GPS\\.0x0050"),
+        ("R19_light_source", "R19", "Daylight fluorescent \\(D 5700 - 7100K\\)"),
+        ("XP_unicode_tag", "XP", "Hello XP comment")):
+    case(cid, finding, "decode", name, "--unknown-exif", expect=pattern)
+
+# JPEG comment from known editing software
+com = seg(0xFE, b"CREATOR: gd-jpeg v1.0 (using IJG JPEG v62), quality = 80")
+name = write("r_comment.jpg", insert_after_app0(c444, com))
+case("R2_comment_text", "R2", "decode", name, expect="Comment=CREATOR: gd-jpeg v1\\.0")
+case("R8_comment_known_software", "R8", "decode", name, expect="JFIF COMMENT field is known software")
+
+# Photoshop IRB: IPTC, Unicode version info, a slices v7 descriptor, a URL
+ip = iptc(2, 5, b"Hello World") + iptc(2, 120, b"A caption")
+case("R3_iptc_value", "R3", "decode", write("r_iptc.jpg", app13_only(bim(0x0404, ip))),
+     expect="IPTC \\[002:005\\] Object Name +=\\s+\"Hello World\"")
+
+
+def uni(s):
+    return struct.pack(">I", len(s)) + s.encode("utf-16-be")
+
+
+vinfo = struct.pack(">I", 1) + b"\x01" + uni("Adobe Photoshop") + uni("Adobe Photoshop 2024") + struct.pack(">I", 1)
+case("R5_photoshop_unicode", "R5", "decode", write("r_ps_version.jpg", app13_only(bim(0x0421, vinfo))),
+     expect="Adobe Photoshop 2024")
+
+
+def lstr4(s):
+    return struct.pack(">I", 0) + s
+
+
+desc = (uni("") + lstr4(b"null") + struct.pack(">I", 2) + lstr4(b"Vrsn") + b"long" + struct.pack(">I", 1)
+        + lstr4(b"Nm  ") + b"TEXT" + uni("Hi"))
+name = write("r_ps_slices7.jpg", app13_only(bim(0x041A, struct.pack(">II", 7, 16) + desc)))
+case("R4_photoshop_ostype", "R4", "decode", name, expect="OSType key += \"?TEXT", forbid="Parsing offset length mismatch")
+
+url = b"http://example.com/abc"
+case("R19_hexdump_header", "R19", "decode", write("r_ps_url.jpg", app13_only(bim(0x040B, url))),
+     forbid="s =$")
+
+# Canon makernote saying the file came from a RAW converter (edit assessment)
+bo = ">"
+SUB, MK, D = 0x40, 0x80, 0xC0
+itype = b"CRW:EOS 300D DIGITAL CMOS RAW\x00"
+ifd0 = tiff_ifd(bo, 8, [entry(0x010F, ascii_("Canon")), entry(0x8769, longs(bo, SUB))])
+sub = tiff_ifd(bo, SUB, [(0x927C, 7, 64, struct.pack(bo + "I", MK))])
+mk = tiff_ifd(bo, MK, [(0x0006, 2, len(itype), struct.pack(bo + "I", D))])
+t = bytearray(tiff(bo, {8: ifd0, SUB: sub, MK: mk}))
+t += bytes(D + len(itype) - len(t)) if len(t) < D + len(itype) else b""
+t[D:D + len(itype)] = itype
+case("R6_raw_converter", "R6", "decode", write("r_canon_crw.jpg", insert_after_app0(c444, app1_exif(bytes(t)))),
+     expect="Additional EXIF fields indicate software processing")
+
+# Portrait 4:2:2 reports 1x2
+case("R7_portrait_subsampling", "R7", "decode",
+     write("r_portrait_422.jpg", jpeg(gradient(48, 64), quality=90, subsampling=1)),
+     expect="Chroma subsampling: +1x2")
+
+# Camera exception list: a SONY model that isn't an exception, without makernotes
+bo = "<"
+ifd0 = tiff_ifd(bo, 8, [entry(0x010F, ascii_("SONY")), entry(0x0110, ascii_("ILCE-7M3"))])
+case("R9_exception_list", "R9", "decode",
+     write("r_sony_no_makernote.jpg", insert_after_app0(c444, app1_exif(tiff(bo, {8: ifd0})))),
+     expect="ASSESSMENT: Class 2")
+
+# DAC numbering, AVI timestamp/sample rate, ICC four-character codes
+case("R19_dac_index", "R19", "decode",
+     write("r_dac.jpg", insert_after_app0(c444, seg(0xCC, bytes([0x10, 0x01])))),
+     expect="#01: Table destination identifier")
+
+
+def chunk(fourcc, data):
+    return fourcc + struct.pack("<I", len(data)) + data + (b"\x00" if len(data) % 2 else b"")
+
+
+strh = b"vidsMJPG" + struct.pack("<11I", 0, 0, 0, 1, 30, 0, 10, 0, 0, 0, 0) + bytes(4)
+strl = b"strl" + chunk(b"strh", strh) + chunk(b"strf", bytes(40)) + chunk(b"strn", b"Video\x00")
+avi_body = (b"AVI " + chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56)))
+            + chunk(b"LIST", strl) + chunk(b"IDIT", b"THU OCT 13 12:00:00 2016\n\x00"))
+name = write("r_avi.avi", b"RIFF" + struct.pack("<I", len(avi_body)) + avi_body)
+case("R19_avi_sample_rate", "R19", "decode", name, expect="Sample Rate\\]  = \\[30\\.00\\]")
+case("R19_avi_timestamp", "R19", "decode", name, expect="Timestamp\\] = \\[THU OCT 13 12:00:00 2016\\]")
+
+icc = bytearray(128)
+struct.pack_into(">I", icc, 0, 128)
+icc[4:8], icc[12:16], icc[16:20], icc[20:24], icc[36:40] = b"appl", b"mntr", b"RGB ", b"XYZ ", b"acsp"
+icc[8:12] = bytes([4, 0, 0, 0])
+app2 = seg(0xE2, b"ICC_PROFILE\x00" + bytes([1, 1]) + bytes(icc))
+case("R19_icc_fourcc", "R19", "decode", write("r_icc.jpg", insert_after_app0(c444, app2)),
+     expect="'RGB ' \\(0x52474220\\)")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

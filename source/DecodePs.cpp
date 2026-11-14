@@ -21,6 +21,7 @@
 #include<cwchar>
 
 #include "DecodePs.h"
+#include "General.h"
 #include "snoop.h"
 //#include "JPEGsnoop.h"          // for m_pAppConfig get
 #include "SnoopConfig.h"
@@ -566,8 +567,7 @@ QString CDecodePs::DecodeIptcValue(teIptcType eIptcType, uint32_t nFldCnt, uint3
 
       for(nInd = 0; nInd < nFldCnt; nInd++)
       {
-        strByte = QString("%1").arg(Buf(nPos++));
-        strVal += strByte;
+        strVal += QChar(Buf(nPos++));     // the character, not its code
       }
 
       strVal += "\"";
@@ -637,7 +637,8 @@ void CDecodePs::DecodeIptc(uint32_t &nPos, uint32_t nLen, uint32_t nIndent)
       }
 
       strIptcVal = DecodeIptcValue(eIptcType, nDataFieldCnt, nPos);
-      strTmp = QString("IPTC [%1:%2] %3 = %4").arg(strIndent)
+      // The indent has its own placeholder (it took %1 and dropped the value)
+      strTmp = QString("%1IPTC [%2:%3] %4 = %5").arg(strIndent)
           .arg(nRecordNumber, 3, 10, QChar('0'))
           .arg(nDataSetNumber, 3, 10, QChar('0'))
           .arg(strIptcField)
@@ -714,11 +715,8 @@ QString CDecodePs::PhotoshopParseGetLStrAsc(uint32_t &nPos)
   else
   {
     // 4 byte string
-    strVal = QString("%1%2%3%4")
-        .arg(Buf(nPos + 0))
-        .arg(Buf(nPos + 1))
-        .arg(Buf(nPos + 2))
-        .arg(Buf(nPos + 3));
+    // Four characters (master: %c%c%c%c), not their codes
+    strVal = QString(QChar(Buf(nPos + 0))) + QChar(Buf(nPos + 1)) + QChar(Buf(nPos + 2)) + QChar(Buf(nPos + 3));
     nPos += 4;
   }
 
@@ -738,12 +736,6 @@ QString CDecodePs::PhotoshopParseGetBimLStrUni(uint32_t nPos, uint32_t &nPosOffs
 
   uint32_t nStrLenActual, nStrLenTrunc;
 
-  char anStrBuf[(PS_MAX_UNICODE_STRLEN + 1) * 2];
-
-//  wchar_t acStrBuf[(PS_MAX_UNICODE_STRLEN + 1)];
-
-  char nChVal;
-
   nPosOffset = 0;
   nStrLenActual = m_pWBuf->BufX(nPos + nPosOffset, 4, PS_BSWAP);
   nPosOffset += 4;
@@ -754,31 +746,27 @@ QString CDecodePs::PhotoshopParseGetBimLStrUni(uint32_t nPos, uint32_t &nPosOffs
 
   if(nStrLenTrunc > 0)
   {
-    // Read unicode bytes into byte array
-    // Truncate the string, leaving room for terminator
+    // Truncate overly long strings
     if(nStrLenTrunc > PS_MAX_UNICODE_STRLEN)
     {
       nStrLenTrunc = PS_MAX_UNICODE_STRLEN;
     }
 
+    // Big-endian UTF-16 code units, up to a NUL terminator. (Building the
+    // QString from the bytes as a C string stopped at the first zero byte,
+    // so ASCII text came out as its first character.)
     for(uint32_t nInd = 0; nInd < nStrLenTrunc; nInd++)
     {
-      // Reverse the order of the bytes
-      nChVal = Buf(nPos + nPosOffset + (nInd * 2) + 0);
-      anStrBuf[(nInd * 2) + 1] = nChVal;
-      nChVal = Buf(nPos + nPosOffset + (nInd * 2) + 1);
-      anStrBuf[(nInd * 2) + 0] = nChVal;
-    }
+      const char16_t nUnit = static_cast<char16_t>((Buf(nPos + nPosOffset + (nInd * 2) + 0) << 8) |
+                                                   Buf(nPos + nPosOffset + (nInd * 2) + 1));
 
-    // TODO: Replace with call to ByteStr2Unicode()
-    // Ensure it is terminated
-    anStrBuf[nStrLenTrunc * 2 + 0] = 0;
-    anStrBuf[nStrLenTrunc * 2 + 1] = 0;
-    // Copy into unicode string
-    // Ensure that it is terminated first!
-//    wcscpy(acStrBuf,anStrBuf);
-    // Copy into QString
-    strVal = QString(anStrBuf);
+      if(nUnit == 0)
+      {
+        break;
+      }
+
+      strVal += QChar(nUnit);
+    }
   }
 
   // Update the file position offset
@@ -878,7 +866,7 @@ void CDecodePs::PhotoshopParseReportFldHex(uint32_t nIndent, QString strField, u
   else
   {
     // Print out header row
-    strLine = QString("%1%2s =").arg(strIndent).arg(strField, -50);
+    strLine = QString("%1%2 =").arg(strIndent).arg(strField, -50);
     m_pLog->AddLine(strLine);
     // Define prefix for next row
     strPrefix = QString("%1").arg(strIndent);
@@ -918,9 +906,9 @@ void CDecodePs::PhotoshopParseReportFldHex(uint32_t nIndent, QString strField, u
           strByteHex = QString("%1 ").arg(nByte, 2, 16, QChar('0'));
 
           // Only display printable characters
-          if(isprint(nByte))
+          if(IsPrintAscii(nByte))
           {
-            strByteAsc = QString("%1").arg(nByte);
+            strByteAsc = QChar(nByte);   // the character, not its code
           }
           else
           {
@@ -980,9 +968,9 @@ QString CDecodePs::PhotoshopDispHexWord(uint32_t nVal)
     strByteHex = QString("%1 ").arg(nByte, 2, 16, QChar('0'));
 
     // Only display printable characters
-    if(isprint(nByte))
+    if(IsPrintAscii(nByte))
     {
-      strByteAsc = QString("%1").arg(nByte);
+      strByteAsc = QChar(nByte);   // the character, not its code
     }
     else
     {
@@ -3429,11 +3417,8 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
 
     QString strOsType;
 
-    strOsType = QString("%1%2%3%4")
-        .arg(Buf(nPos + 0))
-        .arg(Buf(nPos + 1))
-        .arg(Buf(nPos + 2))
-        .arg(Buf(nPos + 3));
+    // Four characters (master: %c%c%c%c), not their codes
+    strOsType = QString(QChar(Buf(nPos + 0))) + QChar(Buf(nPos + 1)) + QChar(Buf(nPos + 2)) + QChar(Buf(nPos + 3));
     nPos += 4;
     PhotoshopParseReportFldStr(nIndent + 1, "OSType key", strOsType);
 
@@ -3484,11 +3469,8 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
 
     QString strOsType;
 
-    strOsType = QString("%1%2%3%4")
-        .arg(Buf(nPos + 0))
-        .arg(Buf(nPos + 1))
-        .arg(Buf(nPos + 2))
-        .arg(Buf(nPos + 3));
+    // Four characters (master: %c%c%c%c), not their codes
+    strOsType = QString(QChar(Buf(nPos + 0))) + QChar(Buf(nPos + 1)) + QChar(Buf(nPos + 2)) + QChar(Buf(nPos + 3));
     nPos += 4;
     PhotoshopParseReportFldStr(nIndent + 1, "OSType key", strVal);
 

@@ -3661,7 +3661,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   for(uint32_t nMcuY = nDecMcuRowStart; nMcuY < nDecMcuRowEndFinal; nMcuY++)
   {
     // Set the statusbar text to Processing...
-    strTmp = QString("Decoding Scan Data... Row %1 of %2 (%3%%)")
+    strTmp = QString("Decoding Scan Data... Row %1 of %2 (%3%)")
         .arg(nMcuY, 4, 10, QChar('0'))
         .arg(m_nMcuYMax, 4, 10, QChar('0'))
         .arg(nMcuY * 100.0 / m_nMcuYMax, 3, 'f', 0);
@@ -4634,8 +4634,9 @@ void CimgDecode::DrawHistogram(bool bQuiet, bool bDumpHistoY)
         for(int32_t bin_width = 0; bin_width < HISTO_BIN_WIDTH; bin_width++)
         {
           nHistoX = (i * HISTO_BIN_WIDTH) + bin_width;
-          //            nCoordY = ((2 - nHistChan) * HISTO_BIN_HEIGHT_MAX) + y;
-          nCoordY = (rgbHistOffset - y) -1;
+          // Bars rise from the bottom row of the channel's band
+          // (rgbHistOffset); a full bar fills exactly the band
+          nCoordY = rgbHistOffset - y;
           m_pDibHistRgb->setPixelColor(nHistoX, nCoordY, QColor((nHistChan == CHAN_R) ? 255 : 0, (nHistChan == CHAN_G) ? 255 : 0, (nHistChan == CHAN_B) ? 255 : 0));
         }
       }

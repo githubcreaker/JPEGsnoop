@@ -20,6 +20,7 @@
 #include <QString>
 
 #include "WindowBuf.h"
+#include "General.h"
 
 // Constructor for WindowBuf class
 // - Allocates storage for the buffer
@@ -193,7 +194,7 @@ bool CwindowBuf::BufSearch(uint32_t nStartPos, uint32_t nSearchVal, uint32_t nSe
         tmLast = tmNow;
         float fProgress = (nCurPos * 100.0f) / m_nPosEof;
 
-        strStatus = QString("Searching %3.f%% (%lu of %lu)...").arg(fProgress).arg(nCurPos).arg(m_nPosEof);
+        strStatus = QString("Searching %1% (%2 of %3)...").arg(fProgress, 3, 'f', 0).arg(nCurPos).arg(m_nPosEof);
         m_pStatBar->showMessage(strStatus);
       }
     }
@@ -344,7 +345,7 @@ bool CwindowBuf::BufSearchX(uint32_t nStartPos, unsigned char *anSearchVal, uint
         tmLast = tmNow;
         float fProgress = (nCurPos * 100.0f) / m_nPosEof;
 
-        strStatus = QString("Searching %3.f%% (%lu of %lu)...").arg(fProgress).arg(nCurPos).arg(m_nPosEof);
+        strStatus = QString("Searching %1% (%2 of %3)...").arg(fProgress, 3, 'f', 0).arg(nCurPos).arg(m_nPosEof);
         m_pStatBar->showMessage(strStatus);
       }
     }
@@ -580,12 +581,19 @@ void CwindowBuf::ReportOverlays(CDocLog *pLog)
     {
       if(m_psOverlay[ind])
       {
+        // Qt placeholders (this still had master's printf format, which
+        // QString::arg doesn't understand)
         strTmp =
-          QString("    %03u: MCU[%4u,%4u] MCU DelLen=[%2u] InsLen=[%2u] DC Offset YCC=[%5d,%5d,%5d] Overlay Byte Len=[%4u]").
-          arg(ind).arg(m_psOverlay[ind]->nMcuX).arg(m_psOverlay[ind]->nMcuY).arg(m_psOverlay[ind]->nMcuLen).arg(m_psOverlay[ind]->
-                                                                                                                nMcuLenIns).
-          arg(m_psOverlay[ind]->nDcAdjustY).arg(m_psOverlay[ind]->nDcAdjustCb).arg(m_psOverlay[ind]->nDcAdjustCr).
-          arg(m_psOverlay[ind]->nLen);
+          QString("    %1: MCU[%2,%3] MCU DelLen=[%4] InsLen=[%5] DC Offset YCC=[%6,%7,%8] Overlay Byte Len=[%9]")
+          .arg(ind, 3, 10, QChar('0'))
+          .arg(m_psOverlay[ind]->nMcuX, 4)
+          .arg(m_psOverlay[ind]->nMcuY, 4)
+          .arg(m_psOverlay[ind]->nMcuLen, 2)
+          .arg(m_psOverlay[ind]->nMcuLenIns, 2)
+          .arg(m_psOverlay[ind]->nDcAdjustY, 5)
+          .arg(m_psOverlay[ind]->nDcAdjustCb, 5)
+          .arg(m_psOverlay[ind]->nDcAdjustCr, 5)
+          .arg(m_psOverlay[ind]->nLen, 4);
         pLog->AddLine(strTmp);
       }
     }
@@ -1036,7 +1044,7 @@ QString CwindowBuf::BufReadStr(uint32_t nPosition)
   {
     cRd = Buf(nPosition + nIndex);
     // Only add if printable
-    if(isprint(cRd))
+    if(IsPrintAscii(cRd))
     {
       strRd += QChar(cRd);
     }
@@ -1112,26 +1120,18 @@ QString CwindowBuf::BufReadUniStr(uint32_t nPosition)
 #define MAX_UNICODE_STRLEN	255
 QString CwindowBuf::BufReadUniStr2(uint32_t nPos, uint32_t nBufLen)
 {
-  // Convert byte array into unicode string
-  // TODO: Replace with call to ByteStr2Unicode()
-
-  bool bByteSwap = false;
+  // Read a little-endian UTF-16 string of up to nBufLen code units (at most
+  // MAX_UNICODE_STRLEN), stopping at a NUL terminator, as master did with
+  // lstrcpyW. (Building the QString from the bytes as a C string stopped at
+  // the first zero byte, so ASCII text came out as its first character.)
 
   QString strVal;
 
   uint32_t nStrLenTrunc;
 
-  unsigned char nChVal;
-
-  unsigned char anStrBuf[(MAX_UNICODE_STRLEN + 1) * 2];
-
-  wchar_t acStrBuf[(MAX_UNICODE_STRLEN + 1)];
-
   // Start with length before any truncation
   nStrLenTrunc = nBufLen;
 
-  // Read unicode bytes into byte array
-  // Truncate the string, leaving room for terminator
   if(nStrLenTrunc > MAX_UNICODE_STRLEN)
   {
     nStrLenTrunc = MAX_UNICODE_STRLEN;
@@ -1139,32 +1139,15 @@ QString CwindowBuf::BufReadUniStr2(uint32_t nPos, uint32_t nBufLen)
 
   for(uint32_t nInd = 0; nInd < nStrLenTrunc; nInd++)
   {
-    if(bByteSwap)
-    {
-      // Reverse the order of the bytes
-      nChVal = Buf(nPos + (nInd * 2) + 0);
-      anStrBuf[(nInd * 2) + 1] = nChVal;
-      nChVal = Buf(nPos + (nInd * 2) + 1);
-      anStrBuf[(nInd * 2) + 0] = nChVal;
-    }
-    else
-    {
-      // No byte reversal
-      nChVal = Buf(nPos + (nInd * 2) + 0);
-      anStrBuf[(nInd * 2) + 0] = nChVal;
-      nChVal = Buf(nPos + (nInd * 2) + 1);
-      anStrBuf[(nInd * 2) + 1] = nChVal;
-    }
-  }
+    const char16_t nUnit = static_cast<char16_t>(Buf(nPos + (nInd * 2) + 0) | (Buf(nPos + (nInd * 2) + 1) << 8));
 
-  // Ensure it is terminated
-  anStrBuf[nStrLenTrunc * 2 + 0] = 0;
-  anStrBuf[nStrLenTrunc * 2 + 1] = 0;
-  // Copy into unicode string
-  // Ensure that it is terminated first!
-//  lstrcpyW(acStrBuf, (LPCWSTR) anStrBuf);
-  // Copy into QString
-  strVal = QString(reinterpret_cast<char *>(anStrBuf));
+    if(nUnit == 0)
+    {
+      break;
+    }
+
+    strVal += QChar(nUnit);
+  }
 
   return strVal;
 }
@@ -1196,7 +1179,7 @@ QString CwindowBuf::BufReadStrn(uint32_t nPosition, uint32_t nLen)
     for(uint32_t nInd = 0; ((!bDone) && (nInd < nLen)); nInd++)
     {
       cRd = Buf(nPosition + nInd);
-      if(isprint(cRd))
+      if(IsPrintAscii(cRd))
       {
         strRd += QChar(cRd);
       }

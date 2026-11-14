@@ -27,26 +27,50 @@ as reviewed, before the fixes below.
 
 ## Fix status
 
+### Crashes and hangs (commit `3fdd556`)
+
 **Fixed**, each covered by a case in `tests/run-tests.sh` (see [tests/README.md](../tests/README.md)):
 - **Crashes:** C1–C6, and from C7 the DHT statistics divide-by-zero.
 - **Hangs:** H1–H8.
 - **GUI:** U1–U3.
 - **Also:** R7 (portrait subsampling), fixed with C5 on the same lines.
 
-All 32 test cases pass with and without ASan/UBSan.
-
-**Wider checks:**
+**Checks:**
+- **Tests:** all 32 cases at the time passed with and without ASan/UBSan.
 - **Reviewers' files:** all 78 crafted files from the review run clean under the sanitizers.
 - **3,273-file corpus:** no AddressSanitizer errors (180 before) and no hangs. The only
   reports left are the open C7 items.
 - **Slow, not hung:** five files with a 65535-pixel side exceeded the 60 s limit of the
   unoptimised sanitizer build; a normal build decodes them in 2–13 s.
+- **Valid files unaffected:** decode reports before and after these fixes are identical
+  for 21 valid JPEGs.
 
-**Valid files are unaffected:** decode reports before and after the fixes are identical
-for 21 valid JPEGs.
+### Wrong-output port regressions
 
-**Still open:** the rest of C7; R1–R6 and R8–R19; U4; S1–S5; the macOS items; leaks;
-latent code.
+**Fixed:** R1–R6, R8–R12, R16, R19 and the UTF-16 EXIF tags (`XPTitle`, `XPComment`,
+`XPAuthor`, `XPKeywords`) from section 8. Found and fixed along the way:
+- The signed-short pair at `JfifDecode.cpp:3274` printed its first value twice (inherited).
+- ICC four-character codes lost master's `0x` prefix, and `Uint2Chars` let a `%` in the
+  file bytes be substituted.
+- Printable-character checks used `isprint()`. That accepts bytes above 0x7F in the UTF-8
+  locale Qt sets at startup, while master's Windows build showed them as `.`; a
+  locale-independent ASCII check is now used everywhere.
+- Same printf-style formats in code the UI doesn't reach yet: WindowBuf search status and
+  overlay report, the user-DB save error, export progress, and a DICOM-only message.
+
+21 new cases check the corrected output (53 in all).
+
+**Checks:**
+- **Tests catch the bugs:** run against the previous commit, 20 of the 21 new cases
+  fail. The exception is R7, already fixed there.
+- **All 53 pass** with and without ASan/UBSan.
+- **No runtime format warnings:** Qt's "QString::arg: Argument missing" no longer appears
+  for any of 126 test files (21 warning lines before).
+- **Expected changes only:** decode reports of 21 valid JPEGs change only where intended:
+  GPS values, ICC codes and non-ASCII bytes in hex-dump text columns.
+
+**Still open:** the rest of C7; the inherited R13–R15, R17 and R18; U4; S1–S5; the macOS
+items; leaks; latent code.
 
 ## How this was reviewed
 

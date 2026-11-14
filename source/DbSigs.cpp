@@ -686,7 +686,7 @@ void CDbSigs::DatabaseExtraStore()
   if(pOutFile.open(QIODevice::WriteOnly) == false)
 	{
     QString		strError;
-    strError = QString("ERROR: Couldn't open file: [%s]").arg(pOutFile.errorString());
+    strError = QString("ERROR: Couldn't open file: [%1]").arg(pOutFile.errorString());
     qDebug() << (strError);
 //@@		AfxMessageBox(strError);
 		return;
@@ -851,7 +851,8 @@ bool CDbSigs::SearchCom(QString strCom)
   {
     for(int i = 0; i < m_sXComSwList.size(); i++)
     {
-      if(m_sXComSwList.at(i).contains(strCom))
+      // Does the comment mention this software? (master: strCom.Find(entry))
+      if(strCom.contains(m_sXComSwList.at(i)))
       {
         bFound = true;
         break;
@@ -968,33 +969,23 @@ bool CDbSigs::LookupExcMmNoMkr(QString strMake,QString strModel)
       if (m_sExcMmNoMkrList[nInd].strXMake == strMake)
       {
         // Make matched, now check to see if we need to compare the Model string
-        if (m_sExcMmNoMkrList[nInd].strXModel != strModel)
+        const QString &strXModel = m_sExcMmNoMkrList[nInd].strXModel;
+
+        if (strXModel.isEmpty())
         {
-					// No need to compare, we're bDone
+					// No model in the entry: any model of this make matches
 					bFound = true;
 					bDone = true;
         }
         else
         {
-          // Need to check model as well. Since we may like to do a substring match, support wildcards
+          // Need to check model as well. Since we may like to do a substring match, support wildcards.
+          // As in master (_tcsnccmp): compare the entry up to its "*" (or all
+          // of it) with the same leading part of the model.
+          const qsizetype nWildcard = strXModel.indexOf(QChar('*'));
+          const qsizetype nCompareLen = (nWildcard != -1) ? nWildcard : strXModel.size();
 
-          // Find position of "*" if it exists in DB entry
-          int pWildcard;
-          uint32_t nCompareLen;
-          pWildcard = m_sExcMmNoMkrList[nInd].strXModel.indexOf(QChar('*'));
-
-          if (pWildcard != -1)
-          {
-						// Wildcard present
-            nCompareLen = m_sExcMmNoMkrList[nInd].strXModel.size() - pWildcard;  //!! - 1
-          }
-          else
-          {
-						// No wildcard, do full match
-            nCompareLen = m_sExcMmNoMkrList[nInd].strXModel.size();
-					}
-
-          if (m_sExcMmNoMkrList[nInd].strXModel.left(nCompareLen) == strModel)
+          if (strXModel.left(nCompareLen) == strModel.left(nCompareLen))
           {
 						// Matched as well, we're bDone
 						bFound = true;

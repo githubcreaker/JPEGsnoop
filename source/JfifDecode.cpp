@@ -1039,7 +1039,7 @@ CStr2 CjfifDecode::LookupMakerCanonTag(uint32_t nMainTag, uint32_t nSubTag, uint
       break;
 
     default:
-      sRetVal.strTag = QString("Canon.x%1.x%1")
+      sRetVal.strTag = QString("Canon.x%1.x%2")
           .arg(nMainTag, 4, 16, QChar('0'))
           .arg(nSubTag, 4, 16, QChar('0'));
       sRetVal.bUnknown = true;
@@ -1631,7 +1631,7 @@ QString CjfifDecode::LookupExifTag(QString strSect, uint32_t nTag, bool & bUnkno
         break;
 
       default:
-        strTmp = QString("GPS.0x%").arg(nTag, 4, 16, QChar('0'));
+        strTmp = QString("GPS.0x%1").arg(nTag, 4, 16, QChar('0'));
         bUnknown = true;
         return strTmp;
         break;
@@ -2395,7 +2395,7 @@ bool CjfifDecode::PrintValGPS(uint32_t nCount, double fCoord1, double fCoord2, d
       fCoordSec = fCoord3;
     }
 
-    strCoord = QString("%1 deg %2' %.3f\"").arg(nCoordDeg).arg(nCoordMin).arg(fCoordSec);
+    strCoord = QString("%1 deg %2' %3\"").arg(nCoordDeg).arg(nCoordMin).arg(fCoordSec, 0, 'f', 3);
     return true;
   }
   else
@@ -3050,7 +3050,7 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
           {
             cVal = static_cast<char>(nVal);
 
-            if(!isprint(nVal))
+            if(!IsPrintAscii(nVal))
             {
               cVal = '.';
             }
@@ -3095,7 +3095,7 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
           // 2 unsigned shorts in 1 word
           anValues[0] = ReadSwap2(m_nPos + 0);
           anValues[1] = ReadSwap2(m_nPos + 2);
-          strValOut = QString("%1, %1").arg(anValues[0]).arg(anValues[1]);
+          strValOut = QString("%1, %2").arg(anValues[0]).arg(anValues[1]);
           strFull += strValOut;
           strFull += "]";
           DbgAddLine(strFull);
@@ -3271,7 +3271,7 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
           // TODO: Ensure that ReadSwap2 handles signed notation properly
           anValuesS[0] = ReadSwap2(m_nPos + 0);
           anValuesS[1] = ReadSwap2(m_nPos + 2);
-          strValOut = QString("%1, %1").arg(anValuesS[0]).arg(anValuesS[0]);
+          strValOut = QString("%1, %2").arg(anValuesS[0]).arg(anValuesS[1]);
           strFull += strValOut;
           strFull += "]";
           DbgAddLine(strFull);
@@ -3449,15 +3449,18 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
     }
     else if(strIfdTag == "GPSAltitude")
     {
-      strValOut = QString("%.3f m").arg(afValues[0]);
+      strValOut = QString("%1 m").arg(afValues[0], 0, 'f', 3);
     }
     else if(strIfdTag == "GPSSpeed")
     {
-      strValOut = QString("%.3f").arg(afValues[0]);
+      strValOut = QString("%1").arg(afValues[0], 0, 'f', 3);
     }
     else if(strIfdTag == "GPSTimeStamp")
     {
-      strValOut = QString("%.0f:%.0f:%.2f").arg(afValues[0]).arg(afValues[1]).arg(afValues[2]);
+      strValOut = QString("%1:%2:%3")
+          .arg(afValues[0], 0, 'f', 0)
+          .arg(afValues[1], 0, 'f', 0)
+          .arg(afValues[2], 0, 'f', 2);
     }
     else if(strIfdTag == "GPSTrack")
     {
@@ -3934,16 +3937,16 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
           strValOut = "Shade";
           break;
         case 12:
-          strValOut = "Daylight fluorescent (D 5700 � 7100K)";
+          strValOut = "Daylight fluorescent (D 5700 - 7100K)";
           break;
         case 13:
-          strValOut = "Day white fluorescent (N 4600 � 5400K)";
+          strValOut = "Day white fluorescent (N 4600 - 5400K)";
           break;
         case 14:
-          strValOut = "Cool white fluorescent (W 3900 � 4500K)";
+          strValOut = "Cool white fluorescent (W 3900 - 4500K)";
           break;
         case 15:
-          strValOut = "White fluorescent (WW 3200 � 3700K)";
+          strValOut = "White fluorescent (WW 3200 - 3700K)";
           break;
         case 17:
           strValOut = "Standard light A";
@@ -4136,7 +4139,7 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
 
         // Collect extra details (for later DB submission)
         strTmp = "";
-        strTmp = QString("[%1]:[%1],").arg(strIfdTag).arg(strValOut);
+        strTmp = QString("[%1]:[%2],").arg(strIfdTag).arg(strValOut);
         m_strImgExtras += strTmp;
       }
 
@@ -4144,7 +4147,7 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
       if(strIfdTag == "Canon.ImageType")
       {
         strTmp = "";
-        strTmp = QString("[%1]:[%1],").arg(strIfdTag).arg(strValOut);
+        strTmp = QString("[%1]:[%2],").arg(strIfdTag).arg(strValOut);
         m_strImgExtras += strTmp;
       }
     }
@@ -6027,9 +6030,9 @@ uint32_t CjfifDecode::DecodeMarker()
 
           nTmpVal1 = Buf(m_nPos + i);
 
-          if(isprint(nTmpVal1))
+          if(IsPrintAscii(nTmpVal1))
           {
-            strFull += QString("%1").arg(nTmpVal1);
+            strFull += QChar(nTmpVal1);     // the character, not its code
           }
           else
           {
@@ -6536,7 +6539,7 @@ uint32_t CjfifDecode::DecodeMarker()
             .arg(nDAC_Tc);
         m_pLog->AddLine(strTmp);
         strTmp = QString("  #%1: Table destination identifier = %2")
-            .arg(nInd, 2, 10, QChar('0'))
+            .arg(nInd + 1, 2, 10, QChar('0'))
             .arg(nDAC_Tb);
         m_pLog->AddLine(strTmp);
 
@@ -6958,10 +6961,9 @@ uint32_t CjfifDecode::DecodeMarker()
       {
         nTmpVal1 = Buf(m_nPos++);
 
-        if(isprint(nTmpVal1))
+        if(IsPrintAscii(nTmpVal1))
         {
-          strTmp = QString("%1").arg(nTmpVal1);
-          m_strComment += strTmp;
+          m_strComment += QChar(nTmpVal1);    // the character, not its code
         }
         else
         {
@@ -8013,7 +8015,8 @@ void CjfifDecode::PrepareSignatureThumbSingle(bool bRotate)
   // Overwrite top 8 bits for signature version number
   sMd5.digest32[0] = (sMd5.digest32[0] & 0x00FFFFFF) + (DB_SIG_VER << 24);
 
-  // Convert hash to string format
+  // Convert hash to string format (uppercase hex, as for the image hash and
+  // master's %08X; it is compared and submitted as a string)
   if(!bRotate)
   {
     m_strHashThumb =
@@ -8021,7 +8024,7 @@ void CjfifDecode::PrepareSignatureThumbSingle(bool bRotate)
         .arg(sMd5.digest32[0], 8, 16, QChar('0'))
         .arg(sMd5.digest32[1], 8, 16, QChar('0'))
         .arg(sMd5.digest32[2], 8, 16, QChar('0'))
-        .arg(sMd5.digest32[3], 8, 16, QChar('0'));
+        .arg(sMd5.digest32[3], 8, 16, QChar('0')).toUpper();
   }
   else
   {
@@ -8030,7 +8033,7 @@ void CjfifDecode::PrepareSignatureThumbSingle(bool bRotate)
         .arg(sMd5.digest32[0], 8, 16, QChar('0'))
         .arg(sMd5.digest32[1], 8, 16, QChar('0'))
         .arg(sMd5.digest32[2], 8, 16, QChar('0'))
-        .arg(sMd5.digest32[3], 8, 16, QChar('0'));
+        .arg(sMd5.digest32[3], 8, 16, QChar('0')).toUpper();
   }
 }
 
@@ -9609,7 +9612,7 @@ bool CjfifDecode::DecodeAvi()
           fSampleRate = static_cast<double>(dwRate) / static_cast<double>(dwScale);
         }
 
-        strTmp = QString("      -[Sample Rate]  = [%.2f]").arg(fSampleRate);
+        strTmp = QString("      -[Sample Rate]  = [%1]").arg(fSampleRate, 0, 'f', 2);
 
         if(fccType == "vids")
         {
@@ -9768,7 +9771,7 @@ bool CjfifDecode::DecodeAvi()
 
       strIditTimestamp = m_pWBuf->BufReadStrn(m_nPos, nChunkSize);
       strIditTimestamp = strIditTimestamp.trimmed();    //!!
-      strTmp = QString("    -[Timestamp] = [1s]").arg(strIditTimestamp);
+      strTmp = QString("    -[Timestamp] = [%1]").arg(strIditTimestamp);
       m_pLog->AddLine(strTmp);
 
       m_nPos = nChunkDataStart + nChunkSize + (nChunkSize % 2);
@@ -9977,7 +9980,7 @@ void CjfifDecode::ProcessFile(QFile *inFile)
       m_nPos = nStartPos;
       m_nPosEmbedStart = nStartPos;     // Save the embedded file start position
 
-      strTmp = QString("Adjusting Start Offset to: 0x%08X"), nStartPos;
+      strTmp = QString("Adjusting Start Offset to: 0x%1").arg(nStartPos, 8, 16, QChar('0'));
       m_pLog->AddLine(strTmp);
       m_pLog->AddLine("");
     }
@@ -10418,7 +10421,7 @@ bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
     ind += nCopyLeft;
     // NOTE: We ensure nFileLen != 0 earlier
     Q_ASSERT(nFileLen > 0);
-    strTmp = QString("Exporting %1%%...").arg(ind * 100 / nFileLen, 3);
+    strTmp = QString("Exporting %1%...").arg(ind * 100 / nFileLen, 3);
     SetStatusText(strTmp);
   }
 
@@ -10546,7 +10549,7 @@ bool CjfifDecode::ExportJpegDoRange(QString strFileIn, QString strFileOut, uint3
 
     pFileOutput->write(reinterpret_cast<char *>(pBuf), nCopyLeft);
     ind += nCopyLeft;
-    strTmp = QString("Exporting %1%%...").arg(ind * 100 / (nCopyEnd - nCopyStart), 3);
+    strTmp = QString("Exporting %1%...").arg(ind * 100 / (nCopyEnd - nCopyStart), 3);
     SetStatusText(strTmp);
   }
 

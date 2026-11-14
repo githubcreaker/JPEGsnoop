@@ -90,12 +90,10 @@ QString Uint2Chars(uint32_t nVal)
   c2 = (c2 == 0) ? '.' : c2;
   c1 = (c1 == 0) ? '.' : c1;
   c0 = (c0 == 0) ? '.' : c0;
-  strTmp = QString("'%1%2%3%4' (%5)")
-      .arg(c3)
-      .arg(c2)
-      .arg(c1)
-      .arg(c0)
-      .arg(nVal, 8, 16, QChar('0'));
+  // Concatenate the characters rather than chaining .arg(): a '%' among these
+  // file bytes would otherwise be substituted by the following arguments
+  strTmp = QString("'") + QLatin1Char(c3) + QLatin1Char(c2) + QLatin1Char(c1) + QLatin1Char(c0)
+      + QString("' (0x%1)").arg(nVal, 8, 16, QChar('0'));
   return strTmp;
 }
 
@@ -104,10 +102,10 @@ QString Uint2DotByte(uint32_t nVal)
 {
   QString strTmp;
 
-  strTmp = QString("'%1.%2.%3.%4' (%5)")
-      .arg(nVal & 0xFF000000 >> 24)
-      .arg(nVal & 0x00FF0000 >> 16)
-      .arg(nVal & 0x0000FF00 >> 8)
+  strTmp = QString("'%1.%2.%3.%4' (0x%5)")
+      .arg((nVal & 0xFF000000) >> 24)
+      .arg((nVal & 0x00FF0000) >> 16)
+      .arg((nVal & 0x0000FF00) >> 8)
       .arg(nVal & 0x000000FF)
       .arg(nVal, 8, 16, QChar('0'));
 

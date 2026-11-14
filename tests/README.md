@@ -17,8 +17,9 @@ when it is installed, so Pillow needn't be installed separately).
 
 - `harness/` builds `jpegsnoop-harness` from the app's sources (shared through
   `JPEGsnoopQt.pri`) plus a small driver:
-  - `decode <file> [--ac] [--histo]` decodes one file in non-interactive mode
-    and prints the report;
+  - `decode <file> [--ac] [--histo] [--unknown-exif]` decodes one file in
+    non-interactive mode and prints the report (`--unknown-exif` also reports
+    unknown EXIF tags, which the app hides by default);
   - `gui <file>... [--mouse]` opens the files in the real `MainWindow`, and
     with `--mouse` moves and clicks over the preview window.
 
@@ -33,8 +34,8 @@ when it is installed, so Pillow needn't be installed separately).
 
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
-(`C` memory safety, `H` hangs, `U` GUI); `ok_*` cases are valid files that
-must keep decoding.
+(`C` memory safety, `H` hangs, `U` GUI, `R` report output; `XP` covers the
+UTF-16 EXIF tags); `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case
 

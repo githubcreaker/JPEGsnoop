@@ -1,9 +1,10 @@
 // Headless test driver for JPEGsnoopQt.
 //
-// decode <file> [--ac] [--histo]
+// decode <file> [--ac] [--histo] [--unknown-exif]
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
-//     followed by a "harness:" summary line.
+//     followed by a "harness:" summary line. --ac: full IDCT; --histo:
+//     histograms; --unknown-exif: also report unknown EXIF tags.
 //
 // gui <file> [<file> ...] [--mouse]
 //     Build the real MainWindow, open each file in turn as File > Open does,
@@ -39,11 +40,11 @@
 static void usage()
 {
   fprintf(stderr,
-          "usage: jpegsnoop-harness decode <file> [--ac] [--histo]\n"
+          "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse]\n");
 }
 
-static int runDecode(const QString &strFile, bool bAc, bool bHisto, const QString &strDbDir)
+static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strDbDir)
 {
   QPlainTextEdit edit;
   CDocLog log(&edit);
@@ -57,6 +58,8 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, const QStrin
     cfg.onScansegmentFullidct();
   if(bHisto)
     cfg.onScansegmentHistogram();
+  if(bUnknownExif)
+    cfg.onOptionsHideuknownexiftags();  // default hides them; this toggles
 
   CDbSigs sigs(&log, &cfg);
   CwindowBuf wbuf(&log);
@@ -185,6 +188,7 @@ int main(int argc, char **argv)
   const QString strMode = args.takeFirst();
   const bool bAc = args.removeAll("--ac") > 0;
   const bool bHisto = args.removeAll("--histo") > 0;
+  const bool bUnknownExif = args.removeAll("--unknown-exif") > 0;
   const bool bMouse = args.removeAll("--mouse") > 0;
 
   QTemporaryDir tmpDir;
@@ -195,7 +199,7 @@ int main(int argc, char **argv)
   }
 
   if(strMode == "decode" && args.size() == 1)
-    return runDecode(args.first(), bAc, bHisto, tmpDir.path());
+    return runDecode(args.first(), bAc, bHisto, bUnknownExif, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
     return runGui(args, bMouse, tmpDir.path());
 
