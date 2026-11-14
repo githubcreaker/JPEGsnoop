@@ -157,3 +157,7 @@ $RECYCLE.BIN/
 
 # macOS Qt build folder (scripts/package-macos.sh)
 build-macos/
+
+# Test driver builds (tests/run-tests.sh)
+build-tests/
+build-tests-asan/

@@ -881,8 +881,8 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
       }
       else
       {
-        msgBox.setText("ERROR: BufX() with bad size");
-        msgBox.exec();
+        // Log rather than show a modal dialog: the size can come from a file
+        m_pDocLog->AddLineErr(QString("ERROR: BufX() with bad size [%1]").arg(nSz));
         return 0;
       }
     }
@@ -903,8 +903,8 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
       }
       else
       {
-        msgBox.setText("ERROR: BufX() with bad size");
-        msgBox.exec();
+        // Log rather than show a modal dialog: the size can come from a file
+        m_pDocLog->AddLineErr(QString("ERROR: BufX() with bad size [%1]").arg(nSz));
         return 0;
       }
     }
@@ -940,8 +940,8 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
         }
         else
         {
-          msgBox.setText("ERROR: BufX() with bad size");
-          msgBox.exec();
+          // Log rather than show a modal dialog: the size can come from a file
+          m_pDocLog->AddLineErr(QString("ERROR: BufX() with bad size [%1]").arg(nSz));
           return 0;
         }
       }
@@ -962,8 +962,8 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
         }
         else
         {
-          msgBox.setText("ERROR: BufX() with bad size");
-          msgBox.exec();
+          // Log rather than show a modal dialog: the size can come from a file
+          m_pDocLog->AddLineErr(QString("ERROR: BufX() with bad size [%1]").arg(nSz));
           return 0;
         }
       }

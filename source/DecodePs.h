@@ -160,7 +160,8 @@ public:
   void Reset();
 
   bool DecodePsd(uint32_t nPos, QImage * pDibTemp, int32_t &nWidth, int32_t &nHeight);
-  bool PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nIndent);
+  // nPosLimit: end (exclusive) of the containing segment or section
+  bool PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit);
 
   bool m_bPsd;
   uint32_t m_nQualitySaveAs;
@@ -254,6 +255,13 @@ private:
   CDocLog *m_pLog;
 
   bool m_bAbort;                // Abort continued decode?
+
+  // End (exclusive) of the image resource block being parsed. Loops driven by
+  // counts read from the file also stop here, so a bogus count can't run on.
+  uint32_t m_nPosBlockEnd;
+
+  // Current Descriptor/List nesting depth (they can recurse through OSTypes)
+  uint32_t m_nDescriptorDepth;
 };
 
 #endif

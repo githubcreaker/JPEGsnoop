@@ -1090,10 +1090,11 @@ void CimgDecode::GenLookupHuffMask()
 {
   uint32_t nMask;
 
+  // Mask of the top nLen bits. Length 0 is special-cased: shifting a 32-bit
+  // value by 32 is undefined behaviour.
   for(uint32_t nLen = 0; nLen < 32; nLen++)
   {
-    nMask = (1 << (nLen)) - 1;
-    nMask <<= 32 - nLen;
+    nMask = (nLen == 0) ? 0 : (0xFFFFFFFFu << (32 - nLen));
     m_anHuffMaskLookup[nLen] = nMask;
   }
 }
@@ -3246,7 +3247,10 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   }
 
   // Perform additional range checks
-  if((m_nSosSampFactHMax == 0) || (m_nSosSampFactVMax == 0) || (m_nSosSampFactHMax > MAX_SAMP_FACT_H)
+  // (A zero minimum would divide by zero below, e.g. an SOS listing more
+  // components than the SOF defined.)
+  if((m_nSosSampFactHMin == 0) || (m_nSosSampFactVMin == 0) ||
+     (m_nSosSampFactHMax == 0) || (m_nSosSampFactVMax == 0) || (m_nSosSampFactHMax > MAX_SAMP_FACT_H)
      || (m_nSosSampFactVMax > MAX_SAMP_FACT_V))
   {
     strTmp = QString("  NOTE: Degree of subsampling factor not supported [HMax=%1, VMax=%2]")
@@ -3302,6 +3306,25 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   // Ensure the image has a size
   if((m_nBlkXMax == 0) || (m_nBlkYMax == 0))
   {
+    return;
+  }
+
+  // Refuse images whose pixel maps would be unreasonably large. This also keeps
+  // the int32_t sizes and indices used by the pixel maps (width * height) in
+  // range: a 65535x65535 SOF would otherwise wrap them and overflow the heap.
+  static const quint64 nMaxDecodePixels = 1ull << 28;   // 16384 x 16384
+  const quint64 nPixels = static_cast<quint64>(m_nMcuXMax) * static_cast<quint64>(m_nMcuWidth)
+                          * static_cast<quint64>(m_nMcuYMax) * static_cast<quint64>(m_nMcuHeight);
+
+  if(nPixels > nMaxDecodePixels)
+  {
+    strTmp = QString("*** ERROR: Image too large to decode the scan (%1 x %2 pixels); skipping image decode ***")
+        .arg(m_nDimX).arg(m_nDimY);
+    m_pLog->AddLineErr(strTmp);
+    m_nMcuXMax = 0;
+    m_nMcuYMax = 0;
+    m_nBlkXMax = 0;
+    m_nBlkYMax = 0;
     return;
   }
 
@@ -3550,24 +3573,18 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   }
 
   // Ensure that the table has been defined already!
-  uint32_t nSel;
-
-  for(uint32_t nCompInd = 1; nCompInd <= m_nNumSosComps; nCompInd++)
+  // Only index the tables with a valid selector: an SOS with an out-of-range
+  // selector leaves -1 here, which would read far outside the arrays.
+  for(uint32_t nCompInd = 1; bDhtReady && (nCompInd <= m_nNumSosComps); nCompInd++)
   {
-    // Check for DC DHT table
-    nSel = m_anDhtTblSel[DHT_CLASS_DC][nCompInd];
-
-    if(m_anDhtLookupSize[DHT_CLASS_DC][nSel] == 0)
+    for(uint32_t nClass = DHT_CLASS_DC; nClass <= DHT_CLASS_AC; nClass++)
     {
-      bDhtReady = false;
-    }
+      const int32_t nSel = m_anDhtTblSel[nClass][nCompInd];
 
-    // Check for AC DHT table
-    nSel = m_anDhtTblSel[DHT_CLASS_AC][nCompInd];
-
-    if(m_anDhtLookupSize[DHT_CLASS_AC][nSel] == 0)
-    {
-      bDhtReady = false;
+      if((nSel < 0) || (nSel >= MAX_DHT_DEST_ID) || (m_anDhtLookupSize[nClass][nSel] == 0))
+      {
+        bDhtReady = false;
+      }
     }
   }
 
@@ -4285,10 +4302,14 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
 
         for(uint32_t nBitLen = 1; nBitLen <= MAX_DHT_CODELEN; nBitLen++)
         {
+          // A table with no decoded codes has a total of 0
+          const double dPercent = (nDhtHistoTotal == 0) ? 0.0 :
+                                  (m_anDhtHisto[nClass][nDhtDestId][nBitLen] * 100.0) / nDhtHistoTotal;
+
           strTmp = QString("      # codes of length %1 bits: %2 (%3%)")
               .arg(nBitLen, 2, 10, QChar('0'))
               .arg(m_anDhtHisto[nClass][nDhtDestId][nBitLen], 8)
-              .arg((m_anDhtHisto[nClass][nDhtDestId][nBitLen]*100.0)/nDhtHistoTotal, 3, 'f', 0);
+              .arg(dPercent, 3, 'f', 0);
           m_pLog->AddLine(strTmp);
         }
 
@@ -5849,6 +5870,14 @@ void CimgDecode::LookupFilePosMcu(QPoint p, uint32_t &nByte, uint32_t &nBit)
 {
   uint32_t nPacked;
 
+  // The map is freed on Reset() and the point can come from the mouse
+  if((!m_pMcuFileMap) || (p.x() < 0) || (p.y() < 0) || (p.x() >= m_nMcuXMax) || (p.y() >= m_nMcuYMax))
+  {
+    nByte = 0;
+    nBit = 0;
+    return;
+  }
+
   nPacked = m_pMcuFileMap[p.x() + p.y() * m_nMcuXMax];
   UnpackFileOffset(nPacked, nByte, nBit);
 }
@@ -5865,9 +5894,18 @@ void CimgDecode::LookupFilePosMcu(QPoint p, uint32_t &nByte, uint32_t &nBit)
 //
 void CimgDecode::LookupBlkYCC(QPoint p, int32_t &nY, int32_t &nCb, int32_t &nCr)
 {
+  // The maps are freed on Reset() and the point can come from the mouse
+  if((!m_pBlkDcValY) || (p.x() < 0) || (p.y() < 0) || (p.x() >= m_nBlkXMax) || (p.y() >= m_nBlkYMax))
+  {
+    nY = 0;
+    nCb = 0;
+    nCr = 0;
+    return;
+  }
+
   nY = m_pBlkDcValY[p.x() + p.y() * m_nBlkXMax];
 
-  if(m_nNumSosComps == NUM_CHAN_YCC)
+  if((m_nNumSosComps == NUM_CHAN_YCC) && m_pBlkDcValCb && m_pBlkDcValCr)
   {
     nCb = m_pBlkDcValCb[p.x() + p.y() * m_nBlkXMax];
     nCr = m_pBlkDcValCr[p.x() + p.y() * m_nBlkXMax];
@@ -5888,7 +5926,13 @@ void CimgDecode::LookupBlkYCC(QPoint p, int32_t &nY, int32_t &nCb, int32_t &nCr)
 //
 QPoint CimgDecode::PixelToMcu(QPoint ptPix)
 {
-  QPoint ptMcu;
+  QPoint ptMcu(0, 0);
+
+  // MCU size is zero until a scan has been decoded
+  if((m_nMcuWidth <= 0) || (m_nMcuHeight <= 0))
+  {
+    return ptMcu;
+  }
 
   ptMcu.setX(ptPix.x() / m_nMcuWidth);
   ptMcu.setY(ptPix.y() / m_nMcuHeight);
@@ -6007,6 +6051,14 @@ QPoint CimgDecode::GetMarkerBlk(uint32_t nInd)
 //
 void CimgDecode::SetMarkerBlk(QPoint p)
 {
+  // Only mark blocks of a decoded image (p comes from a mouse click, and the
+  // MCU size below is zero before a scan is decoded)
+  if((!m_bImgDecoded) || (m_nMcuWidth < BLK_SZ_X) || (m_nMcuHeight < BLK_SZ_Y) ||
+     (p.x() < 0) || (p.y() < 0) || (p.x() >= m_nBlkXMax) || (p.y() >= m_nBlkYMax))
+  {
+    return;
+  }
+
   if(m_nMarkersBlkNum == MAX_BLOCK_MARKERS)
   {
     // Shift them down by 1. Last entry will be deleted next

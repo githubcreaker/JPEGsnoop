@@ -78,9 +78,41 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
   connect(m_pAppConfig, SIGNAL(scanImageAc(bool)), this, SLOT(scanImageAc(bool)));
 }
 
+// Map a position on the preview label to a pixel of the decoded image.
+// The label shows the whole image stretched over its contents rect
+// (setScaledContents), whatever the zoom. Returns false when no image is
+// decoded (the decoder may have been reset since the preview was drawn) or
+// the point is outside the image.
+bool Q_Viewer::labelToImage(const QPoint &ptLabel, QPoint &ptImg) const
+{
+  if(!m_pImgDecoder->IsImgDecoded() || !m_pImgDecoder->m_bDibTempReady || !m_pImgDecoder->m_pDibTemp)
+  {
+    return false;
+  }
+
+  const QRect rectLabel = imageLabel->contentsRect();
+  const int32_t nImgW = m_pImgDecoder->m_pDibTemp->width();
+  const int32_t nImgH = m_pImgDecoder->m_pDibTemp->height();
+
+  if(rectLabel.isEmpty() || (nImgW <= 0) || (nImgH <= 0) || !rectLabel.contains(ptLabel))
+  {
+    return false;
+  }
+
+  ptImg.setX(static_cast<int32_t>(static_cast<qint64>(ptLabel.x() - rectLabel.left()) * nImgW / rectLabel.width()));
+  ptImg.setY(static_cast<int32_t>(static_cast<qint64>(ptLabel.y() - rectLabel.top()) * nImgH / rectLabel.height()));
+  return true;
+}
+
 void Q_Viewer::mouseReleased(QMouseEvent *e)
 {
- m_pImgDecoder->SetMarkerBlk(e->pos());
+  QPoint ptImg;
+
+  // SetMarkerBlk() takes 8x8 block coordinates, not pixels
+  if(labelToImage(e->pos(), ptImg))
+  {
+    m_pImgDecoder->SetMarkerBlk(m_pImgDecoder->PixelToBlk(ptImg));
+  }
 }
 
 void Q_Viewer::mouseMoved(QMouseEvent *e)
@@ -92,13 +124,23 @@ void Q_Viewer::mouseMoved(QMouseEvent *e)
   int32_t nCb;
   int32_t nCr;
 
+  QPoint ptImg;
+
+  if(!labelToImage(e->pos(), ptImg))
+  {
+    mcuLabel->clear();
+    fileLabel->clear();
+    yccLabel->clear();
+    return;
+  }
+
   QPoint p;
-  p = m_pImgDecoder->PixelToMcu(e->pos());
+  p = m_pImgDecoder->PixelToMcu(ptImg);
   mcuLabel->setText(QString("MCU [%1,%2]")
                     .arg(p.x(), 4, 10, QChar('0'))
                     .arg(p.y(), 4, 10, QChar('0')));
   m_pImgDecoder->LookupFilePosMcu(p, nByte, nBit);
-  p = m_pImgDecoder->PixelToBlk(e->pos());
+  p = m_pImgDecoder->PixelToBlk(ptImg);
   m_pImgDecoder->LookupBlkYCC(p, nY, nCb, nCr);
   fileLabel->setText(QString("File 0x%1:%2").arg(nByte, 8, 16, QChar('0')).arg(nBit));
   yccLabel->setText(QString("YCC DC=[%1,%2,%3]")

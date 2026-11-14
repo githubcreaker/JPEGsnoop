@@ -229,7 +229,7 @@ private:
 //      uint32_t                DecodeMakerIfd(uint32_t ifd_tag,uint32_t ptr,uint32_t len);
   bool DecodeMakerSubType();
   void DecodeDHT(bool bInject);
-  uint32_t DecodeApp13Ps();
+  uint32_t DecodeApp13Ps(uint32_t nPosEnd);
   uint32_t DecodeApp2Flashpix();
   uint32_t DecodeApp2IccProfile(uint32_t nLen);
   uint32_t DecodeIccHeader(uint32_t nPos);

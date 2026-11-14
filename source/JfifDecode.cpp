@@ -24,6 +24,7 @@
 #include <QtGlobal>
 #include <QCryptographicHash>
 #include <QByteArray>
+#include <QList>
 
 #include "JfifDecode.h"
 #include "snoop.h"
@@ -507,10 +508,11 @@ void CjfifDecode::GenLookupHuffMask()
 {
   uint32_t mask;
 
+  // Mask of the top len bits. Length 0 is special-cased: shifting a 32-bit
+  // value by 32 is undefined behaviour.
   for(uint32_t len = 0; len < 32; len++)
   {
-    mask = (1 << len) - 1;
-    mask <<= 32 - len;
+    mask = (len == 0) ? 0 : (0xFFFFFFFFu << (32 - len));
     m_anMaskLookup[len] = mask;
   }
 }
@@ -4324,13 +4326,13 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
 // - m_nPos
 // POST:
 // - m_nImgQualPhotoshopSa
-uint32_t CjfifDecode::DecodeApp13Ps()
+uint32_t CjfifDecode::DecodeApp13Ps(uint32_t nPosEnd)
 {
   // Photoshop APP13 marker definition doesn't appear to have a
   // well-defined length, so I will read until I encounter a
-  // non-"8BIM" entry, then we reset the position counter
+  // non-"8BIM" entry or the end of the APP13 segment (nPosEnd,
+  // exclusive), then we reset the position counter
   // and move on to the next marker.
-  // FIXME: This does not appear to be very robust
 
   QString strTmp;
   QString strBimName;
@@ -4348,8 +4350,11 @@ uint32_t CjfifDecode::DecodeApp13Ps()
 
   while(!bDone)
   {
-    // FIXME: Need to check for actual marker section extent, not
-    // just the lack of an 8BIM signature as the terminator!
+    // Stop at the end of the APP13 segment
+    if(m_nPos + 4 > nPosEnd)
+    {
+      break;
+    }
 
     // Check the signature but don't advance the file pointer
     strBimSig = m_pWBuf->BufReadStrn(m_nPos, 4);
@@ -4357,7 +4362,15 @@ uint32_t CjfifDecode::DecodeApp13Ps()
     // Check for signature "8BIM"
     if(strBimSig == "8BIM")
     {
-      m_pPsDec->PhotoshopParseImageResourceBlock(m_nPos, 3);
+      const uint32_t nPosBlock = m_nPos;
+
+      m_pPsDec->PhotoshopParseImageResourceBlock(m_nPos, 3, nPosEnd);
+
+      // Every block must move forward and stay inside the segment
+      if((m_nPos <= nPosBlock) || (m_nPos > nPosEnd))
+      {
+        bDone = true;
+      }
     }
     else
     {
@@ -5051,7 +5064,7 @@ void CjfifDecode::DecodeDHT(bool bInject)
     uint32_t nDhtCodesTotal;
 
     // Clear out the code list
-    for(nDhtInd = 0; nDhtInd < DECODE_DHT_MAX_DHT; nDhtInd++)
+    for(nDhtInd = 0; nDhtInd <= DECODE_DHT_MAX_DHT; nDhtInd++)
     {
       anDhtCodeVal[nDhtInd] = 0xFFFF;   // Dummy value
     }
@@ -5140,7 +5153,12 @@ void CjfifDecode::DecodeDHT(bool bInject)
 
         // Codes exist for this bit-length
         // Walk through and generate the bitvalues
-        for(uint32_t bit_ind = 1; ((!m_bStateAbort) && (bit_ind <= m_anDhtNumCodesLen_Li[nBitLen])); bit_ind++)
+        // Stop at the codes actually stored: a table claiming more than
+        // DECODE_DHT_MAX_DHT codes (already reported above) would otherwise
+        // read past the end of anDhtCodeVal.
+        for(uint32_t bit_ind = 1;
+            ((!m_bStateAbort) && (bit_ind <= m_anDhtNumCodesLen_Li[nBitLen]) && (nDhtInd < DECODE_DHT_MAX_DHT));
+            bit_ind++)
         {
           uint32_t nDecVal = nCodeVal;
           uint32_t nBinBit;
@@ -5627,7 +5645,7 @@ uint32_t CjfifDecode::DecodeMarker()
       }
       else                      // Photoshop
       {
-        DecodeApp13Ps();
+        DecodeApp13Ps(nPosSaved + nLength);
       }
 
       // Restore original position in file to a point
@@ -5664,7 +5682,8 @@ uint32_t CjfifDecode::DecodeMarker()
         // updated to support unicode properly.
 
         uint32_t nPosMarkerEnd = nPosSaved + nLength - 1;
-        uint32_t sXmpLen = nPosMarkerEnd - m_nPos;
+        // A segment shorter than its identifier would make this wrap to ~4 GB
+        uint32_t sXmpLen = (nPosMarkerEnd > m_nPos) ? (nPosMarkerEnd - m_nPos) : 0;
 
         uint8_t cXmpChar;
 
@@ -5793,8 +5812,23 @@ uint32_t CjfifDecode::DecodeMarker()
 
         nIfdCount = 0;
 
+        // Offsets of the IFDs decoded so far: a "next IFD" pointer back to
+        // one of them would otherwise loop forever. Real files have IFD0/IFD1.
+        QList<uint32_t> anIfdSeen;
+
         while(!exif_done)
         {
+          if(anIfdSeen.contains(nOffsetIfd1) || (anIfdSeen.size() >= 32))
+          {
+            strTmp = QString("  ERROR: IFD%1 at offset 0x%2 repeats an earlier IFD or the IFD chain is too long. Stopping.")
+                .arg(nIfdCount)
+                .arg(nOffsetIfd1, 8, 16, QChar('0'));
+            m_pLog->AddLineErr(strTmp);
+            break;
+          }
+
+          anIfdSeen.append(nOffsetIfd1);
+
           m_pLog->AddLine("");
 
           strTmp = QString("IFD%1").arg(nIfdCount);
@@ -6017,6 +6051,7 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_APP0:            // APP0
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       //nLength = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
+      nPosSaved = m_nPos;       // Segment ends at nPosSaved + nLength
       m_nPos += 2;
       strTmp = QString("  Length     = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
@@ -6082,7 +6117,17 @@ uint32_t CjfifDecode::DecodeMarker()
         // Unpack the thumbnail:
         uint32_t thumbnail_r, thumbnail_g, thumbnail_b;
 
-        if(m_nImgThumbSizeX && m_nImgThumbSizeY)
+        // The RGB thumbnail must fit in the rest of the APP0 segment
+        const uint32_t nThumbBytes = 3 * m_nImgThumbSizeX * m_nImgThumbSizeY;
+        const uint32_t nPosApp0End = nPosSaved + nLength;
+
+        if((nThumbBytes > 0) && ((m_nPos > nPosApp0End) || (nThumbBytes > nPosApp0End - m_nPos)))
+        {
+          strTmp = QString("  ERROR: Thumbnail (%1 bytes) larger than the rest of the APP0 segment. Not shown.")
+              .arg(nThumbBytes);
+          m_pLog->AddLineErr(strTmp);
+        }
+        else if(m_nImgThumbSizeX && m_nImgThumbSizeY)
         {
           for(uint32_t y = 0; y < m_nImgThumbSizeY; y++)
           {
@@ -6098,8 +6143,11 @@ uint32_t CjfifDecode::DecodeMarker()
                   .arg(thumbnail_g, 2, 16, QChar('0'))
                   .arg(thumbnail_b, 2, 16, QChar('0'));
               strFull += strTmp;
-              m_pLog->AddLine(strFull);
             }
+
+            // One line per thumbnail row (this used to log the growing
+            // line after every pixel)
+            m_pLog->AddLine(strFull);
           }
         }
 
@@ -9233,6 +9281,18 @@ void CjfifDecode::DecodeEmbeddedThumb()
 
             while(!bScanSkipDone)
             {
+              // Stop at the declared thumbnail end or the end of the file:
+              // past EOF Buf() returns 0 forever and this would never end.
+              if(((m_nPos - m_nImgExifThumbOffset) > m_nImgExifThumbLen) || (m_nPos >= m_pWBuf->GetPosEof()))
+              {
+                strTmp = QString("ERROR: Thumbnail scan data runs past the thumbnail length (%1 bytes)")
+                    .arg(m_nImgExifThumbLen);
+                m_pLog->AddLineErr(strTmp);
+                bErrorAny = true;
+                bDone = true;
+                break;
+              }
+
               if((Buf(m_nPos) == 0xFF) && (Buf(m_nPos + 1) != 0x00))
               {
                 // Was it a restart marker?
@@ -9415,6 +9475,10 @@ bool CjfifDecode::DecodeAvi()
       done = true;
       break;
     }
+
+    // Each chunk must end past where it started; a size that wraps the
+    // 32-bit position would otherwise revisit the same chunks forever.
+    const uint32_t nPosChunkStart = m_nPos;
 
     strHeader = m_pWBuf->BufReadStrn(m_nPos, 4);
     m_nPos += 4;
@@ -9728,6 +9792,12 @@ bool CjfifDecode::DecodeAvi()
       // Unsupported
       m_nPos = nChunkDataStart + nChunkSize + (nChunkSize % 2);
     }
+
+    if(m_nPos <= nPosChunkStart)
+    {
+      m_pLog->AddLineErr("  ERROR: AVI chunk size points backwards. Stopping AVI parsing.");
+      done = true;
+    }
   }
 
   m_pLog->AddLine("");
@@ -9979,21 +10049,25 @@ void CjfifDecode::ProcessFile(QFile *inFile)
       // We only try to determine the chroma subsampling ratio if we have 3 components (assume YCC)
       // In general, we should be able to use the 2nd or 3rd component
 
-      // NOTE: The following assumes m_anSofHorzSampFact_Hi and m_anSofVertSampFact_Vi
-      // are non-zero as otherwise we'll have a divide-by-0 exception.
+      // A sampling factor can still be zero here when a later, invalid SOF
+      // overwrote it before validation rejected it; leave the ratio as "?x?".
       uint32_t nCompIdent = m_anSofQuantCompId[SCAN_COMP_CB];
-      uint32_t nCssFactH = m_nSofHorzSampFactMax_Hmax / m_anSofHorzSampFact_Hi[nCompIdent];
-      uint32_t nCssFactV = m_nSofVertSampFactMax_Vmax / m_anSofVertSampFact_Vi[nCompIdent];
 
-      if(m_eImgLandscape != ENUM_LANDSCAPE_NO)
+      if((m_anSofHorzSampFact_Hi[nCompIdent] != 0) && (m_anSofVertSampFact_Vi[nCompIdent] != 0))
       {
-        // Landscape orientation
-        m_strImgQuantCss = QString("%1x%2").arg(nCssFactH).arg(nCssFactV);
-      }
-      else
-      {
-        // Portrait orientation (flip subsampling ratio)
-        m_strImgQuantCss = QString("%1x%1").arg(nCssFactV).arg(nCssFactH);
+        uint32_t nCssFactH = m_nSofHorzSampFactMax_Hmax / m_anSofHorzSampFact_Hi[nCompIdent];
+        uint32_t nCssFactV = m_nSofVertSampFactMax_Vmax / m_anSofVertSampFact_Vi[nCompIdent];
+
+        if(m_eImgLandscape != ENUM_LANDSCAPE_NO)
+        {
+          // Landscape orientation
+          m_strImgQuantCss = QString("%1x%2").arg(nCssFactH).arg(nCssFactV);
+        }
+        else
+        {
+          // Portrait orientation (flip subsampling ratio)
+          m_strImgQuantCss = QString("%1x%2").arg(nCssFactV).arg(nCssFactH);
+        }
       }
     }
     else if(m_nSofNumComps_Nf == NUM_CHAN_GRAYSCALE)

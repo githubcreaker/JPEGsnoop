@@ -56,6 +56,7 @@ signals:
 public slots:
   void updateImage();
   void reprocess();
+  void openFile(const QString &strPath);
 
 private slots:
   void open();

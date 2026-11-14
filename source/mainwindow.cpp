@@ -610,10 +610,23 @@ void MainWindow::open()
 
   if(dialog.exec())
   {
-    m_currentFile = dialog.selectedFiles().at(0);
-
-    AnalyzeFile();
+    openFile(dialog.selectedFiles().at(0));
   }
+}
+
+//-----------------------------------------------------------------------------
+// Open and analyze a file (File > Open, and the test driver)
+
+void MainWindow::openFile(const QString &strPath)
+{
+  m_currentFile = strPath;
+
+  // A new file means a new image source: without this the scan decoder keeps
+  // the previous file's state and skips decoding (master did this in
+  // CJPEGsnoopDoc::Reset() on every open).
+  emit ImgSrcChanged();
+
+  AnalyzeFile();
 }
 
 //-----------------------------------------------------------------------------

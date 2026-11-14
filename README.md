@@ -52,3 +52,5 @@ The Qt version of JPEGsnoop (this branch) builds on macOS with Qt 6.
 - With Homebrew's Qt, the app needs the macOS version Homebrew built its libraries for
   (the script sets `LSMinimumSystemVersion` to match). Qt's official installer targets
   older macOS versions.
+- Regression tests: `tests/run-tests.sh` (add `--asan` for a sanitizer build); see
+  [tests/README.md](tests/README.md).

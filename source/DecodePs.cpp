@@ -286,6 +286,8 @@ void CDecodePs::Reset()
   m_nQualitySaveAs = 0;
   m_nQualitySaveForWeb = 0;
   m_bAbort = false;
+  m_nPosBlockEnd = 0;
+  m_nDescriptorDepth = 0;
 }
 
 CDecodePs::~CDecodePs(void)
@@ -524,10 +526,27 @@ QString CDecodePs::DecodeIptcValue(teIptcType eIptcType, uint32_t nFldCnt, uint3
     case IPTC_T_NUM:
     case IPTC_T_NUM1:
     case IPTC_T_NUM2:
-      nVal = m_pWBuf->BufX(nPos, nFldCnt, PS_BSWAP);
-      nPos += nFldCnt;
-      nPos += nFldCnt;
-      strVal = QString("%1").arg(nVal);
+      if((nFldCnt == 1) || (nFldCnt == 2) || (nFldCnt == 4))
+      {
+        nVal = m_pWBuf->BufX(nPos, nFldCnt, PS_BSWAP);
+        nPos += nFldCnt;
+        nPos += nFldCnt;
+        strVal = QString("%1").arg(nVal);
+      }
+      else
+      {
+        // The size comes from the file; BufX() only reads 1, 2 or 4 bytes.
+        // Show other sizes as hex (at most 16 bytes) instead.
+        strVal = "[";
+
+        for(nInd = 0; (nInd < nFldCnt) && (nInd < 16); nInd++)
+        {
+          strVal += QString("0x%1 ").arg(Buf(nPos + nInd), 2, 16, QChar('0'));
+        }
+
+        strVal += (nFldCnt > 16) ? "...]" : "]";
+        nPos += nFldCnt;
+      }
       break;
 
     case IPTC_T_HEX:
@@ -1422,7 +1441,8 @@ void CDecodePs::PhotoshopParseGridGuides(uint32_t &nPos, uint32_t nIndent)
   if(nNumGuides > 0)
     PhotoshopParseReportNote(nIndent, "-----");
 
-  for(uint32_t nInd = 0; nInd < nNumGuides; nInd++)
+  // The count comes from the file; also stop at the end of the block
+  for(uint32_t nInd = 0; (nInd < nNumGuides) && (nPos < m_nPosBlockEnd); nInd++)
   {
     strVal = QString("Guide #%1:").arg(nInd);
     PhotoshopParseReportNote(nIndent, strVal);
@@ -2683,7 +2703,7 @@ bool CDecodePs::PhotoshopParseImageResourcesSection(uint32_t &nPos, uint32_t nIn
 
   while(nPos < nPosSectionEnd)
   {
-    bDecOk &= PhotoshopParseImageResourceBlock(nPos, nIndent);
+    bDecOk &= PhotoshopParseImageResourceBlock(nPos, nIndent, nPosSectionEnd);
     if(!bDecOk)
     {
       return false;
@@ -2701,7 +2721,7 @@ bool CDecodePs::PhotoshopParseImageResourcesSection(uint32_t &nPos, uint32_t nIn
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nIndent)
+bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit)
 {
   QString strVal;
 
@@ -2787,6 +2807,22 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
   PhotoshopParseReportNote(nIndent, strTmp);
 
   nIndent++;
+
+  // A length that runs past the containing segment, or wraps the 32-bit
+  // position back to this block, would make the caller loop forever or parse
+  // gigabytes past the end. Clamp it to the data actually available.
+  if((nPos > nPosLimit) || (nBimLen > nPosLimit - nPos))
+  {
+    const uint32_t nBimLenAvail = (nPos < nPosLimit) ? (nPosLimit - nPos) : 0;
+
+    strTmp = QString("ERROR: 8BIM length [0x%1] runs past the end of its segment; using [0x%2]")
+        .arg(nBimLen, 8, 16, QChar('0'))
+        .arg(nBimLenAvail, 8, 16, QChar('0'));
+    m_pLog->AddLineErr(strTmp);
+    nBimLen = nBimLenAvail;
+  }
+
+  m_nPosBlockEnd = nPos + nBimLen;
 
   if(nBimLen == 0)
   {
@@ -3015,7 +3051,7 @@ void CDecodePs::PhotoshopParseSliceHeader(uint32_t &nPos, uint32_t nIndent, uint
     // Slice resource block
     if(nNumSlices > 0)
       PhotoshopParseReportNote(nIndent, "-----");
-    for(uint32_t nSliceInd = 0; nSliceInd < nNumSlices; nSliceInd++)
+    for(uint32_t nSliceInd = 0; (nSliceInd < nNumSlices) && (nPos < m_nPosBlockEnd); nSliceInd++)
     {
       QString strSliceInd;
 
@@ -3352,6 +3388,18 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
 
   uint32_t nPosOffset;
 
+  // Descriptors and lists nest through OSTypes; limit the depth so a crafted
+  // file can't recurse until the stack runs out. Jumping to the block end also
+  // ends the enclosing loops.
+  if(m_nDescriptorDepth >= 32)
+  {
+    PhotoshopParseReportNote(nIndent, "ERROR: Descriptor nesting too deep. Stopping.");
+    nPos = m_nPosBlockEnd;
+    return;
+  }
+
+  m_nDescriptorDepth++;
+
   PhotoshopParseReportNote(nIndent, "Descriptor:");
   nIndent++;
 
@@ -3369,7 +3417,7 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
   if(nDescNumItems > 0)
     PhotoshopParseReportNote(nIndent, "-----");
 
-  for(uint32_t nDescInd = 0; nDescInd < nDescNumItems; nDescInd++)
+  for(uint32_t nDescInd = 0; (nDescInd < nDescNumItems) && (nPos < m_nPosBlockEnd); nDescInd++)
   {
     QString strDescInd;
 
@@ -3394,6 +3442,8 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
 
   if(nDescNumItems > 0)
     PhotoshopParseReportNote(nIndent, "-----");
+
+  m_nDescriptorDepth--;
 }
 
 // Parse the Photoshop IRB OSType List
@@ -3408,6 +3458,16 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
   QString strVal;
   QString strLine;
 
+  // Same nesting limit as PhotoshopParseDescriptor()
+  if(m_nDescriptorDepth >= 32)
+  {
+    PhotoshopParseReportNote(nIndent, "ERROR: List nesting too deep. Stopping.");
+    nPos = m_nPosBlockEnd;
+    return;
+  }
+
+  m_nDescriptorDepth++;
+
   uint32_t nNumItems = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   PhotoshopParseReportFldNum(nIndent, "Num items in list", nNumItems, "");
@@ -3415,7 +3475,7 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
   if(nNumItems > 0)
     PhotoshopParseReportNote(nIndent, "-----");
 
-  for(uint32_t nItemInd = 0; nItemInd < nNumItems; nItemInd++)
+  for(uint32_t nItemInd = 0; (nItemInd < nNumItems) && (nPos < m_nPosBlockEnd); nItemInd++)
   {
     QString strItemInd;
 
@@ -3437,6 +3497,8 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
 
   if(nNumItems > 0)
     PhotoshopParseReportNote(nIndent, "-----");
+
+  m_nDescriptorDepth--;
 }
 
 // Parse the Photoshop IRB OSType Integer

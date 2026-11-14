@@ -48,6 +48,8 @@ public slots:
   void scanImageAc(bool);
 
 private:
+  bool labelToImage(const QPoint &ptLabel, QPoint &ptImg) const;
+
   CSnoopConfig *m_pAppConfig;
   CimgDecode *m_pImgDecoder;
 

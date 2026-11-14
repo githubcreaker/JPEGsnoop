@@ -159,7 +159,9 @@ static const uint32_t JFIF_EOI = 0xD9;
 #define CC_CLIP_YCC_MAX		255
 
 // Image histogram definitions
-static const int32_t HISTO_BINS = 255; // 128;
+// One bin per 8-bit value (master used 128). Must divide 256: the bin index is
+// value / (256 / HISTO_BINS), and 255 bins put value 255 one past the array.
+static const int32_t HISTO_BINS = 256;
 static const int32_t HISTO_BIN_WIDTH	= 1;
 static const int32_t HISTO_BIN_HEIGHT_MAX = 60;
 

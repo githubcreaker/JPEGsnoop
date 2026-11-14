@@ -84,6 +84,7 @@ public:
   void setAutoUpdate(bool b) { bUpdateAuto = b; }
   void setUpdatePeriod(int32_t days) {nUpdateAutoDays = days; }
   void setAutoReprocess(bool b) { bReprocessAuto = b; }
+  void setInteractive(bool b) { bInteractive = b; }
   void setOnlineDb(bool b) { bDbSubmitNet = b; }
   void setMaxErrors(int32_t errors) { nErrMaxDecodeScan = errors; }
   void setStartPos(uint32_t start) { nPosStart = start; }
