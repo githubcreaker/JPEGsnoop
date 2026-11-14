@@ -37,3 +37,18 @@ simple stuff
  - nmake  
  req: ms visual studio(c++) 2005  
  http://imageshack.com/i/pmym0PEnj
+
+## Building on macOS (Qt 6)
+The Qt version of JPEGsnoop (this branch) builds on macOS with Qt 6.
+
+- Requirements: Qt 6 and the Xcode command line tools, for example
+  `brew install qtbase` and `xcode-select --install`
+- Build and package: `scripts/package-macos.sh`
+  - Output: `build-macos/JPEGsnoopQt-<version>-macos-<arch>.zip`, a self-contained app with Qt bundled
+  - `--no-build` packages an existing build; `--build-dir DIR` uses another build folder;
+    set `QMAKE` to choose a Qt installation
+- The app is ad-hoc signed and not notarized, so on other Macs Gatekeeper blocks it until
+  it is allowed in System Settings > Privacy & Security.
+- With Homebrew's Qt, the app needs the macOS version Homebrew built its libraries for
+  (the script sets `LSMinimumSystemVersion` to match). Qt's official installer targets
+  older macOS versions.

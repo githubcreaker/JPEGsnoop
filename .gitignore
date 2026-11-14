@@ -154,3 +154,6 @@ $RECYCLE.BIN/
 
 # Mac desktop service store files
 .DS_Store
+
+# macOS Qt build folder (scripts/package-macos.sh)
+build-macos/
