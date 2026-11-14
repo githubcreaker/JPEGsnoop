@@ -419,6 +419,29 @@ case("L1_reopen", "L1", "gui", name, "--repeat 21 --max-growth-mb 30", timeout=6
 case("L1_histograms_and_channels", "L1", "gui", name, "--histo --cycle-channels --repeat 6 --max-growth-mb 30",
      timeout=90, expect="memory growth.*: ok$")
 
+# --- U4: zoom memory ------------------------------------------------------------
+# 800% used to build an 8x-size copy of the whole preview (200+ MB for this
+# file); the preview now enlarges only what is on screen.
+case("U4_zoom_800_memory", "U4", "gui", name, "--zoom 800 --max-zoom-mb 40", timeout=60,
+     expect="zoom .*: ok$")
+
+# --- M: macOS -------------------------------------------------------------------
+# M1: report text keeps at least 4.5:1 contrast (WCAG AA) on light and dark
+# backgrounds, written in either and after switching while open. The files give
+# ordinary, header, description, warning and error lines.
+theme_files = ["ok_444.jpg", "c3_dht_258.jpg", "s_empty.jpg"]
+case("M1_dark_report", "M1", "gui", theme_files, "--dark --check-theme", timeout=60,
+     expect="theme dark as written: .*: ok$", forbid=": low$")
+case("M1_switch_to_dark", "M1", "gui", theme_files, "--check-theme", timeout=60,
+     expect="theme dark after switching: .*: ok$", forbid=": low$")
+# M4: on a Retina (2x) or 1.5x screen the preview is drawn at screen resolution:
+# its size, mouse mapping and pixels match the decoded image at each zoom
+for zoom, scale in (("12.5", "2"), ("50", "2"), ("100", "2"), ("150", "1.5"), ("800", "2"), ("200", "1")):
+    case(f"M4_preview_{zoom.replace('.', '_')}_at_{scale.replace('.', '_')}x", "M4", "gui", name,
+         f"--scale {scale} --zoom {zoom} --check-preview --mouse", timeout=60, expect="harness: preview .*: ok$")
+case("M4_histograms_retina", "M4", "gui", name, "--scale 2 --histo --check-histo", timeout=60,
+     expect="histogram yHistogram .*scale=2: ok$", forbid="histogram .*(missing|: wrong)")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

@@ -34,6 +34,19 @@
 
 #include "mainwindow.h"
 
+// Show a histogram across the label's width at the screen's own resolution.
+// A plain pixmap is drawn at one pixel per point, which a Retina screen then
+// doubles, so the bars came out soft and uneven. Fast (unsmoothed) scaling
+// keeps the bars' edges sharp.
+static void showHistogram(QLabel *pLabel, const QImage &imgHisto)
+{
+  const qreal dDpr = pLabel->devicePixelRatioF();
+  QImage imgScaled = imgHisto.scaled(qRound(pLabel->width() * dDpr), qRound(imgHisto.height() * dDpr));
+
+  imgScaled.setDevicePixelRatio(dDpr);
+  pLabel->setPixmap(QPixmap::fromImage(imgScaled));
+}
+
 #ifdef Q_OS_MAC
 const QString rsrcPath = ":/images/mac";
 #else
@@ -102,6 +115,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new QPla
   QVBoxLayout *vLayout = new QVBoxLayout;
 
   rgbHisto = new QLabel;
+  rgbHisto->setObjectName("rgbHistogram");
   rgbHisto->setAlignment(Qt::AlignBottom | Qt::AlignLeft);
   rgbHisto->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
   rgbHisto->setMinimumSize(width() / 2, 180);
@@ -109,6 +123,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new QPla
   hLayout->addWidget(rgbHisto);
 
   yHisto = new QLabel;
+  yHisto->setObjectName("yHistogram");
   yHisto->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
   yHisto->setMinimumSize(width() / 2, 180);
   yHisto->setStyleSheet("background-color: white");
@@ -140,6 +155,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new QPla
   connect(m_pAppConfig, SIGNAL(reprocess()), this, SLOT(reprocess()));
 
   m_pDocLog->setDoc(textEdit);
+
+  // Re-colour the report when the light/dark appearance changes (the event
+  // reaches the report view after its own palette has been updated)
+  textEdit->installEventFilter(this);
 
   // Coach Messages
   strLoRes = "Currently only decoding low-res view (DC-only). Full-resolution image decode can be enabled in [Options->Scan Segment->Full IDCT], but it is slower.";
@@ -312,14 +331,16 @@ void MainWindow::createActions(void)
   connect(channelGroup, SIGNAL(triggered(QAction*)), m_pImgDec, SLOT(setPreviewMode(QAction*)));
 
   // Image Zoom
-  const QIcon zoomInIcon = QIcon::fromTheme("document-print", QIcon(rsrcPath + "/zoomin.png"));
-  zoomInAct = new QAction(zoomInIcon, tr("Zoom In"));
+  // Theme names for zoom (these asked for "document-print", which the macOS
+  // theme turns into a printer symbol)
+  const QIcon zoomInIcon = QIcon::fromTheme("zoom-in", QIcon(rsrcPath + "/zoomin.png"));
+  zoomInAct = new QAction(zoomInIcon, tr("Zoom In"), this);
   zoomInAct->setData(PRV_ZOOM_IN);
   zoomInAct->setShortcuts(QKeySequence::ZoomIn);
   fileToolBar->addAction(zoomInAct);
 
-  const QIcon zoomOutIcon = QIcon::fromTheme("document-print", QIcon(rsrcPath + "/zoomout.png"));
-  zoomOutAct = new QAction(zoomOutIcon, tr("Zoom Out"));
+  const QIcon zoomOutIcon = QIcon::fromTheme("zoom-out", QIcon(rsrcPath + "/zoomout.png"));
+  zoomOutAct = new QAction(zoomOutIcon, tr("Zoom Out"), this);
   zoomOutAct->setData(PRV_ZOOM_OUT);
   zoomOutAct->setShortcuts(QKeySequence::ZoomOut);
   fileToolBar->addAction(zoomOutAct);
@@ -445,6 +466,10 @@ void MainWindow::createActions(void)
   connect(relaxedParseAct, SIGNAL(triggered()), m_pAppConfig, SLOT(onOptionsRelaxedparsing()));
 
   configAct = new QAction(tr("Configuration..."), this);
+  // On macOS this is the app menu's Preferences item (Cmd+,), as Qt's text
+  // heuristic would guess anyway; say so explicitly, with the standard shortcut
+  configAct->setMenuRole(QAction::PreferencesRole);
+  configAct->setShortcuts(QKeySequence::Preferences);
   connect(configAct, &QAction::triggered, this, &MainWindow::onConfig);
 
   checkUpdatesAct = new QAction(tr("Check for Updates..."), this);
@@ -494,7 +519,7 @@ void MainWindow::createActions(void)
   detailedDecodeAct = new QAction(tr("Detailed Decode..."), this);
 
   // Help menu
-  aboutAct = new QAction(tr("&About JPEGsnoop..."));
+  aboutAct = new QAction(tr("&About JPEGsnoop..."), this);
 
   if(DEBUG_EN)
     m_pAppConfig->DebugLogAdd("MainWindow::createActions() End");
@@ -745,18 +770,14 @@ void MainWindow::AnalyzeFileDo()
 
     m_pJfifDec->ProcessFile(m_pFile);
 
-    int32_t h;
-
     if(m_pAppConfig->displayRgbHistogram() && m_pImgDec->isRgbHistogramReady())
     {
-      h = m_pImgDec->rgbHistogram()->height();
-      rgbHisto->setPixmap(QPixmap::fromImage((*m_pImgDec->rgbHistogram()).scaled(rgbHisto->width(), h)));
+      showHistogram(rgbHisto, *m_pImgDec->rgbHistogram());
     }
 
     if(m_pAppConfig->displayYHistogram() && m_pImgDec->isRgbHistogramReady())
     {
-      h = m_pImgDec->yHistogram()->height();
-      yHisto->setPixmap(QPixmap::fromImage((*m_pImgDec->yHistogram()).scaled(yHisto->width(), h)));
+      showHistogram(yHisto, *m_pImgDec->yHistogram());
     }
 
     qDebug() << QString("MainWindow::AnalyzeFileDo() DibTempReady=%1 PreviewIsJpeg=%2")
@@ -940,6 +961,18 @@ void MainWindow::filePrintPreview()
 void MainWindow::printPreview(QPrinter *printer)
 {
   textEdit->print(printer);
+}
+
+//-----------------------------------------------------------------------------
+
+bool MainWindow::eventFilter(QObject *pObj, QEvent *pEvent)
+{
+  if((pObj == textEdit) && (pEvent->type() == QEvent::PaletteChange) && m_pDocLog)
+  {
+    m_pDocLog->RecolorForPalette();
+  }
+
+  return QMainWindow::eventFilter(pObj, pEvent);
 }
 
 //-----------------------------------------------------------------------------

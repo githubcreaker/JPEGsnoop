@@ -28,9 +28,19 @@ when it is installed, so Pillow needn't be installed separately).
     the histograms on, `--cycle-channels` shows every View > Image Chan channel
     after each file, `--repeat` opens the files N times, and `--max-growth-mb`
     reports whether memory grew by more than N MB after the first round (a leak
-    check; skipped under ASan);
+    check; skipped under ASan). After each file in the first round:
+    - `--zoom PCT` picks that View > Zoom level (`800` for 800%), and
+      `--max-zoom-mb N` reports whether showing it took more than N MB;
+    - `--check-preview` compares the preview with the decoded image: its size, where
+      mouse positions land in the image, and the pixels drawn, in screen pixels;
+    - `--check-histo` checks that the histograms are drawn at screen resolution;
+    - `--check-theme` reports the lowest contrast between report text and its
+      background, then switches between light and dark palettes and reports it again
+      (`--dark` starts with a dark palette, as macOS Dark Mode does);
   - `settings` exercises settings load/store, option toggles and the
-    Configuration dialog.
+    Configuration dialog;
+  - `--scale F`, in any mode, runs as if on a screen with F device pixels per
+    point (2 for Retina).
 
   It always runs offscreen with throwaway settings, so it never shows a window
   or touches your JPEGsnoop settings.
@@ -44,8 +54,8 @@ when it is installed, so Pillow needn't be installed separately).
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
 (`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
-GUI behaviour, `L` leaks; `XP` covers the UTF-16 EXIF tags); `ok_*` cases are
-valid files that must keep decoding.
+GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags); `ok_*`
+cases are valid files that must keep decoding.
 
 ## Adding a case
 

@@ -7,7 +7,9 @@
 //     histograms; --unknown-exif: also report unknown EXIF tags.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
-//     [--cycle-channels] [--repeat N] [--max-growth-mb N]
+//     [--cycle-channels] [--repeat N] [--max-growth-mb N] [--zoom PCT]
+//     [--max-zoom-mb N] [--check-preview] [--check-histo] [--dark]
+//     [--check-theme]
 //     Build the real MainWindow, open each file in turn as File > Open does,
 //     and print a "harness:" line per file. With --mouse, move the mouse over
 //     the preview window and click at points inside, at the edges of and
@@ -17,6 +19,17 @@
 //     View > Image Chan channel after each file; --repeat opens the files N
 //     times; --max-growth-mb reports whether memory grew by more than N MB
 //     after the first round (a leak check).
+//     After each file in the first round: --zoom picks that View > Zoom
+//     level ("800" for 800%), and --max-zoom-mb reports whether showing it
+//     took more than N MB; --check-preview compares the preview's size, mouse
+//     mapping and drawn pixels with the decoded image; --check-histo checks
+//     the histograms are drawn at the screen's resolution; --check-theme
+//     reports the report's lowest text contrast, then switches between light
+//     and dark palettes and reports it again. --dark starts with a dark
+//     palette, as macOS Dark Mode does.
+//
+// --scale F (any mode) runs as if on a screen with F device pixels per point
+// (QT_SCALE_FACTOR), e.g. 2 for a Retina display.
 //
 // settings
 //     Exercise settings load/store, option toggles and the Configuration
@@ -33,14 +46,24 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLineEdit>
+#include <QLabel>
 #include <QMouseEvent>
+#include <QPalette>
+#include <QPixmap>
 #include <QPushButton>
 #include <QPlainTextEdit>
 #include <QPointingDevice>
+#include <QSet>
 #include <QSettings>
+#include <QStyle>
 #include <QTemporaryDir>
+#include <QTextBlock>
+#include <QTextDocument>
 #include <QTextStream>
+#include <QtMath>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 
 #ifdef Q_OS_MACOS
 #include <mach/mach.h>
@@ -55,7 +78,6 @@
 #include "SnoopConfig.h"
 #include "Viewer.h"
 #include "WindowBuf.h"
-#include "labelClick.h"
 #include "mainwindow.h"
 #include "snoopconfigdialog.h"
 
@@ -65,7 +87,10 @@ static void usage()
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
           "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
-          "       jpegsnoop-harness settings\n");
+          "                         [--zoom PCT] [--max-zoom-mb N] [--check-preview] [--check-histo]\n"
+          "                         [--dark] [--check-theme]\n"
+          "       jpegsnoop-harness settings\n"
+          "       any mode: [--scale F]\n");
 }
 
 static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strDbDir)
@@ -218,11 +243,13 @@ static int runSettings(const QString &strSettingsDir)
   return 0;
 }
 
-static void sendMouse(QWidget *pWidget, QEvent::Type eType, const QPoint &pt)
+static double memoryMb();
+
+static void sendMouse(QWidget *pWidget, QEvent::Type eType, const QPointF &pt)
 {
   const Qt::MouseButton eButton = (eType == QEvent::MouseMove) ? Qt::NoButton : Qt::LeftButton;
   const Qt::MouseButtons nButtons = (eType == QEvent::MouseButtonPress) ? Qt::LeftButton : Qt::NoButton;
-  QMouseEvent ev(eType, QPointF(pt), pWidget->mapToGlobal(QPointF(pt)), eButton, nButtons, Qt::NoModifier,
+  QMouseEvent ev(eType, pt, pWidget->mapToGlobal(pt), eButton, nButtons, Qt::NoModifier,
                  QPointingDevice::primaryPointingDevice());
   QCoreApplication::sendEvent(pWidget, &ev);
 }
@@ -243,23 +270,277 @@ static void exerciseMouse()
   Q_Viewer *pViewer = findViewer();
   if(!pViewer)
     return;
-  labelClick *pLabel = pViewer->findChild<labelClick *>();
-  if(!pLabel)
+  PreviewCanvas *pCanvas = pViewer->findChild<PreviewCanvas *>();
+  if(!pCanvas)
     return;
 
-  const int w = pLabel->width();
-  const int h = pLabel->height();
+  const int w = qMax(1, pCanvas->width());
+  const int h = qMax(1, pCanvas->height());
   const QPoint aPts[] = {
     QPoint(0, 0), QPoint(w / 2, h / 2), QPoint(w - 1, h - 1), QPoint(w - 1, 0), QPoint(0, h - 1),
     QPoint(w * 3, h * 3), QPoint(-40, -40), QPoint(-1, h / 2), QPoint(w / 2, -1),
   };
   for(const QPoint &pt : aPts)
   {
-    sendMouse(pLabel, QEvent::MouseMove, pt);
-    sendMouse(pLabel, QEvent::MouseButtonPress, pt);
-    sendMouse(pLabel, QEvent::MouseButtonRelease, pt);
+    sendMouse(pCanvas, QEvent::MouseMove, pt);
+    sendMouse(pCanvas, QEvent::MouseButtonPress, pt);
+    sendMouse(pCanvas, QEvent::MouseButtonRelease, pt);
   }
+  QEvent evLeave(QEvent::Leave);
+  QCoreApplication::sendEvent(pCanvas, &evLeave);
   QCoreApplication::processEvents();
+}
+
+// Compare the preview with the decoded image at the current zoom and screen
+// scale: the canvas size, where mouse positions land in the image, and the
+// pixels drawn, in screen (device) pixels. Below 100% each screen pixel must
+// be one pixel of the smoothly reduced image; from 100% each image pixel must
+// be a sharp block of zoom x zoom screen pixels.
+static void checkPreview(QTextStream &out)
+{
+  Q_Viewer *pViewer = findViewer();
+  PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+  if(!pCanvas || pCanvas->image().isNull())
+  {
+    out << "harness: preview missing\n";
+    return;
+  }
+
+  const QImage &img = pCanvas->image();
+  const double dZoom = pCanvas->zoom();
+  const double dDpr = pCanvas->devicePixelRatioF();
+  const double dScale = dZoom / dDpr;               // points per image pixel
+  QStringList errors;
+
+  const QSize sizeWant(qCeil(img.width() * dScale), qCeil(img.height() * dScale));
+  if(pCanvas->size() != sizeWant)
+  {
+    errors << QString("canvas %1x%2, want %3x%4")
+                .arg(pCanvas->width()).arg(pCanvas->height()).arg(sizeWant.width()).arg(sizeWant.height());
+  }
+
+  // Mouse: the centre of an image pixel must map back to that pixel, and
+  // points off the image must say so
+  QPoint ptGot;
+  bool bGotInside = false;
+  const QMetaObject::Connection conn =
+    QObject::connect(pCanvas, &PreviewCanvas::moved, [&](QPoint pt, bool bInside) {
+      ptGot = pt;
+      bGotInside = bInside;
+    });
+  const QPoint aPix[] = { QPoint(0, 0), QPoint(img.width() - 1, img.height() - 1),
+                          QPoint(img.width() / 2, img.height() / 3), QPoint(img.width() - 1, 0) };
+  for(const QPoint &ptPix : aPix)
+  {
+    bGotInside = false;
+    sendMouse(pCanvas, QEvent::MouseMove, QPointF((ptPix.x() + 0.5) * dScale, (ptPix.y() + 0.5) * dScale));
+    if(!bGotInside || (ptGot != ptPix))
+    {
+      errors << QString("mouse over pixel %1,%2 gave %3,%4%5")
+                  .arg(ptPix.x()).arg(ptPix.y()).arg(ptGot.x()).arg(ptGot.y()).arg(bGotInside ? "" : " (outside)");
+    }
+  }
+  const QPointF aOff[] = { QPointF(-1, -1), QPointF(img.width() * dScale + 1, 0), QPointF(0, img.height() * dScale + 1) };
+  for(const QPointF &ptOff : aOff)
+  {
+    bGotInside = true;
+    sendMouse(pCanvas, QEvent::MouseMove, ptOff);
+    if(bGotInside)
+      errors << QString("mouse at %1,%2 (off the image) reported inside").arg(ptOff.x()).arg(ptOff.y());
+  }
+  QObject::disconnect(conn);
+
+  // Pixels: all of a reduced preview, or 48x48 points from the middle
+  QImage imgRef;
+  if(dZoom < 1.0)
+  {
+    imgRef = img.scaled(qMax(1, qRound(img.width() * dZoom)), qMax(1, qRound(img.height() * dZoom)),
+                        Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+  }
+  QRect rectGrab = (dZoom < 1.0) ? pCanvas->rect()
+                                 : QRect(sizeWant.width() / 2 - 24, sizeWant.height() / 2 - 24, 48, 48);
+  rectGrab &= pCanvas->rect();
+  const QImage imgGrab = pCanvas->grab(rectGrab).toImage();
+  const int nOffX = qRound(rectGrab.x() * dDpr);
+  const int nOffY = qRound(rectGrab.y() * dDpr);
+  int nChecked = 0;
+  int nBad = 0;
+  for(int y = 0; y < imgGrab.height(); y++)
+  {
+    for(int x = 0; x < imgGrab.width(); x++)
+    {
+      const int nDevX = nOffX + x;
+      const int nDevY = nOffY + y;
+      QRgb nWant;
+      if(dZoom < 1.0)
+      {
+        if((nDevX >= imgRef.width()) || (nDevY >= imgRef.height()))
+          continue;
+        nWant = imgRef.pixel(nDevX, nDevY);
+      }
+      else
+      {
+        const int nPixX = qFloor((nDevX + 0.5) / dZoom);
+        const int nPixY = qFloor((nDevY + 0.5) / dZoom);
+        if((nPixX >= img.width()) || (nPixY >= img.height()))
+          continue;
+        nWant = img.pixel(nPixX, nPixY);
+      }
+      nChecked++;
+      if((imgGrab.pixel(x, y) & 0xFFFFFF) != (nWant & 0xFFFFFF))
+        nBad++;
+    }
+  }
+  if((nChecked == 0) || (nBad > 0))
+    errors << QString("%1 of %2 screen pixels differ").arg(nBad).arg(nChecked);
+
+  out << QString("harness: preview zoom=%1 scale=%2 canvas=%3x%4 image=%5x%6 pixels=%7: %8\n")
+           .arg(dZoom).arg(dDpr).arg(pCanvas->width()).arg(pCanvas->height())
+           .arg(img.width()).arg(img.height()).arg(nChecked)
+           .arg(errors.isEmpty() ? QString("ok") : errors.join("; "));
+}
+
+// View > Zoom: pick a zoom ("800" for 800%) and draw the preview at it. With
+// nMaxMb >= 0, report whether that took more than nMaxMb of memory.
+static void zoomPreview(MainWindow &window, const QString &strZoom, int nMaxMb, QTextStream &out)
+{
+  QAction *pZoom = nullptr;
+  const QList<QAction *> actions = window.findChildren<QAction *>();
+  for(QAction *pAction : actions)
+  {
+    if(pAction->text() == strZoom + "%")
+    {
+      pZoom = pAction;
+      break;
+    }
+  }
+  if(!pZoom)
+  {
+    out << "harness: no zoom " << strZoom << "%\n";
+    return;
+  }
+
+  const double dBefore = memoryMb();
+  pZoom->trigger();
+  QCoreApplication::processEvents();
+  if(Q_Viewer *pViewer = findViewer())
+    pViewer->grab();                                // paints the visible part
+  const double dUsed = memoryMb() - dBefore;
+
+  if(nMaxMb < 0)
+    return;
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+  Q_UNUSED(dUsed);
+  out << "harness: zoom memory not measured under AddressSanitizer: ok\n";
+#else
+  out << QString("harness: zoom %1% used %2 MB (limit %3 MB): %4\n")
+           .arg(strZoom)
+           .arg(dUsed, 0, 'f', 1)
+           .arg(nMaxMb)
+           .arg(dUsed <= nMaxMb ? "ok" : "too much");
+#endif
+}
+
+// Both histograms must fill their label at the screen's resolution
+static void checkHistograms(MainWindow &window, QTextStream &out)
+{
+  for(const char *pszName : { "rgbHistogram", "yHistogram" })
+  {
+    QLabel *pLabel = window.findChild<QLabel *>(pszName);
+    const QPixmap pm = pLabel ? pLabel->pixmap() : QPixmap();
+    if(pm.isNull())
+    {
+      out << "harness: histogram " << pszName << " missing\n";
+      continue;
+    }
+    const qreal dDpr = pLabel->devicePixelRatioF();
+    const bool bOk = qFuzzyCompare(pm.devicePixelRatio(), dDpr) && (pm.width() == qRound(pLabel->width() * dDpr));
+    out << QString("harness: histogram %1 pixmap=%2x%3 ratio=%4 label width=%5 scale=%6: %7\n")
+             .arg(pszName).arg(pm.width()).arg(pm.height()).arg(pm.devicePixelRatio())
+             .arg(pLabel->width()).arg(dDpr).arg(bOk ? "ok" : "wrong");
+  }
+}
+
+// WCAG contrast ratio of two colours, from 1 (same) to 21 (black on white)
+static double contrastRatio(const QColor &col1, const QColor &col2)
+{
+  auto luminance = [](const QColor &col) {
+    auto linear = [](double v) { return (v <= 0.04045) ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * linear(col.redF()) + 0.7152 * linear(col.greenF()) + 0.0722 * linear(col.blueF());
+  };
+  const double d1 = luminance(col1);
+  const double d2 = luminance(col2);
+  return (qMax(d1, d2) + 0.05) / (qMin(d1, d2) + 0.05);
+}
+
+// Roughly the palette macOS gives Qt in Dark Mode
+static QPalette darkPalette()
+{
+  QPalette pal;
+  pal.setColor(QPalette::Window, QColor(50, 50, 50));
+  pal.setColor(QPalette::WindowText, QColor(223, 223, 223));
+  pal.setColor(QPalette::Base, QColor(30, 30, 30));
+  pal.setColor(QPalette::AlternateBase, QColor(40, 40, 40));
+  pal.setColor(QPalette::Text, QColor(223, 223, 223));
+  pal.setColor(QPalette::Button, QColor(70, 70, 70));
+  pal.setColor(QPalette::ButtonText, QColor(223, 223, 223));
+  pal.setColor(QPalette::Highlight, QColor(0, 88, 208));
+  pal.setColor(QPalette::HighlightedText, Qt::white);
+  return pal;
+}
+
+// Lowest contrast between any run of report text and the report background
+static double lowestContrast(QPlainTextEdit *pEdit, int &nRuns, int &nColours)
+{
+  QSet<QRgb> colours;
+  const QColor colBase = pEdit->palette().color(QPalette::Base);
+  const QColor colText = pEdit->palette().color(QPalette::Text);
+  double dLowest = 21.0;
+  nRuns = 0;
+  for(QTextBlock block = pEdit->document()->begin(); block.isValid(); block = block.next())
+  {
+    for(QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it)
+    {
+      const QTextFragment frag = it.fragment();
+      if(!frag.isValid() || frag.text().trimmed().isEmpty())
+        continue;
+      const QBrush brush = frag.charFormat().foreground();
+      const QColor col = (brush.style() == Qt::NoBrush) ? colText : brush.color();
+      dLowest = qMin(dLowest, contrastRatio(col, colBase));
+      colours.insert(col.rgb());
+      nRuns++;
+    }
+  }
+  nColours = static_cast<int>(colours.size());
+  return dLowest;
+}
+
+static void reportContrast(MainWindow &window, const QString &strWhen, QTextStream &out)
+{
+  int nRuns = 0;
+  int nColours = 0;
+  const double dLowest = lowestContrast(window.textEdit, nRuns, nColours);
+  const bool bDark = window.textEdit->palette().color(QPalette::Base).lightness() < 128;
+  out << QString("harness: theme %1 %2: lowest contrast %3 over %4 runs in %5 colours: %6\n")
+           .arg(bDark ? "dark" : "light").arg(strWhen).arg(dLowest, 0, 'f', 2).arg(nRuns).arg(nColours)
+           .arg(((nRuns > 0) && (dLowest >= 4.5)) ? "ok" : "low");
+}
+
+// The report as written, then after switching to the other scheme and back
+// (as when the user switches macOS between Light and Dark while it is open)
+static void checkTheme(MainWindow &window, QTextStream &out)
+{
+  const bool bStartDark = window.textEdit->palette().color(QPalette::Base).lightness() < 128;
+  const QPalette palStart = QApplication::palette();
+  const QPalette palOther = bStartDark ? QApplication::style()->standardPalette() : darkPalette();
+
+  reportContrast(window, "as written", out);
+  QApplication::setPalette(palOther);
+  QCoreApplication::processEvents();
+  reportContrast(window, "after switching", out);
+  QApplication::setPalette(palStart);
+  QCoreApplication::processEvents();
+  reportContrast(window, "after switching back", out);
 }
 
 struct GuiOptions
@@ -271,6 +552,12 @@ struct GuiOptions
   bool bCycleChannels = false;    // --cycle-channels
   int nRepeat = 1;                // --repeat N
   int nMaxGrowthMb = -1;          // --max-growth-mb N (-1: don't measure)
+  QString strZoom;                // --zoom PCT
+  int nMaxZoomMb = -1;            // --max-zoom-mb N (-1: don't measure)
+  bool bCheckPreview = false;     // --check-preview
+  bool bCheckHisto = false;       // --check-histo
+  bool bDark = false;             // --dark
+  bool bCheckTheme = false;       // --check-theme
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -324,6 +611,9 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     }
   }
 
+  if(opts.bDark)
+    QApplication::setPalette(darkPalette());
+
   MainWindow window;
   window.show();
   QCoreApplication::processEvents();
@@ -355,6 +645,19 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
                  .arg(strLog.contains("*** Decoding SCAN Data ***") ? 1 : 0);
         if(opts.bLog)
           out << strLog << "\n";
+        out.flush();
+      }
+
+      if(nRound == 0)
+      {
+        if(!opts.strZoom.isEmpty())
+          zoomPreview(window, opts.strZoom, opts.nMaxZoomMb, out);
+        if(opts.bCheckPreview)
+          checkPreview(out);
+        if(opts.bCheckHisto)
+          checkHistograms(window, out);
+        if(opts.bCheckTheme)
+          checkTheme(window, out);
         out.flush();
       }
 
@@ -393,6 +696,13 @@ int main(int argc, char **argv)
   if(qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
     qputenv("QT_QPA_PLATFORM", "offscreen");
 
+  // --scale has to be in place before QApplication reads the screens
+  for(int i = 1; i + 1 < argc; i++)
+  {
+    if(std::strcmp(argv[i], "--scale") == 0)
+      qputenv("QT_SCALE_FACTOR", argv[i + 1]);
+  }
+
   QApplication app(argc, argv);
   QCoreApplication::setOrganizationName("JPEGsnoopTests");
   QCoreApplication::setOrganizationDomain("tests.invalid");
@@ -414,11 +724,31 @@ int main(int argc, char **argv)
   guiOpts.bReprocessFirst = args.removeAll("--reprocess-first") > 0;
   guiOpts.bHisto = bHisto;
   guiOpts.bCycleChannels = args.removeAll("--cycle-channels") > 0;
+  guiOpts.bCheckPreview = args.removeAll("--check-preview") > 0;
+  guiOpts.bCheckHisto = args.removeAll("--check-histo") > 0;
+  guiOpts.bDark = args.removeAll("--dark") > 0;
+  guiOpts.bCheckTheme = args.removeAll("--check-theme") > 0;
+
+  // Options with a text value (--scale was applied above)
+  for(const char *pszOpt : { "--scale", "--zoom" })
+  {
+    const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
+    if(nInd < 0)
+      continue;
+    if(nInd + 1 >= args.size())
+    {
+      usage();
+      return 2;
+    }
+    if(QLatin1String(pszOpt) == QLatin1String("--zoom"))
+      guiOpts.strZoom = args.at(nInd + 1);
+    args.remove(nInd, 2);
+  }
 
   // Options with a numeric value
-  for(const char *pszOpt : { "--repeat", "--max-growth-mb" })
+  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb" })
   {
-    const int nInd = args.indexOf(QLatin1String(pszOpt));
+    const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
       continue;
     bool bOk = false;
@@ -431,8 +761,10 @@ int main(int argc, char **argv)
     args.remove(nInd, 2);
     if(QLatin1String(pszOpt) == QLatin1String("--repeat"))
       guiOpts.nRepeat = qMax(1, nVal);
-    else
+    else if(QLatin1String(pszOpt) == QLatin1String("--max-growth-mb"))
       guiOpts.nMaxGrowthMb = nVal;
+    else
+      guiOpts.nMaxZoomMb = nVal;
   }
 
   QTemporaryDir tmpDir;

@@ -16,6 +16,26 @@ win32{
     RC_FILE += win_res.rc
 }
 
+macx{
+    # Bundle ID com.impulseadventure.JPEGsnoopQt: the same name macOS gives
+    # the app's settings (organisation domain impulseadventure.com, set in
+    # main.cpp), instead of qmake's placeholder com.yourcompany.
+    QMAKE_TARGET_BUNDLE_PREFIX = com.impulseadventure
+
+    # Version for Finder and the bundle (CFBundleShortVersionString), taken
+    # from VERSION_STR in source/snoop.h so it is kept in one place
+    SNOOP_H_LINES = $$cat($$PWD/source/snoop.h, lines)
+    VERSION_LINE = $$find(SNOOP_H_LINES, "^.define VERSION_STR ")
+    VERSION = $$section(VERSION_LINE, \", 1, 1)
+    isEmpty(VERSION): error("Could not read VERSION_STR from source/snoop.h")
+
+    # Qt's default template has no version keys
+    QMAKE_INFO_PLIST = macos/Info.plist
+
+    # Made from images/jpegsnoop.ico by scripts/make-macos-icon.py
+    ICON = images/jpegsnoop.icns
+}
+
 OTHER_FILES += \
     images\jpegsnoop.ico \
     win_res.rc

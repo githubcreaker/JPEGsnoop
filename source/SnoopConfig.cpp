@@ -101,7 +101,13 @@ CSnoopConfig::CSnoopConfig(QObject *_parent) : QObject(_parent)
   // Reset coach message flags
   CoachReset();
 
-  strReprocess = "You have changed a processing option. To see these changes, you need to Reprocess the file or enable [Auto Reprocessing] in Configuration.";
+  // Configuration lives in the app menu as Preferences on macOS (MainWindow
+  // gives it the Preferences role), and in the Options menu elsewhere
+#ifdef Q_OS_MACOS
+  strReprocess = "You have changed a processing option. To see these changes, you need to Reprocess the file or enable [Auto Reprocessing] in Preferences (Cmd+,).";
+#else
+  strReprocess = "You have changed a processing option. To see these changes, you need to Reprocess the file or enable [Auto Reprocessing] in Options > Configuration.";
+#endif
 
   // Reset the current filename
   strCurFname = "";

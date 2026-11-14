@@ -136,8 +136,58 @@ In detail:
   window.
 - **Decode output unchanged:** reports, signatures included, are identical for 32 files.
 
-**Still open:** the rest of C7; the inherited R13–R15, R17 and R18; U4; the macOS items;
-latent code.
+### macOS items and U4
+
+**Fixed:** M1–M4 and U4 (section 5 and section 4); M5 except the signing.
+- **M1 Dark Mode:** ordinary report text no longer sets a colour, so it follows the
+  system's text colour. Headers, warnings, errors and "good" lines each have a light and
+  a dark shade, chosen from the report's background. Switching macOS between Light and
+  Dark while a report is open recolours it. Every shade has at least 4.5:1 contrast
+  (WCAG AA) on its background. Before: ordinary text had 1.25:1 in Dark Mode, and error
+  lines had 3.99:1 even in Light Mode.
+- **M2 Zoom buttons:** they ask the theme for `zoom-in` and `zoom-out`, which macOS
+  shows as magnifier symbols (checked with the Cocoa platform); other systems fall back
+  to the bundled images.
+- **M3 Preferences:** "Configuration..." is marked as the Preferences item, so on macOS
+  it is always Preferences... in the app menu, with ⌘, (other systems keep it under
+  Options). The auto-reprocess tip names Preferences (Cmd+,) on macOS.
+- **M4 Retina:** the preview draws the image itself instead of stretching a label:
+  - 100% is one image pixel per screen pixel, on Retina too.
+  - Below 100% it shows one smoothly reduced copy at screen resolution. At 12.5% the
+    old label was stretched over the whole window, so the preview looked blocky.
+  - Above 100% it enlarges only the part on screen, as sharp pixel blocks.
+  - Mouse positions are converted to image pixels for the status bar and the marker.
+  - Moving to a screen with a different scale redraws it.
+  - The histograms are drawn at screen resolution.
+- **U4:** showing 800% took 193 MB for a 1024×768 image, about 0.7 MB now, because no
+  enlarged copy of the whole image is made.
+- **M5 Packaging:** bundle ID `com.impulseadventure.JPEGsnoopQt` (the name macOS gives
+  the app's settings), version 1.8.0 from `snoop.h`, and an app icon made from
+  `images/jpegsnoop.ico` by `scripts/make-macos-icon.py`. The 48-pixel art is enlarged
+  in whole-pixel steps, so the large sizes are sharp but look like pixel art.
+  `NSHighResolutionCapable` is set. The packaging script now rewrites `Info.plist` on
+  each build; qmake only wrote it when it was missing.
+- **Also:** the unused `labelClick` widget is removed.
+- **Still ad-hoc signed:** Developer ID signing and notarization need an Apple Developer
+  certificate, and there is none in the keychain here.
+
+10 new cases cover these (74 in all). `--scale` in the test driver simulates a Retina
+or 1.5× screen.
+
+**Checks:**
+- **Tests catch the bugs:** run against the previous commit, all 10 new cases fail. The
+  preview cases can't use the old preview widget, so there they fail by construction.
+- **All 74 pass** with and without ASan/UBSan.
+- **Preview checked pixel by pixel** at every zoom from 12.5% to 800%, on 1×, 1.5× and
+  2× screens.
+- **Decode output unchanged:** reports are identical for 24 files.
+- **Packaged app:** the zipped app has the bundle ID, version and icon, and its strict
+  signature check passes.
+- **Not checked in the running app:** the menu, icons and Dark Mode switch were checked
+  with the test driver and Qt's macOS platform, but not by using the app on screen.
+
+**Still open:** the rest of C7; the inherited R13–R15, R17 and R18; Developer ID signing
+and notarization (M5); latent code.
 
 ## How this was reviewed
 
@@ -370,11 +420,11 @@ directory mode).
 
 ## 5. macOS-specific
 
-- **Dark Mode:** `DocLog.cpp:66-101` hard-codes the log text colour, ordinary text to RGB(1,1,1), on the system background, so the report is near-black on dark grey. **Re-checked** in source. Use palette colours or force a light background.
-- **Zoom buttons show a printer icon:** `mainwindow.cpp:295`, `301` ask the theme for `"document-print"`; Qt 6.7+ on macOS supplies the SF Symbols printer. **Re-checked** in source.
-- `mainwindow.cpp:427`: "Configuration..." is moved to the app menu as Preferences by Qt's menu-role heuristic, while the coach text still says "Configuration".
-- `Viewer.cpp:121`, `mainwindow.cpp:714`, `720`: preview and histogram pixmaps ignore the device pixel ratio, so "100%" isn't 1:1 on Retina screens.
-- Packaging (from the build work): bundle ID is the placeholder `com.yourcompany.JPEGsnoopQt`, no app icon, ad-hoc signed only.
+- **M1. Dark Mode:** `DocLog.cpp:66-101` hard-codes the log text colour, ordinary text to RGB(1,1,1), on the system background, so the report is near-black on dark grey. **Re-checked** in source. Use palette colours or force a light background.
+- **M2. Zoom buttons show a printer icon:** `mainwindow.cpp:295`, `301` ask the theme for `"document-print"`; Qt 6.7+ on macOS supplies the SF Symbols printer. **Re-checked** in source.
+- **M3. Configuration becomes Preferences:** `mainwindow.cpp:427`: "Configuration..." is moved to the app menu as Preferences by Qt's menu-role heuristic, while the coach text still says "Configuration".
+- **M4. Not Retina-aware:** `Viewer.cpp:121`, `mainwindow.cpp:714`, `720`: preview and histogram pixmaps ignore the device pixel ratio, so "100%" isn't 1:1 on Retina screens.
+- **M5. Packaging** (from the build work): bundle ID is the placeholder `com.yourcompany.JPEGsnoopQt`, no app icon, ad-hoc signed only.
 
 ## 6. Leaks
 

@@ -49,6 +49,7 @@ public:
 
 protected:
   void closeEvent(QCloseEvent *e) override;
+  bool eventFilter(QObject *pObj, QEvent *pEvent) override;
 
 signals:
   void ImgSrcChanged();

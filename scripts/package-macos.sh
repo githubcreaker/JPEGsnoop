@@ -93,6 +93,9 @@ app="$build_dir/$APP_NAME.app"
 
 if [[ $do_build -eq 1 ]]; then
   log "Building with Qt $qt_version in $build_dir"
+  # qmake's Makefile only writes Info.plist when it is missing, so a bundle ID
+  # or version changed in JPEGsnoopQt.pro would not reach an existing build
+  rm -f "$app/Contents/Info.plist"
   if ! (cd "$build_dir" && "$qmake" "$repo_root/JPEGsnoopQt.pro" &&
         make -j"$(sysctl -n hw.ncpu)") >"$build_dir/make.log" 2>&1; then
     tail -n 30 "$build_dir/make.log" >&2

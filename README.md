@@ -49,6 +49,8 @@ The Qt version of JPEGsnoop (this branch) builds on macOS with Qt 6.
     set `QMAKE` to choose a Qt installation
 - The app is ad-hoc signed and not notarized, so on other Macs Gatekeeper blocks it until
   it is allowed in System Settings > Privacy & Security.
+- The app icon `images/jpegsnoop.icns` is made from `images/jpegsnoop.ico` by
+  `scripts/make-macos-icon.py`; run it again only if the `.ico` changes.
 - With Homebrew's Qt, the app needs the macOS version Homebrew built its libraries for
   (the script sets `LSMinimumSystemVersion` to match). Qt's official installer targets
   older macOS versions.

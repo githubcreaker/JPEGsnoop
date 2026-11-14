@@ -19,6 +19,7 @@
 #ifndef Q_VIEWER_H
 #define Q_VIEWER_H
 
+#include <QImage>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QString>
@@ -28,10 +29,48 @@
 
 class CimgDecode;
 class QLabel;
-class labelClick;
 class QScrollArea;
 class QStatusBar;
 class CSnoopConfig;
+
+// Draws the decoded image at the chosen zoom inside the preview's scroll
+// area. 100% is one image pixel per screen (device) pixel, so a Retina screen
+// shows the image 1:1. Below 100% it keeps one smoothly reduced copy; above
+// 100% it enlarges only the area being painted, as sharp pixel blocks, so a
+// high zoom never needs a full-size enlarged copy. Mouse positions are
+// reported in image pixels.
+class PreviewCanvas : public QWidget
+{
+  Q_OBJECT
+public:
+  explicit PreviewCanvas(QWidget *parent = nullptr);
+
+  void setImage(const QImage &img, double dZoom);   // image is shared, not copied
+  void setZoom(double dZoom);
+  bool widgetToImage(const QPointF &ptWidget, QPoint &ptImg) const;
+
+  const QImage &image() const { return m_img; }
+  double zoom() const { return m_dZoom; }
+
+signals:
+  void moved(QPoint ptImg, bool bInside);      // bInside: ptImg is in the image
+  void released(QPoint ptImg, bool bInside);
+
+protected:
+  bool event(QEvent *pEvent) override;
+  void paintEvent(QPaintEvent *pEvent) override;
+  void mouseMoveEvent(QMouseEvent *pEvent) override;
+  void mouseReleaseEvent(QMouseEvent *pEvent) override;
+  void leaveEvent(QEvent *pEvent) override;
+
+private:
+  double logicalPerImagePixel() const;
+  void rebuild();             // reduced copy and widget size for zoom and screen
+
+  QImage m_img;
+  QImage m_imgReduced;        // only below 100%
+  double m_dZoom;
+};
 
 class Q_Viewer : public QWidget
 {
@@ -41,19 +80,21 @@ public:
   void drawImage();
 
 public slots:
-  void mouseReleased(QMouseEvent *);
-  void mouseMoved(QMouseEvent *);
   void zoom(QAction *action);
   void setPreviewTitle(QAction *preview);
   void scanImageAc(bool);
 
+private slots:
+  void onCanvasMoved(QPoint ptImg, bool bInside);
+  void onCanvasReleased(QPoint ptImg, bool bInside);
+
 private:
-  bool labelToImage(const QPoint &ptLabel, QPoint &ptImg) const;
+  bool imageReady() const;
 
   CSnoopConfig *m_pAppConfig;
   CimgDecode *m_pImgDecoder;
 
-  labelClick *imageLabel;
+  PreviewCanvas *canvas;
   QScrollArea *scrollArea;
   double scaleFactor;
   int32_t m_nZoomMode;

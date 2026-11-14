@@ -49,11 +49,27 @@ public:
   void Enable() { m_bEn = true; }
   void Disable() { m_bEn = false; }
 
+  // Re-colour the report after a light/dark appearance change
+  void RecolorForPalette();
+
 private:
   CDocLog &operator = (const CDocLog&);
   CDocLog(CDocLog&);
 
-  void appendToLog(QString strTxt, QColor col);
+  // What a line is; its colour depends on the current light/dark appearance
+  enum teLineKind
+  {
+    LINE_NORMAL,
+    LINE_HDR,
+    LINE_HDR_DESC,
+    LINE_WARN,
+    LINE_ERR,
+    LINE_GOOD
+  };
+
+  static QColor lineColor(teLineKind eKind, bool bDark);
+  bool isDark() const;
+  void appendToLog(QString strTxt, teLineKind eKind);
   QString rTrim(const QString& str);
 
   QPlainTextEdit *m_pDoc;

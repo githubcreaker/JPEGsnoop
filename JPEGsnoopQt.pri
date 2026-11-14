@@ -71,7 +71,6 @@ SOURCES += \
     $$PWD/source/General.cpp \
     $$PWD/source/ImgDecode.cpp \
     $$PWD/source/JfifDecode.cpp \
-    $$PWD/source/labelClick.cpp \
     $$PWD/source/Md5.cpp \
     $$PWD/source/SnoopConfig.cpp \
     $$PWD/source/WindowBuf.cpp \
@@ -91,7 +90,6 @@ HEADERS += \
     $$PWD/source/General.h \
     $$PWD/source/ImgDecode.h \
     $$PWD/source/JfifDecode.h \
-    $$PWD/source/labelClick.h \
     $$PWD/source/Md5.h \
     $$PWD/source/SnoopConfig.h \
     $$PWD/source/WindowBuf.h \

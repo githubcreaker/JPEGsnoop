@@ -17,16 +17,165 @@
 //
 
 #include <QDebug>
+#include <QtMath>
 #include <QtWidgets>
 
 #include "ImgDecode.h"
-#include "labelClick.h"
 #include "SnoopConfig.h"
 
 #include "Viewer.h"
 
+//-----------------------------------------------------------------------------
+// PreviewCanvas
+
+PreviewCanvas::PreviewCanvas(QWidget *_parent) : QWidget(_parent), m_dZoom(1.0)
+{
+  setMouseTracking(true);
+}
+
+void PreviewCanvas::setImage(const QImage &img, double dZoom)
+{
+  m_img = img;
+  m_dZoom = (dZoom > 0.0) ? dZoom : 1.0;
+  rebuild();
+}
+
+void PreviewCanvas::setZoom(double dZoom)
+{
+  if(dZoom > 0.0)
+  {
+    m_dZoom = dZoom;
+    rebuild();
+  }
+}
+
+// Widget (logical) pixels per image pixel. On a Retina screen there are two
+// device pixels per logical pixel, so 100% is half an image pixel per point.
+double PreviewCanvas::logicalPerImagePixel() const
+{
+  return m_dZoom / devicePixelRatioF();
+}
+
+void PreviewCanvas::rebuild()
+{
+  m_imgReduced = QImage();
+
+  if(m_img.isNull())
+  {
+    setFixedSize(0, 0);
+    update();
+    return;
+  }
+
+  // Below 100%: one smoothly reduced copy at screen resolution, drawn 1:1
+  if(m_dZoom < 1.0)
+  {
+    const int nW = qMax(1, qRound(m_img.width() * m_dZoom));
+    const int nH = qMax(1, qRound(m_img.height() * m_dZoom));
+
+    m_imgReduced = m_img.scaled(nW, nH, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    m_imgReduced.setDevicePixelRatio(devicePixelRatioF());
+  }
+
+  const double dScale = logicalPerImagePixel();
+  setFixedSize(qCeil(m_img.width() * dScale), qCeil(m_img.height() * dScale));
+  update();
+}
+
+bool PreviewCanvas::event(QEvent *pEvent)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+  // Moved to a screen with a different pixel density
+  if(pEvent->type() == QEvent::DevicePixelRatioChange)
+  {
+    rebuild();
+  }
+#endif
+  return QWidget::event(pEvent);
+}
+
+void PreviewCanvas::paintEvent(QPaintEvent *pEvent)
+{
+  if(m_img.isNull())
+  {
+    return;
+  }
+
+  QPainter painter(this);
+
+  if(!m_imgReduced.isNull())
+  {
+    painter.drawImage(QPointF(0, 0), m_imgReduced);
+    return;
+  }
+
+  // 100% and above: enlarge only the image area under the region being
+  // painted, without smoothing, so each image pixel stays a sharp block
+  const double dScale = logicalPerImagePixel();
+  const QRect rectDirty = pEvent->rect();
+  const QRect rectSrc = QRectF(rectDirty.x() / dScale, rectDirty.y() / dScale,
+                               rectDirty.width() / dScale, rectDirty.height() / dScale)
+                          .toAlignedRect().adjusted(-1, -1, 1, 1) & m_img.rect();
+  const QRectF rectDst(rectSrc.x() * dScale, rectSrc.y() * dScale, rectSrc.width() * dScale, rectSrc.height() * dScale);
+
+  painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+  painter.drawImage(rectDst, m_img, rectSrc);
+}
+
+bool PreviewCanvas::widgetToImage(const QPointF &ptWidget, QPoint &ptImg) const
+{
+  if(m_img.isNull())
+  {
+    return false;
+  }
+
+  const double dScale = logicalPerImagePixel();
+  const int nX = qFloor(ptWidget.x() / dScale);
+  const int nY = qFloor(ptWidget.y() / dScale);
+
+  if((nX < 0) || (nY < 0) || (nX >= m_img.width()) || (nY >= m_img.height()))
+  {
+    return false;
+  }
+
+  ptImg = QPoint(nX, nY);
+  return true;
+}
+
+static QPointF eventPos(QMouseEvent *pEvent)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+  return pEvent->position();
+#else
+  return pEvent->localPos();
+#endif
+}
+
+void PreviewCanvas::mouseMoveEvent(QMouseEvent *pEvent)
+{
+  QPoint ptImg;
+  const bool bInside = widgetToImage(eventPos(pEvent), ptImg);
+  emit moved(ptImg, bInside);
+}
+
+void PreviewCanvas::mouseReleaseEvent(QMouseEvent *pEvent)
+{
+  QPoint ptImg;
+  const bool bInside = widgetToImage(eventPos(pEvent), ptImg);
+  emit released(ptImg, bInside);
+}
+
+void PreviewCanvas::leaveEvent(QEvent *pEvent)
+{
+  emit moved(QPoint(), false);
+  QWidget::leaveEvent(pEvent);
+}
+
+//-----------------------------------------------------------------------------
+// Q_Viewer
+
 Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_parent, Qt::WindowFlags f) :
-  QWidget(_parent, f), m_pAppConfig(pAppConfig), imageLabel(0), scrollArea(0), m_pImgDecoder(pImgDecoder), scaleFactor(0.125), m_nZoomMode(PRV_ZOOM_12)
+  QWidget(_parent, f), m_pAppConfig(pAppConfig), m_pImgDecoder(pImgDecoder), canvas(nullptr), scrollArea(nullptr), scaleFactor(0.125), m_nZoomMode(PRV_ZOOM_12)
 {
   setGeometry(200, 50, 400, 400);
 
@@ -49,16 +198,14 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
   yccLabel->setFont(font);
   statusBar->addPermanentWidget(yccLabel);
 
-  imageLabel = new labelClick;
-  imageLabel->setMouseTracking(true);
-  imageLabel->setBackgroundRole(QPalette::Base);
-  imageLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-  imageLabel->setScaledContents(true);
+  // The canvas is the image's size at the current zoom (it used to be a label
+  // stretched over the whole window, which also made 12.5% look blocky)
+  canvas = new PreviewCanvas;
 
   scrollArea = new QScrollArea(this);
   scrollArea->setBackgroundRole(QPalette::Dark);
-  scrollArea->setWidgetResizable(true);
-  scrollArea->setWidget(imageLabel);
+  scrollArea->setWidgetResizable(false);
+  scrollArea->setWidget(canvas);
   scrollArea->setVisible(false);
 
   QGridLayout *loGrid = new QGridLayout(this);
@@ -73,49 +220,28 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
 
   setVisible(false);
 
-  connect(imageLabel, SIGNAL(released(QMouseEvent *)), this, SLOT(mouseReleased(QMouseEvent *)));
-  connect(imageLabel, SIGNAL(moved(QMouseEvent *)), this, SLOT(mouseMoved(QMouseEvent *)));
+  connect(canvas, &PreviewCanvas::released, this, &Q_Viewer::onCanvasReleased);
+  connect(canvas, &PreviewCanvas::moved, this, &Q_Viewer::onCanvasMoved);
   connect(m_pAppConfig, SIGNAL(scanImageAc(bool)), this, SLOT(scanImageAc(bool)));
 }
 
-// Map a position on the preview label to a pixel of the decoded image.
-// The label shows the whole image stretched over its contents rect
-// (setScaledContents), whatever the zoom. Returns false when no image is
-// decoded (the decoder may have been reset since the preview was drawn) or
-// the point is outside the image.
-bool Q_Viewer::labelToImage(const QPoint &ptLabel, QPoint &ptImg) const
+// Does the decoder hold a decoded image? (It may have been reset since the
+// preview was drawn, e.g. by opening a file it can't decode.)
+bool Q_Viewer::imageReady() const
 {
-  if(!m_pImgDecoder->IsImgDecoded() || !m_pImgDecoder->m_bDibTempReady || !m_pImgDecoder->m_pDibTemp)
-  {
-    return false;
-  }
-
-  const QRect rectLabel = imageLabel->contentsRect();
-  const int32_t nImgW = m_pImgDecoder->m_pDibTemp->width();
-  const int32_t nImgH = m_pImgDecoder->m_pDibTemp->height();
-
-  if(rectLabel.isEmpty() || (nImgW <= 0) || (nImgH <= 0) || !rectLabel.contains(ptLabel))
-  {
-    return false;
-  }
-
-  ptImg.setX(static_cast<int32_t>(static_cast<qint64>(ptLabel.x() - rectLabel.left()) * nImgW / rectLabel.width()));
-  ptImg.setY(static_cast<int32_t>(static_cast<qint64>(ptLabel.y() - rectLabel.top()) * nImgH / rectLabel.height()));
-  return true;
+  return m_pImgDecoder->IsImgDecoded() && m_pImgDecoder->m_bDibTempReady && m_pImgDecoder->m_pDibTemp;
 }
 
-void Q_Viewer::mouseReleased(QMouseEvent *e)
+void Q_Viewer::onCanvasReleased(QPoint ptImg, bool bInside)
 {
-  QPoint ptImg;
-
   // SetMarkerBlk() takes 8x8 block coordinates, not pixels
-  if(labelToImage(e->pos(), ptImg))
+  if(bInside && imageReady())
   {
     m_pImgDecoder->SetMarkerBlk(m_pImgDecoder->PixelToBlk(ptImg));
   }
 }
 
-void Q_Viewer::mouseMoved(QMouseEvent *e)
+void Q_Viewer::onCanvasMoved(QPoint ptImg, bool bInside)
 {
   uint32_t nByte;
   uint32_t nBit;
@@ -124,9 +250,7 @@ void Q_Viewer::mouseMoved(QMouseEvent *e)
   int32_t nCb;
   int32_t nCr;
 
-  QPoint ptImg;
-
-  if(!labelToImage(e->pos(), ptImg))
+  if(!bInside || !imageReady())
   {
     mcuLabel->clear();
     fileLabel->clear();
@@ -154,13 +278,14 @@ void Q_Viewer::drawImage()
   qDebug() << "Q_Viewer::drawImage";
 
   // Ensure that image has been decoded already
-  if (!m_pImgDecoder->IsImgDecoded()) {
+  if(!imageReady())
+  {
       qDebug() << "Q_Viewer::drawImage exit as image not decoded";
       return;
   }
 
   setWindowTitle(m_strPreview + " " + m_strIdct + " " + m_strZoom);
-  imageLabel->setPixmap(QPixmap::fromImage((*m_pImgDecoder->m_pDibTemp).scaledToWidth(static_cast<int32_t>(m_pImgDecoder->m_pDibTemp->width() * scaleFactor))));
+  canvas->setImage(*m_pImgDecoder->m_pDibTemp, scaleFactor);
   scrollArea->setVisible(true);
   setVisible(true);
 }
