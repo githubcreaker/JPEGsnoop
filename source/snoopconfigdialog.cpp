@@ -17,6 +17,7 @@
 //
 
 #include <QFileDialog>
+#include <QIntValidator>
 #include <QStandardPaths>
 
 #include "SnoopConfig.h"
@@ -32,7 +33,12 @@ SnoopConfigDialog::SnoopConfigDialog(CSnoopConfig *pAppConfig, QWidget *parent) 
 
   connect(ui->btnBrowse, SIGNAL(released()), this, SLOT(onBrowse()));
   connect(ui->btnDefault, SIGNAL(released()), this, SLOT(onDefault()));
-  connect(ui->btnDefault, SIGNAL(released()), this, SLOT(onReset()));
+  // The coach-message Reset button (onReset used to be wired to Default)
+  connect(ui->btnReset, SIGNAL(released()), this, SLOT(onReset()));
+
+  // Whole numbers only
+  ui->leUpdateDays->setValidator(new QIntValidator(1, 9999, this));
+  ui->leMaxErrors->setValidator(new QIntValidator(0, 99999, this));
 
   ui->leDbPath->setText(m_pAppConfig->dbPath());
 
@@ -56,14 +62,19 @@ SnoopConfigDialog::~SnoopConfigDialog()
 
 void SnoopConfigDialog::onBrowse()
 {
-  QFileDialog dialog(this);
+  // A folder picker (ShowDirsOnly alone still asked for a file)
+  QString strStart = ui->leDbPath->text();
 
-  dialog.setDirectory(QStandardPaths::writableLocation(QStandardPaths::HomeLocation));
-  dialog.setOption(QFileDialog::ShowDirsOnly);
-
-  if(dialog.exec())
+  if(strStart.isEmpty())
   {
-    dbPath = dialog.selectedFiles().at(0);
+    strStart = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+  }
+
+  const QString strDir = QFileDialog::getExistingDirectory(this, tr("Directory for User Database"), strStart);
+
+  if(!strDir.isEmpty())
+  {
+    dbPath = strDir;
     ui->leDbPath->setText(dbPath);
   }
 }
@@ -75,15 +86,43 @@ void SnoopConfigDialog::onDefault()
 
 void SnoopConfigDialog::onReset()
 {
-
+  // Re-enable all coach messages
+  m_pAppConfig->CoachReset();
 }
 
 void SnoopConfigDialog::onSave()
 {
+  bool bOk;
+  int32_t nVal;
 
+  m_pAppConfig->setDbPath(ui->leDbPath->text());
+  m_pAppConfig->setAutoUpdate(ui->cbAutoUpdate->isChecked());
+
+  nVal = ui->leUpdateDays->text().toInt(&bOk);
+
+  if(bOk)
+  {
+    m_pAppConfig->setUpdatePeriod(nVal);
+  }
+
+  m_pAppConfig->setAutoReprocess(ui->cbAutoReprocess->isChecked());
+  m_pAppConfig->setOnlineDb(ui->cbOblineDb->isChecked());
+
+  nVal = ui->leMaxErrors->text().toInt(&bOk);
+
+  if(bOk)
+  {
+    m_pAppConfig->setMaxErrors(nVal);
+  }
+
+  // Save now rather than only when the main window closes
+  m_pAppConfig->Dirty();
+  m_pAppConfig->RegistryStore();
+
+  accept();
 }
 
 void SnoopConfigDialog::onCancel()
 {
-  close();
+  reject();
 }

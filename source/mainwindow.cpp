@@ -411,7 +411,7 @@ void MainWindow::createActions(void)
 
   makerNotesAct = new QAction(tr("Maker Notes"), this);
   makerNotesAct->setCheckable(true);
-  hideUnknownTagsAct->setChecked(m_pAppConfig->decodeMaker());
+  makerNotesAct->setChecked(m_pAppConfig->decodeMaker());
   connect(makerNotesAct, SIGNAL(triggered()), m_pAppConfig, SLOT(onOptionsMakernotes()));
 
   sigSearchAct = new QAction(tr("Signature Search"), this);
@@ -672,6 +672,9 @@ void MainWindow::AnalyzeFile()
     }
     else
     {
+      // Say so, as master did, rather than leaving the previous file's report
+      m_pDocLog->Clear();
+      m_pDocLog->AddLineErr(QString("ERROR: File length is zero, no decoding done. [%1]").arg(m_currentFile));
       m_pFile->close();
     }
   }
@@ -785,7 +788,8 @@ void MainWindow::saveLog()
   dialog.setWindowModality(Qt::WindowModal);
   dialog.setAcceptMode(QFileDialog::AcceptSave);
   dialog.setNameFilters(filters);
-  dialog.selectFile(fileInfo.absoluteFilePath() + "/" + fileInfo.baseName() + ".txt");
+  // Default: <image folder>/<image name>.txt (absoluteFilePath() made it .../photo.jpg/photo.txt)
+  dialog.selectFile(fileInfo.absolutePath() + "/" + fileInfo.completeBaseName() + ".txt");
 
   if (dialog.exec() != QDialog::Accepted)
       return;
@@ -831,8 +835,10 @@ void MainWindow::enableMenus()
 
 void MainWindow::onConfig()
 {
-  configDialog = new SnoopConfigDialog(m_pAppConfig);
-  configDialog->show();
+  // Modal and on the stack: one dialog at a time, nothing left behind.
+  // Save applies the settings (SnoopConfigDialog::onSave).
+  SnoopConfigDialog dlg(m_pAppConfig, this);
+  dlg.exec();
 }
 
 //-----------------------------------------------------------------------------
@@ -861,6 +867,12 @@ void MainWindow::filePrint()
 
 void MainWindow::reprocess()
 {
+  // Auto-reprocess fires on option changes even before any file is opened
+  if(m_currentFile.isEmpty())
+  {
+    return;
+  }
+
   // Show coach message once
   if(m_pAppConfig->decodeImage() &&	m_pAppConfig->coachIdct())
   {

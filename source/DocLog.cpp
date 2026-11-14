@@ -25,12 +25,13 @@
 CDocLog::CDocLog(void)
 {
   m_pDoc = nullptr;
+  m_bEn = true;     // master enabled the log by default; was left uninitialised
 }
 
 CDocLog::CDocLog(QPlainTextEdit *pDoc)
 {
-  m_pDoc = nullptr;
   m_pDoc = pDoc;
+  m_bEn = true;
 }
 
 CDocLog::~CDocLog(void)

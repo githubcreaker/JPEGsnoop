@@ -393,6 +393,21 @@ app2 = seg(0xE2, b"ICC_PROFILE\x00" + bytes([1, 1]) + bytes(icc))
 case("R19_icc_fourcc", "R19", "decode", write("r_icc.jpg", insert_after_app0(c444, app2)),
      expect="'RGB ' \\(0x52474220\\)")
 
+# --- S: settings and GUI behaviour -------------------------------------------
+# "settings" mode needs no file ("-"); see tests/harness/main.cpp
+case("S1_fresh_install_defaults", "S1", "settings", "-", expect="fresh decodeImage=1 coachIdct=1")
+case("S1_fresh_install_decodes", "S1", "gui", ["ok_444.jpg"], timeout=30, expect="file=ok_444.jpg scan=1")
+case("S2_makernotes_toggle", "S2", "settings", "-", expect="makernotes 1 0 1$")
+case("S3_max_errors_persist", "S3", "settings", "-", expect="maxErrors after restart=5$")
+case("S4_config_dialog_save", "S4", "settings", "-",
+     expect="dialog result=1 maxErrors=7 autoReprocess=1 coachIdct=1 stored=7")
+case("S5_update_date_format", "S5", "settings", "-", expect="is_today=1")
+case("S5_empty_file", "S5", "gui", ["ok_444.jpg", write("s_empty.jpg", b"")], "--log", timeout=30,
+     expect="File length is zero")
+case("S5_reprocess_no_file", "S5", "gui", ["ok_444.jpg"], "--reprocess-first", timeout=30,
+     expect="harness: done")
+case("S5_status_messages", "S5", "decode", "ok_444.jpg", "--ac", expect="status=[1-9]")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

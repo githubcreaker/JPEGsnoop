@@ -7632,8 +7632,13 @@ void CjfifDecode::SetStatusText(QString strText)
 //    m_pStatBar->showMessage(strText);
 //  }
 
-  emit(strText, 0);
-  QCoreApplication::processEvents();
+  // MainWindow connects updateStatus() to the status bar. (This was
+  // "emit(strText, 0);", a no-op comma expression.)
+  emit updateStatus(strText, 0);
+
+  // Repaint the status bar during long operations, but don't handle user
+  // input here: a click could re-enter the decoder in the middle of a file.
+  QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 }
 
 //-----------------------------------------------------------------------------
@@ -8807,7 +8812,9 @@ void CjfifDecode::SendSubmit(QString strExifMake, QString strExifModel, QString 
   if(m_bSigExactInDB)
   {
     if(m_pAppConfig->interactive())
-      msgBox.setText("Compression signature already in database");
+    {
+      QMessageBox::information(nullptr, "JPEGsnoop", "Compression signature already in database");
+    }
   }
   else
   {
@@ -8816,7 +8823,7 @@ void CjfifDecode::SendSubmit(QString strExifMake, QString strExifModel, QString 
 
     if(m_pAppConfig->interactive())
     {
-      msgBox.setText("Added Compression signature to database");
+      QMessageBox::information(nullptr, "JPEGsnoop", "Added Compression signature to database");
     }
   }
 #endif
@@ -9886,7 +9893,9 @@ void CjfifDecode::ProcessFile(QFile *inFile)
     m_pLog->AddLineErr(strTmp);
 
     if(m_pAppConfig->interactive())
-      msgBox.setText(strTmp);
+    {
+      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
+    }
 
     return;
   }
@@ -10241,7 +10250,9 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
     strTmp = QString("ERROR: Invalid SOI-EOI order. Export aborted.");
     m_pLog->AddLineErr(strTmp);
     if(m_pAppConfig->interactive())
-      msgBox.setText(strTmp);
+    {
+      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
+    }
     return false;
   }
 
@@ -10269,7 +10280,9 @@ bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
     m_pLog->AddLineErr(strTmp);
 
     if(m_pAppConfig->interactive())
-      msgBox.setText(strTmp);
+    {
+      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
+    }
 
     return false;
   }
@@ -10282,7 +10295,9 @@ bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
     m_pLog->AddLineErr(strTmp);
 
     if(m_pAppConfig->interactive())
-      msgBox.setText(strTmp);
+    {
+      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
+    }
 
     return false;
   }
@@ -10318,7 +10333,9 @@ bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
     m_pLog->AddLineErr(strTmp);
 
     if(m_pAppConfig->interactive())
-      msgBox.setText(strTmp);
+    {
+      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
+    }
 
     if(pFileOutput)
     {
@@ -10471,7 +10488,9 @@ bool CjfifDecode::ExportJpegDoRange(QString strFileIn, QString strFileOut, uint3
     strTmp = "ERROR: Can't overwrite source file. Aborting export.";
     m_pLog->AddLineErr(strTmp);
     if(m_pAppConfig->interactive())
-      msgBox.setText(strTmp);
+    {
+      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
+    }
 
     return false;
   }
@@ -10483,7 +10502,9 @@ bool CjfifDecode::ExportJpegDoRange(QString strFileIn, QString strFileOut, uint3
     strTmp = QString("ERROR: Export but source filename empty");
     m_pLog->AddLineErr(strTmp);
     if(m_pAppConfig->interactive())
-      msgBox.setText(strTmp);
+    {
+      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
+    }
 
     return false;
   }

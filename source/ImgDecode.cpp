@@ -481,6 +481,19 @@ void CimgDecode::SetStatusText(QString str)
   {
     m_pStatBar->showMessage(str);
   }
+
+  // MainWindow connects updateStatus() to its status bar (m_pStatBar is never
+  // set). Let it repaint at most every 100 ms (this is called once per MCU
+  // row), without handling user input, which could re-enter the decoder.
+  emit updateStatus(str, 0);
+
+  static QElapsedTimer s_tmRepaint;
+
+  if(!s_tmRepaint.isValid() || (s_tmRepaint.elapsed() >= 100))
+  {
+    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    s_tmRepaint.start();
+  }
 }
 
 // Clears the DQT entries

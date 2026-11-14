@@ -94,10 +94,12 @@ while IFS=$'\t' read -r id finding mode files flags timeout expect forbid; do
   fi
 
   args=("$mode")
-  IFS=',' read -r -a names <<<"$files"
-  for name in "${names[@]}"; do
-    args+=("$cases_dir/files/$name")
-  done
+  if [[ $files != "-" ]]; then
+    IFS=',' read -r -a names <<<"$files"
+    for name in "${names[@]}"; do
+      args+=("$cases_dir/files/$name")
+    done
+  fi
   if [[ $flags != "-" ]]; then
     read -r -a flag_list <<<"$flags"
     args+=("${flag_list[@]}")

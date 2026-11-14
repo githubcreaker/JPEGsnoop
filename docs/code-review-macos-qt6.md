@@ -69,8 +69,42 @@ as reviewed, before the fixes below.
 - **Expected changes only:** decode reports of 21 valid JPEGs change only where intended:
   GPS values, ICC codes and non-ASCII bytes in hex-dump text columns.
 
-**Still open:** the rest of C7; the inherited R13–R15, R17 and R18; U4; S1–S5; the macOS
-items; leaks; latent code.
+### Settings and GUI behaviour
+
+**Fixed:** S1–S5.
+- **S1:** settings missing from the store keep the constructor defaults, so a fresh install
+  decodes images and shows the coach tips again.
+- **S2:** the Maker Notes option toggles and has the right checkmark.
+- **S3:** the max-errors setting is loaded from where it is stored.
+- **S4:** the Configuration dialog:
+  - Save applies and stores the settings and closes the dialog;
+  - Cancel closes it;
+  - Browse picks a folder;
+  - Reset re-enables the coach tips;
+  - the number fields accept whole numbers only;
+  - it opens modally, so one dialog at a time and none leaked;
+  - the title typo is fixed.
+- **S5:**
+  - Save Log suggests `<folder>/<name>.txt`.
+  - An empty file reports "File length is zero".
+  - Reprocess with no file open does nothing.
+  - Status messages reach the status bar, repainting without handling user input.
+  - Errors that were set up but never shown now appear.
+  - The update-check date uses the month.
+  - The log is enabled by default.
+- **Also:** the batch-folder defaults are the home folder instead of `C:\`.
+
+9 new cases cover these (62 in all).
+
+**Checks:**
+- **Tests catch the bugs:** run against the previous commit, all 9 new cases fail, and so
+  does the second-file GUI case, because the old fresh-install default left decoding off.
+- **All 62 pass** with and without ASan/UBSan.
+- **Decode output unchanged:** reports are identical for 21 valid JPEGs.
+- **No slowdown:** decode time with the status updates is unchanged (within noise).
+
+**Still open:** the rest of C7; the inherited R13–R15, R17 and R18; U4; the macOS items;
+leaks; latent code.
 
 ## How this was reviewed
 

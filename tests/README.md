@@ -20,8 +20,12 @@ when it is installed, so Pillow needn't be installed separately).
   - `decode <file> [--ac] [--histo] [--unknown-exif]` decodes one file in
     non-interactive mode and prints the report (`--unknown-exif` also reports
     unknown EXIF tags, which the app hides by default);
-  - `gui <file>... [--mouse]` opens the files in the real `MainWindow`, and
-    with `--mouse` moves and clicks over the preview window.
+  - `gui <file>... [--mouse] [--log] [--reprocess-first]` opens the files in the
+    real `MainWindow` like a fresh install. `--mouse` moves and clicks over the
+    preview window, `--log` prints the report after each file, and
+    `--reprocess-first` runs Reprocess before opening anything;
+  - `settings` exercises settings load/store, option toggles and the
+    Configuration dialog.
 
   It always runs offscreen with throwaway settings, so it never shows a window
   or touches your JPEGsnoop settings.
@@ -34,12 +38,13 @@ when it is installed, so Pillow needn't be installed separately).
 
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
-(`C` memory safety, `H` hangs, `U` GUI, `R` report output; `XP` covers the
-UTF-16 EXIF tags); `ok_*` cases are valid files that must keep decoding.
+(`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
+GUI behaviour; `XP` covers the UTF-16 EXIF tags); `ok_*` cases are valid files
+that must keep decoding.
 
 ## Adding a case
 
 Add the file and a `case(...)` line to `gen_cases.py`: an id, the finding, the
-mode, the file name(s), driver flags, a timeout in seconds, and optionally an
-extended regex the output must contain (`expect`) or must not contain
-(`forbid`).
+mode, the file name(s) (`"-"` for the `settings` mode, which takes none),
+driver flags, a timeout in seconds, and optionally an extended regex the output
+must contain (`expect`) or must not contain (`forbid`).

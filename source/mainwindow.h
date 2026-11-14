@@ -80,7 +80,6 @@ private:
   CDocLog *m_pDocLog;
   CDbSigs *m_pDbSigs;
   CSnoopConfig *m_pAppConfig;
-  SnoopConfigDialog *configDialog;
   Q_Viewer *imgWindow;
 
   // Decoders and Buffers

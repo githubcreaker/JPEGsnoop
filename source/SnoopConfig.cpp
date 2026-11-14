@@ -92,8 +92,8 @@ CSnoopConfig::CSnoopConfig(QObject *_parent) : QObject(_parent)
 
   nErrMaxDecodeScan = 20;
 
-  strBatchLastInput = "C:\\";   // Default batch processing directory (input
-  strBatchLastOutput = "C:\\";  // Default batch processing directory (output
+  strBatchLastInput = QDir::homePath();   // Default batch processing directory (input)
+  strBatchLastOutput = QDir::homePath();  // Default batch processing directory (output)
   strBatchExtensions = ".jpg,.jpeg";    // Default batch extension list
 
   bDecodeColorConvert = true;   // Perform color convert after scan decode
@@ -160,7 +160,8 @@ void CSnoopConfig::RegistryLoad()
     strDbDir = regUserDbPath;
   }
 
-  QString strCurDate = QDateTime::currentDateTime().toString("yyyymmdd");
+  // (MM is the month; mm would be minutes)
+  QString strCurDate = QDateTime::currentDateTime().toString("yyyyMMdd");
   QString regUpdateLastChk = settings.value("General\\UpdateLastChk", "").toString();
 
   // Try to load the registry entry
@@ -176,33 +177,37 @@ void CSnoopConfig::RegistryLoad()
     strUpdateLastChk = regUpdateLastChk;
   }
 
-  bUpdateAuto = settings.value("General\\UpdateAuto", true).toBool();
-  nUpdateAutoDays = settings.value("General\\UpdateAutoDays", 14).toInt();
-  bEulaAccepted = settings.value("General\\EulaAccepted", false).toBool();
-  bReprocessAuto = settings.value("General\\ReprocessAuto", false).toBool();
-  bSigSearch = settings.value("General\\SigSearch", true).toBool();
-  bDecodeScanImg = settings.value("General\\DecScanImg", false).toBool();
-  bDecodeScanImgAc = settings.value("General\\DecScanImgAc", false).toBool();
+  // A missing key keeps the default set in the constructor, as master did with
+  // its 999 sentinel. (Hard-coded fallbacks here had left a fresh install with
+  // image decoding and the coach messages switched off.)
+  bUpdateAuto = settings.value("General\\UpdateAuto", bUpdateAuto).toBool();
+  nUpdateAutoDays = settings.value("General\\UpdateAutoDays", nUpdateAutoDays).toInt();
+  bEulaAccepted = settings.value("General\\EulaAccepted", bEulaAccepted).toBool();
+  bReprocessAuto = settings.value("General\\ReprocessAuto", bReprocessAuto).toBool();
+  bSigSearch = settings.value("General\\SigSearch", bSigSearch).toBool();
+  bDecodeScanImg = settings.value("General\\DecScanImg", bDecodeScanImg).toBool();
+  bDecodeScanImgAc = settings.value("General\\DecScanImgAc", bDecodeScanImgAc).toBool();
 
-  bOutputScanDump = settings.value("General\\DumpScan", false).toBool();
-  bOutputDHTexpand = settings.value("General\\DumpDHTExpand", false).toBool();
-  bDecodeMaker = settings.value("General\\DecMaker", false).toBool();
-  bDumpHistoY = settings.value("General\\DumpHistoY", false).toBool();
+  bOutputScanDump = settings.value("General\\DumpScan", bOutputScanDump).toBool();
+  bOutputDHTexpand = settings.value("General\\DumpDHTExpand", bOutputDHTexpand).toBool();
+  bDecodeMaker = settings.value("General\\DecMaker", bDecodeMaker).toBool();
+  bDumpHistoY = settings.value("General\\DumpHistoY", bDumpHistoY).toBool();
 //      RegistryLoadBool("General\\DecScanClip"),    999,   bStatClipEn;
-  bHistoEn = settings.value("General\\DecScanHisto", false).toBool();
+  bHistoEn = settings.value("General\\DecScanHisto", bHistoEn).toBool();
 
-  bDbSubmitNet = settings.value("General\\DbSubmitNet", true).toBool();
-  bExifHideUnknown = settings.value("General\\ExifHideUnk", true).toBool();
-  bRelaxedParsing = settings.value("General\\RelaxedParsing", false).toBool();
+  bDbSubmitNet = settings.value("General\\DbSubmitNet", bDbSubmitNet).toBool();
+  bExifHideUnknown = settings.value("General\\ExifHideUnk", bExifHideUnknown).toBool();
+  bRelaxedParsing = settings.value("General\\RelaxedParsing", bRelaxedParsing).toBool();
 
-  nErrMaxDecodeScan = settings.value("General\\ErrMaxDecodeScan", 20).toInt();
+  // Stored under Report\ (as in master and RegistryStore)
+  nErrMaxDecodeScan = settings.value("Report\\ErrMaxDecodeScan", nErrMaxDecodeScan).toInt();
 
-  strBatchLastInput = settings.value("General\\BatchLastInput", "").toString();
-  strBatchLastOutput = settings.value("General\\BatchLastOutput", "").toString();
-  strBatchExtensions = settings.value("General\\BatchExtensions", "").toString();
+  strBatchLastInput = settings.value("General\\BatchLastInput", strBatchLastInput).toString();
+  strBatchLastOutput = settings.value("General\\BatchLastOutput", strBatchLastOutput).toString();
+  strBatchExtensions = settings.value("General\\BatchExtensions", strBatchExtensions).toString();
 
-  bCoachReprocessAuto = settings.value("Coach\\ReprocessAuto", false).toBool();
-  bCoachDecodeIdct = settings.value("Coach\\DecodeIdct", false).toBool();
+  bCoachReprocessAuto = settings.value("Coach\\ReprocessAuto", bCoachReprocessAuto).toBool();
+  bCoachDecodeIdct = settings.value("Coach\\DecodeIdct", bCoachDecodeIdct).toBool();
 
   if(bHistoEn || bDumpHistoY || bDecodeScanImgAc)
   {
@@ -675,7 +680,7 @@ void CSnoopConfig::onOptionsDhtexpand()
 
 void CSnoopConfig::onOptionsMakernotes()
 {
-  if(bOutputDHTexpand)
+  if(bDecodeMaker)
   {
     bDecodeMaker = false;
   }
