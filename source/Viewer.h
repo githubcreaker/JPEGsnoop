@@ -37,7 +37,7 @@ class Q_Viewer : public QWidget
 {
   Q_OBJECT
 public:
-  explicit Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *parent = nullptr, Qt::WindowFlags f = 0);
+  explicit Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *parent = nullptr, Qt::WindowFlags f = Qt::WindowFlags());
   void drawImage();
 
 public slots:

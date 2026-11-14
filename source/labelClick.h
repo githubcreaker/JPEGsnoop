@@ -29,8 +29,8 @@ class labelClick : public QLabel
   Q_OBJECT
 
 public:
-  labelClick(QWidget * parent = 0, Qt::WindowFlags f = 0);
-  labelClick(QString, QWidget * parent = 0, Qt::WindowFlags f = 0);
+  labelClick(QWidget * parent = 0, Qt::WindowFlags f = Qt::WindowFlags());
+  labelClick(QString, QWidget * parent = 0, Qt::WindowFlags f = Qt::WindowFlags());
   virtual ~labelClick();
 
 protected:

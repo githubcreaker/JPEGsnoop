@@ -1038,7 +1038,7 @@ QString CwindowBuf::BufReadStr(uint32_t nPosition)
     // Only add if printable
     if(isprint(cRd))
     {
-      strRd += cRd;
+      strRd += QChar(cRd);
     }
     nIndex++;
     if(cRd == 0)
@@ -1089,11 +1089,11 @@ QString CwindowBuf::BufReadUniStr(uint32_t nPosition)
     // _tcslen() call in the calling function to get the wrong
     // length as it isn't null-terminated. Skip for now.
 //              if (isprint(cRd)) {
-//                      strRd += cRd;
+//                      strRd += QChar(cRd);
 //              } else {
 //                      strRd += ".");
 //              }
-    strRd += cRd;
+    strRd += QChar(cRd);
 
     nIndex += 2;
     if(cRd == 0)
@@ -1198,7 +1198,7 @@ QString CwindowBuf::BufReadStrn(uint32_t nPosition, uint32_t nLen)
       cRd = Buf(nPosition + nInd);
       if(isprint(cRd))
       {
-        strRd += cRd;
+        strRd += QChar(cRd);
       }
       if(cRd == char (0))
       {

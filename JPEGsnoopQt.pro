@@ -11,17 +11,20 @@ greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 TARGET = JPEGsnoopQt
 TEMPLATE = app
 
-gcc{
-    QMAKE_CXXFLAGS += -std=c++11
-}
+# Qt 6 requires C++17 (also fine for Qt 5.12+)
+CONFIG += c++17
 
 ###
 # Disable warnings in Qt system files
-# TODO: Use include path variables instead of hardcoding
+# Clang drops a -I/-F path that is also given as -isystem/-iframework,
+# so mark the exact paths qmake uses as system paths. Homebrew Qt uses
+# include/QtX symlinks; the official Qt installer uses framework Headers.
 macx{
-    QMAKE_CXXFLAGS += -isystem /Users/bob/Qt/5.11.0/clang_64/lib/QtCore.framework/Versions/5/Headers
-    QMAKE_CXXFLAGS += -isystem /Users/bob/Qt/5.11.0/clang_64/lib/QtGui.framework/Versions/5/Headers
-    QMAKE_CXXFLAGS += -isystem /Users/bob/Qt/5.11.0/clang_64/lib/QtWidgets.framework/Versions/5/Headers
+    QMAKE_CXXFLAGS += -iframework $$[QT_INSTALL_LIBS]
+    for(mod, $$list(QtCore QtGui QtWidgets QtPrintSupport)) {
+        exists($$[QT_INSTALL_HEADERS]/$$mod): QMAKE_CXXFLAGS += -isystem $$[QT_INSTALL_HEADERS]/$$mod
+        exists($$[QT_INSTALL_LIBS]/$${mod}.framework/Headers): QMAKE_CXXFLAGS += -isystem $$[QT_INSTALL_LIBS]/$${mod}.framework/Headers
+    }
 }
 
 linux:!macx{

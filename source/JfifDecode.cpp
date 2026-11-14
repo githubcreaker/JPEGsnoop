@@ -2155,7 +2155,7 @@ bool CjfifDecode::DecodeMakerSubType()
     strTmp = "";
     for(uint32_t nInd = 0; nInd < 5; nInd++)
     {
-      strTmp += Buf(m_nPos + nInd);
+      strTmp += QChar(Buf(m_nPos + nInd));
     }
 
     if(strTmp == "Nikon")
@@ -2205,7 +2205,7 @@ bool CjfifDecode::DecodeMakerSubType()
     for(uint32_t ind = 0; ind < 8; ind++)
     {
       if(Buf(m_nPos + ind) != 0)
-        strTmp += Buf(m_nPos + ind);
+        strTmp += QChar(Buf(m_nPos + ind));
     }
     if((strTmp == "SIGMA") || (strTmp == "FOVEON"))
     {
@@ -2235,7 +2235,7 @@ bool CjfifDecode::DecodeMakerSubType()
     for(uint32_t ind = 0; ind < 8; ind++)
     {
       if(Buf(m_nPos + ind) != 0)
-        strTmp += Buf(m_nPos + ind);
+        strTmp += QChar(Buf(m_nPos + ind));
     }
 
     if(strTmp == "FUJIFILM")
@@ -2267,7 +2267,7 @@ bool CjfifDecode::DecodeMakerSubType()
     for(uint32_t ind = 0; ind < 12; ind++)
     {
       if(Buf(m_nPos + ind) != 0)
-        strTmp += Buf(m_nPos + ind);
+        strTmp += QChar(Buf(m_nPos + ind));
     }
 
     if(strTmp == "SONY DSC ")
@@ -3719,7 +3719,7 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
         }
         else
         {
-          strValOut += cTmp;
+          strValOut += QChar(cTmp);
         }
       }
 
@@ -5702,7 +5702,7 @@ uint32_t CjfifDecode::DecodeMarker()
           else
           {
             // Add the char
-            strLine += cXmpChar;
+            strLine += QChar(cXmpChar);
           }
         }
       }
@@ -6026,7 +6026,7 @@ uint32_t CjfifDecode::DecodeMarker()
       strTmp = QString("  Identifier = [%1]").arg(m_acApp0Identifier);
       m_pLog->AddLine(strTmp);
 
-      if(strcmp(m_acApp0Identifier, "JFIF"))
+      if(!strcmp(m_acApp0Identifier, "JFIF"))
       {
         // Only process remainder if it is JFIF. This marker
         // is also used for application-specific functions.
@@ -6123,7 +6123,7 @@ uint32_t CjfifDecode::DecodeMarker()
          */
 
       }
-      else if(strncmp(m_acApp0Identifier, "AVI1", 4))   //@@
+      else if(!strncmp(m_acApp0Identifier, "AVI1", 4))
       {
         // AVI MJPEG type
 

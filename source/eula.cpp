@@ -18,6 +18,8 @@
 
 #include <QMessageBox>
 
+#include <QFile>
+
 #include "eula.h"
 #include "ui_eula.h"
 

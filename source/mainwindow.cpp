@@ -831,7 +831,7 @@ void MainWindow::filePrint()
 
   if (textEdit->textCursor().hasSelection())
   {
-    dlg->addEnabledOption(QAbstractPrintDialog::PrintSelection);
+    dlg->setOption(QAbstractPrintDialog::PrintSelection);
   }
 
   dlg->setWindowTitle(tr("Print Document"));

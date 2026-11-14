@@ -213,8 +213,10 @@ bool CDbSigs::BufReadStr(uint8_t *pBuf,QString &strOut,uint32_t nMaxBytes,bool b
 	bool		bDone;
 
 	char		chAsc;
-	wchar_t		chUni;
-  uint32_t	nCharSz = ((bUni)?sizeof(wchar_t):sizeof(char));
+	char16_t	chUni;
+  // The Unicode DB file is UTF-16LE (2 bytes/char). Don't use sizeof(wchar_t):
+  // it is 2 on Windows but 4 on macOS/Linux.
+  uint32_t	nCharSz = ((bUni)?2:1);
 
 	bDone = false;
   strOut = "";
@@ -224,11 +226,11 @@ bool CDbSigs::BufReadStr(uint8_t *pBuf,QString &strOut,uint32_t nMaxBytes,bool b
   {
     if (bUni)
     {
-			chUni = pBuf[nInd];
+			chUni = static_cast<char16_t>(pBuf[nInd] | (pBuf[nInd+1] << 8));
 
       if ( (chUni != '\n') && (chUni != 0) )
       {
-				strOut += chUni;
+				strOut += QChar(chUni);
       }
       else
       {
