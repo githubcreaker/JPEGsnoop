@@ -190,7 +190,8 @@ enum teScanBufStatus
 {
   SCANBUF_OK,
   SCANBUF_BADMARK,
-  SCANBUF_RST
+  SCANBUF_RST,
+  SCANBUF_EOF                   // Past the end of the file (no data)
 };
 
 // Per-pixel color conversion structure
@@ -231,6 +232,10 @@ typedef struct
 
   // Any YCC or RGB clipping performed?
   uint32_t nClip;               // Multi-bit indicator of clipping (CC_CLIP_*)
+
+  // Inside the image? (False for the padding up to whole MCUs, which isn't
+  // reported or counted as clipped.)
+  bool bInImage;
 } PixelCc;
 
 // Per-pixel stats: clipping (overflow and underflow) in YCC and RGB
@@ -336,6 +341,7 @@ public:
   bool SetDhtEntry(uint32_t nDestId, uint32_t nClass, uint32_t nInd, uint32_t nLen,
                    uint32_t nBits, uint32_t nMask, uint32_t nCode);
   bool SetDhtSize(uint32_t nDestId, uint32_t nClass, uint32_t nSize);
+  void ClearDhtTable(uint32_t nDestId, uint32_t nClass);
   void SetPrecision(uint32_t nPrecision);
 
   // Modes -- accessed from Doc
@@ -432,6 +438,7 @@ private:
 
   QString GetScanBufPos();
   QString GetScanBufPos(uint32_t pos, uint32_t align);
+  QString GetMcuFilePos(uint32_t nMcuX, uint32_t nMcuY);
 
   void ConvertYCCtoRGB(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix);
   void ConvertYCCtoRGBFastFloat(PixelCc & sPix);
@@ -646,6 +653,7 @@ private:
   uint32_t m_nScanBuffPtr_num;  // Number of uint8_ts in buffer
   uint32_t m_nScanBuffPtr_align;        // Bit alignment in file for 1st uint8_t in buffer
   bool m_bScanEnd;              // Reached end of scan segment?
+  bool m_bScanEofReported;      // Reported that the scan data ran past the end of the file?
 
   bool m_bRestartRead;          // Have we seen a restart marker?
   uint32_t m_nRestartLastInd;   // Last Restart marker read (0..7)

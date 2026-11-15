@@ -1109,6 +1109,34 @@ bool CimgDecode::SetDhtSize(uint32_t nDestId, uint32_t nClass, uint32_t nSize)
   return true;
 }
 
+// Forget one DHT table before it is (re)defined
+// - A DHT segment may redefine a table (T.81 B.2.4.2). Its fast-lookup
+//   entries were only cleared once per file, so the new table's codes longer
+//   than DHT_FAST_SIZE bits found the old table's entries for their prefixes.
+//
+// INPUT:
+// - nDestId                    = Destination DHT table ID (From DHT:Th, range 0..3)
+// - nClass                     = Select between DC and AC tables (0=DC, 1=AC) (From DHT:Tc)
+// POST:
+// - m_anDhtLookupSize[][]
+// - m_anDhtLookupfast[][][]
+//
+void CimgDecode::ClearDhtTable(uint32_t nDestId, uint32_t nClass)
+{
+  // Out-of-range IDs are reported by SetDhtEntry()
+  if((nDestId >= MAX_DHT_DEST_ID) || (nClass >= MAX_DHT_CLASS))
+  {
+    return;
+  }
+
+  m_anDhtLookupSize[nClass][nDestId] = 0;
+
+  for(uint32_t nElem = 0; nElem < (2 << DHT_FAST_SIZE); nElem++)
+  {
+    m_anDhtLookupfast[nClass][nDestId][nElem] = DHT_CODE_UNUSED;
+  }
+}
+
 // Convert huffman code (DC) to signed value
 // - Convert according to ITU-T.81 Table 5
 //
@@ -1717,6 +1745,17 @@ uint32_t CimgDecode::BuffAddByte()
     return 0;
   }
 
+  // Past the end of the file Buf() returns 0, which decoded as scan data
+  // without any error. Mark the byte instead: if the decoder uses it, the
+  // scan ends with an error. (Valid files only read ahead past the end,
+  // after EOI, and never use those bytes.)
+  if(m_nScanBuffPtr >= m_pWBuf->GetPosEof())
+  {
+    ScanBuffAddErr(0x00, m_nScanBuffPtr, SCANBUF_EOF);
+    m_nScanBuffPtr += 1;
+    return 0;
+  }
+
   nBuf0 = m_pWBuf->Buf(m_nScanBuffPtr);
   nBuf1 = m_pWBuf->Buf(m_nScanBuffPtr + 1);
 
@@ -1936,7 +1975,7 @@ uint32_t CimgDecode::BuffAddByte()
 //
 // FIXME: Consider adding checks for DHT table like in ReadScanVal()
 //
-bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t nTblDqt, uint32_t, uint32_t)
+bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t nTblDqt, uint32_t nMcuX, uint32_t nMcuY)
 {
   uint32_t nZrl;
 
@@ -2045,6 +2084,31 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
       }
 
       // Reset the latched error now that we've dealt with it
+      m_nScanBuffLatchErr = SCANBUF_OK;
+    }
+    else if(nSavedBufErr == SCANBUF_EOF)
+    {
+      // The scan data ran out at the end of the file: stop the scan after
+      // this MCU instead of decoding the zeros read past it
+      m_bScanBad = true;
+      m_bScanEnd = true;
+
+      if(!m_bScanEofReported)
+      {
+        m_bScanEofReported = true;
+
+        if(m_nWarnBadScanNum < m_nScanErrMax)
+        {
+          m_pLog->AddLineErr(QString("*** ERROR: Scan data ends at the end of the file in MCU(%1,%2) @ %3 (file truncated?)")
+                               .arg(nMcuX)
+                               .arg(nMcuY)
+                               .arg(GetScanBufPos(nSavedBufPos, nSavedBufAlign)));
+        }
+
+        // The rest of this MCU decodes nothing but zeros: don't report it
+        m_nWarnBadScanNum = m_nScanErrMax;
+      }
+
       m_nScanBuffLatchErr = SCANBUF_OK;
     }
 
@@ -2350,6 +2414,31 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
       }
 
       // Reset the latched error now that we've dealt with it
+      m_nScanBuffLatchErr = SCANBUF_OK;
+    }
+    else if(nSavedBufErr == SCANBUF_EOF)
+    {
+      // The scan data ran out at the end of the file: stop the scan after
+      // this MCU instead of decoding the zeros read past it
+      m_bScanBad = true;
+      m_bScanEnd = true;
+
+      if(!m_bScanEofReported)
+      {
+        m_bScanEofReported = true;
+
+        if(m_nWarnBadScanNum < m_nScanErrMax)
+        {
+          m_pLog->AddLineErr(QString("*** ERROR: Scan data ends at the end of the file in MCU(%1,%2) @ %3 (file truncated?)")
+                               .arg(nMcuX)
+                               .arg(nMcuY)
+                               .arg(GetScanBufPos(nSavedBufPos, nSavedBufAlign)));
+        }
+
+        // The rest of this MCU decodes nothing but zeros: don't report it
+        m_nWarnBadScanNum = m_nScanErrMax;
+      }
+
       m_nScanBuffLatchErr = SCANBUF_OK;
     }
 
@@ -2944,8 +3033,15 @@ void CimgDecode::SetFullRes(int32_t nMcuX, int32_t nMcuY, int32_t nComp, uint32_
   int32_t nOffsetBlkCorner;    // Linear offset to top-left corner of block
   int32_t nOffsetPixCorner;    // Linear offset to top-left corner of pixel (start point for expansion)
 
-  // Calculate the linear pixel offset for the top-left corner of the block in the MCU
-  nOffsetBlkCorner = ((nMcuY * m_nMcuHeight) + nCssYInd * BLK_SZ_X) * nPixMapW + ((nMcuX * m_nMcuWidth) + nCssXInd * BLK_SZ_Y);
+  // Calculate the linear pixel offset for the top-left corner of the block in the MCU.
+  // A subsampled block covers 8 pixels times its expansion factor, so that is
+  // how far apart the blocks are. (They were placed 8 pixels apart, which put
+  // the second chroma block of Y 4x1 / Cb 2x1 at 8 instead of 16.)
+  const uint32_t nExpandH = static_cast<uint32_t>(m_anExpandBitsMcuH[nComp]);
+  const uint32_t nExpandV = static_cast<uint32_t>(m_anExpandBitsMcuV[nComp]);
+
+  nOffsetBlkCorner = ((nMcuY * m_nMcuHeight) + nCssYInd * BLK_SZ_Y * nExpandV) * nPixMapW +
+                     ((nMcuX * m_nMcuWidth) + nCssXInd * BLK_SZ_X * nExpandH);
 
   // Use the expansion factor to determine how many bits to replicate
   // Typically for luminance (Y) this will be 1 & 1
@@ -3047,6 +3143,25 @@ QString CimgDecode::GetScanBufPos(uint32_t pos, uint32_t align)
       .arg(align);;
 }
 
+// File position where an MCU's scan data starts, formatted as GetScanBufPos()
+// - For notes made after the scan has been decoded, when the scan reader's
+//   own position is the end of the scan
+//
+// INPUT:
+// - nMcuX                      = MCU coordinate (x)
+// - nMcuY                      = MCU coordinate (y)
+// RETURN:
+// - Formatted string
+//
+QString CimgDecode::GetMcuFilePos(uint32_t nMcuX, uint32_t nMcuY)
+{
+  uint32_t nByte = 0;
+  uint32_t nBit = 0;
+
+  LookupFilePosMcu(QPoint(static_cast<int>(nMcuX), static_cast<int>(nMcuY)), nByte, nBit);
+  return GetScanBufPos(nByte, nBit);
+}
+
 // Test the scan error flag and, if set, report out the position
 //
 // INPUT:
@@ -3062,9 +3177,13 @@ void CimgDecode::CheckScanErrors(uint32_t nMcuX, uint32_t nMcuY, uint32_t nCssIn
   //uint32_t mcu_y_max = (m_nDimY/m_nMcuHeight);
 
   // Determine pixel position, taking into account sampling quadrant as well
-  uint32_t err_pos_x = m_nMcuWidth * nMcuX + nCssIndH * BLK_SZ_X;
+  // (and the block's expansion factor, as in SetFullRes())
+  const uint32_t nExpandH = (nComp < MAX_SOF_COMP_NF) ? static_cast<uint32_t>(m_anExpandBitsMcuH[nComp]) : 1;
+  const uint32_t nExpandV = (nComp < MAX_SOF_COMP_NF) ? static_cast<uint32_t>(m_anExpandBitsMcuV[nComp]) : 1;
 
-  uint32_t err_pos_y = m_nMcuHeight * nMcuY + nCssIndV * BLK_SZ_Y;
+  uint32_t err_pos_x = m_nMcuWidth * nMcuX + nCssIndH * BLK_SZ_X * nExpandH;
+
+  uint32_t err_pos_y = m_nMcuHeight * nMcuY + nCssIndV * BLK_SZ_Y * nExpandV;
 
   if(m_nScanCurErr)
   {
@@ -4447,8 +4566,19 @@ void CimgDecode::ReportColorStats()
 {
   QString strTmp;
 
+  // Clipping is only counted by the full colour conversion, which runs when
+  // the histograms (or clip stats) are on. Otherwise the totals were all 0
+  // however much the image clipped.
+  const bool bClipCounted = m_bHistEn || m_bStatClipEn;
+
+  if(!bClipCounted)
+  {
+    m_pLog->AddLine("  YCC and RGB clipping in DC: not counted (turn on Options > Scan Segment > Histogram RGB)");
+    m_pLog->AddLine("");
+  }
+
   // Report YCC stats
-  if(CC_CLIP_YCC_EN)
+  if(CC_CLIP_YCC_EN && bClipCounted)
   {
     strTmp = QString("  YCC clipping in DC:");
     m_pLog->AddLine(strTmp);
@@ -4519,6 +4649,11 @@ void CimgDecode::ReportColorStats()
         .arg(static_cast<double>(m_sHisto.nPreclipBSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
     m_pLog->AddLine(strTmp);
     m_pLog->AddLine("");
+  }
+
+  if(!bClipCounted)
+  {
+    return;
   }
 
   strTmp = QString("  RGB clipping in DC:");
@@ -4779,6 +4914,7 @@ void CimgDecode::DecodeRestartScanBuf(uint32_t nFilePos, bool bRestart)
   // Reset the state
   m_bScanEnd = false;
   m_bScanBad = false;
+  m_bScanEofReported = false;
   m_nScanBuff = 0x00000000;
   m_nScanBuffPtr = nFilePos;
   
@@ -5103,11 +5239,13 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     m_sHisto.nCount++;
   }
 
+  // Only the first YCC_CLIP_REPORT_MAX clips get a note, but the totals count
+  // every clipped pixel inside the image (they counted only the noted ones)
   if(CC_CLIP_YCC_EN)
   {
     if(nCurY > CC_CLIP_YCC_MAX)
     {
-      if(YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
+      if(sPix.bInImage && YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
       {
         QString strTmp;
 
@@ -5117,10 +5255,9 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
             .arg(nCurY, 5)
             .arg(nCurCb, 5)
             .arg(nCurCr, 5)
-            .arg(GetScanBufPos());
+            .arg(GetMcuFilePos(nMcuX, nMcuY));
         m_pLog->AddLineWarn(strTmp);
         m_nWarnYccClipNum++;
-        m_sStatClip.nClipYOver++;
 
         if(m_nWarnYccClipNum == YCC_CLIP_REPORT_MAX)
         {
@@ -5130,12 +5267,17 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
       }
 
       sPix.nClip |= CC_CLIP_Y_OVER;
+
+      if(sPix.bInImage)
+      {
+        m_sStatClip.nClipYOver++;
+      }
       nCurY = CC_CLIP_YCC_MAX;
     }
 
     if(nCurY < CC_CLIP_YCC_MIN)
     {
-      if(YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
+      if(sPix.bInImage && YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
       {
         QString strTmp;
 
@@ -5145,10 +5287,9 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
             .arg(nCurY, 5)
             .arg(nCurCb, 5)
             .arg(nCurCr, 5)
-            .arg(GetScanBufPos());
+            .arg(GetMcuFilePos(nMcuX, nMcuY));
         m_pLog->AddLineWarn(strTmp);
         m_nWarnYccClipNum++;
-        m_sStatClip.nClipYUnder++;
 
         if(m_nWarnYccClipNum == YCC_CLIP_REPORT_MAX)
         {
@@ -5158,12 +5299,17 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
       }
       
       sPix.nClip |= CC_CLIP_Y_UNDER;
+
+      if(sPix.bInImage)
+      {
+        m_sStatClip.nClipYUnder++;
+      }
       nCurY = CC_CLIP_YCC_MIN;
     }
 
     if(nCurCb > CC_CLIP_YCC_MAX)
     {
-      if(YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
+      if(sPix.bInImage && YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
       {
         QString strTmp;
 
@@ -5173,10 +5319,9 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
             .arg(nCurY, 5)
             .arg(nCurCb, 5)
             .arg(nCurCr, 5)
-            .arg(GetScanBufPos());
+            .arg(GetMcuFilePos(nMcuX, nMcuY));
         m_pLog->AddLineWarn(strTmp);
         m_nWarnYccClipNum++;
-        m_sStatClip.nClipCbOver++;
 
         if(m_nWarnYccClipNum == YCC_CLIP_REPORT_MAX)
         {
@@ -5186,12 +5331,17 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
       }
 
       sPix.nClip |= CC_CLIP_CB_OVER;
+
+      if(sPix.bInImage)
+      {
+        m_sStatClip.nClipCbOver++;
+      }
       nCurCb = CC_CLIP_YCC_MAX;
     }
 
     if(nCurCb < CC_CLIP_YCC_MIN)
     {
-      if(YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
+      if(sPix.bInImage && YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
       {
         QString strTmp;
 
@@ -5201,10 +5351,9 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
             .arg(nCurY, 5)
             .arg(nCurCb, 5)
             .arg(nCurCr, 5)
-            .arg(GetScanBufPos());
+            .arg(GetMcuFilePos(nMcuX, nMcuY));
         m_pLog->AddLineWarn(strTmp);
         m_nWarnYccClipNum++;
-        m_sStatClip.nClipCbUnder++;
 
         if(m_nWarnYccClipNum == YCC_CLIP_REPORT_MAX)
         {
@@ -5214,12 +5363,17 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
       }
 
       sPix.nClip |= CC_CLIP_CB_UNDER;
+
+      if(sPix.bInImage)
+      {
+        m_sStatClip.nClipCbUnder++;
+      }
       nCurCb = CC_CLIP_YCC_MIN;
     }
 
     if(nCurCr > CC_CLIP_YCC_MAX)
     {
-      if(YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
+      if(sPix.bInImage && YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
       {
         QString strTmp;
 
@@ -5229,10 +5383,9 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
             .arg(nCurY, 5)
             .arg(nCurCb, 5)
             .arg(nCurCr, 5)
-            .arg(GetScanBufPos());
+            .arg(GetMcuFilePos(nMcuX, nMcuY));
         m_pLog->AddLineWarn(strTmp);
         m_nWarnYccClipNum++;
-        m_sStatClip.nClipCrOver++;
 
         if(m_nWarnYccClipNum == YCC_CLIP_REPORT_MAX)
         {
@@ -5242,12 +5395,17 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
       }
 
       sPix.nClip |= CC_CLIP_CR_OVER;
+
+      if(sPix.bInImage)
+      {
+        m_sStatClip.nClipCrOver++;
+      }
       nCurCr = CC_CLIP_YCC_MAX;
     }
 
     if(nCurCr < CC_CLIP_YCC_MIN)
     {
-      if(YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
+      if(sPix.bInImage && YCC_CLIP_REPORT_ERR && (m_nWarnYccClipNum < YCC_CLIP_REPORT_MAX))
       {
         QString strTmp;
 
@@ -5257,10 +5415,9 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
             .arg(nCurY, 5)
             .arg(nCurCb, 5)
             .arg(nCurCr, 5)
-            .arg(GetScanBufPos());
+            .arg(GetMcuFilePos(nMcuX, nMcuY));
         m_pLog->AddLineWarn(strTmp);
         m_nWarnYccClipNum++;
-        m_sStatClip.nClipCrUnder++;
 
         if(m_nWarnYccClipNum == YCC_CLIP_REPORT_MAX)
         {
@@ -5270,6 +5427,11 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
       }
 
       sPix.nClip |= CC_CLIP_CR_UNDER;
+
+      if(sPix.bInImage)
+      {
+        m_sStatClip.nClipCrUnder++;
+      }
       nCurCr = CC_CLIP_YCC_MIN;
     }
   }                             // YCC clip enabled?
@@ -5335,7 +5497,10 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     }
 
     sPix.nClip |= CC_CLIP_R_UNDER;
-    m_sStatClip.nClipRUnder++;
+    if(sPix.bInImage)
+    {
+      m_sStatClip.nClipRUnder++;
+    }
     nLimitR = 0;
   }
 
@@ -5355,7 +5520,10 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     }
 
     sPix.nClip |= CC_CLIP_G_UNDER;
-    m_sStatClip.nClipGUnder++;
+    if(sPix.bInImage)
+    {
+      m_sStatClip.nClipGUnder++;
+    }
     nLimitG = 0;
   }
 
@@ -5375,7 +5543,10 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     }
 
     sPix.nClip |= CC_CLIP_B_UNDER;
-    m_sStatClip.nClipBUnder++;
+    if(sPix.bInImage)
+    {
+      m_sStatClip.nClipBUnder++;
+    }
     nLimitB = 0;
   }
 
@@ -5395,7 +5566,10 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     }
 
     sPix.nClip |= CC_CLIP_R_OVER;
-    m_sStatClip.nClipROver++;
+    if(sPix.bInImage)
+    {
+      m_sStatClip.nClipROver++;
+    }
     nLimitR = 255;
   }
 
@@ -5415,7 +5589,10 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     }
 
     sPix.nClip |= CC_CLIP_G_OVER;
-    m_sStatClip.nClipGOver++;
+    if(sPix.bInImage)
+    {
+      m_sStatClip.nClipGOver++;
+    }
     nLimitG = 255;
   }
 
@@ -5435,7 +5612,10 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     }
 
     sPix.nClip |= CC_CLIP_B_OVER;
-    m_sStatClip.nClipBOver++;
+    if(sPix.bInImage)
+    {
+      m_sStatClip.nClipBOver++;
+    }
     nLimitB = 255;
   }
 
@@ -5560,6 +5740,10 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
   delete m_pDibTemp;
   m_pDibTemp = new QImage(m_nImgSizeX, m_nImgSizeY, QImage::Format_RGB32);
 
+  // The clipping totals describe this pass over the image. (They used to
+  // add up over every recalculation, such as each View > Image Chan change.)
+  memset(&m_sStatClip, 0, sizeof(m_sStatClip));
+
   // Step through the image
   for(int32_t nPixY = nRngY1; nPixY < nRngY2; nPixY++)
   {
@@ -5595,6 +5779,9 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
       sPixSrc.nPrerangeY = nTmpY;
       sPixSrc.nPrerangeCb = nTmpCb;
       sPixSrc.nPrerangeCr = nTmpCr;
+
+      // The decoded area is padded to whole MCUs: clipping there isn't reported
+      sPixSrc.bInImage = (nPixX < m_nDimX) && (nPixY < m_nDimY);
 
       // Update brightest pixel search here
       int32_t nBrightness = nTmpY;

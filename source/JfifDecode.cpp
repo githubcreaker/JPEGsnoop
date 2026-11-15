@@ -195,6 +195,9 @@ void CjfifDecode::Reset()
   m_eDbReqSuggest = DB_ADD_SUGGEST_UNSET;
   m_bSigExactInDB = false;
 
+  // EXIF byte order (set from each EXIF header; was never initialised)
+  m_nImgExifEndian = 0;
+
   // Embedded thumbnail
   m_nImgExifThumbComp = 0;
   m_nImgExifThumbOffset = 0;
@@ -2499,8 +2502,24 @@ uint32_t CjfifDecode::ReadSwap4(uint32_t nPos)
 //
 uint32_t CjfifDecode::ReadBe4(uint32_t nPos)
 {
-  // Big endian, no swap required
-  return (Buf(nPos) << 24) + (Buf(nPos + 1) << 16) + (Buf(nPos + 2) << 8) + Buf(nPos + 3);
+  // Big endian, no swap required. Shift unsigned values: a byte promoted to
+  // int and shifted into the sign bit is undefined in C++17.
+  return (static_cast<uint32_t>(Buf(nPos)) << 24) + (static_cast<uint32_t>(Buf(nPos + 1)) << 16) +
+         (static_cast<uint32_t>(Buf(nPos + 2)) << 8) + Buf(nPos + 3);
+}
+
+//-----------------------------------------------------------------------------
+// Read a UINT16 from the buffer, force as big endian
+//
+// INPUT:
+// - nPos               Buffer position
+//
+// RETURN:
+// - UINT16 from buffer
+//
+uint32_t CjfifDecode::ReadBe2(uint32_t nPos)
+{
+  return (static_cast<uint32_t>(Buf(nPos)) << 8) + Buf(nPos + 1);
 }
 
 //-----------------------------------------------------------------------------
@@ -3718,7 +3737,9 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
 
       uint8_t cTmp;
 
-      for(uint32_t vInd = 0; (vInd < nIfdNumComps - 8) && (!bDone); vInd++)
+      // The text follows the 8-byte character code. (With a count below 8,
+      // nIfdNumComps - 8 wrapped and the loop read whatever followed.)
+      for(uint32_t vInd = 0; (vInd + 8 < nIfdNumComps) && (!bDone); vInd++)
       {
         cTmp = Buf(nPosExifStart + nIfdOffset + 8 + vInd);
 
@@ -4215,8 +4236,10 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
     // -------------------------
     if((strIfd == "IFD1") && (strIfdTag == "Compression"))
     {
-      // Embedded thumbnail, compression format
-      m_nImgExifThumbComp = ReadSwap4(m_nPos);
+      // Embedded thumbnail, compression format: the value decoded for the
+      // entry's own format. (A 4-byte read of this SHORT gave 0x00060000
+      // instead of 6 in big-endian files, so their thumbnails were skipped.)
+      m_nImgExifThumbComp = anValues[0];
     }
 
     if((strIfd == "IFD1") && (strIfdTag == "JpegIFOffset"))
@@ -4389,8 +4412,17 @@ uint32_t CjfifDecode::DecodeApp13Ps(uint32_t nPosEnd)
   // Now that we've finished with the PsDec decoder we can fetch
   // some of the parser state
   // TODO: Migrate into accessor
-  m_nImgQualPhotoshopSa = m_pPsDec->m_nQualitySaveAs;
-  m_nImgQualPhotoshopSfw = m_pPsDec->m_nQualitySaveForWeb;
+  // Keep a quality found earlier (Save for Web comes from the APP12 "Ducky"
+  // segment) unless this segment has one: an APP13 without it zeroed it.
+  if(m_pPsDec->m_nQualitySaveAs != 0)
+  {
+    m_nImgQualPhotoshopSa = m_pPsDec->m_nQualitySaveAs;
+  }
+
+  if(m_pPsDec->m_nQualitySaveForWeb != 0)
+  {
+    m_nImgQualPhotoshopSfw = m_pPsDec->m_nQualitySaveForWeb;
+  }
   m_bPsd = m_pPsDec->m_bPsd;
 
   return 0;
@@ -4496,13 +4528,17 @@ uint32_t CjfifDecode::DecodeIccHeader(uint32_t nPos)
   strTmp = QString("        %1 : %2").arg("Preferred CMM Type", -33).arg(Uint2Chars(nPrefCmmType));
   m_pLog->AddLine(strTmp);
 
+  // ICC.1:2022 7.2.4: byte 8 is the major version, byte 9 holds the minor and
+  // bug-fix versions in its two halves (binary-coded decimal), and bytes 10-11
+  // are reserved; 4.4.0.0 is 04400000h. (This printed nibbles 7 to 4, giving
+  // 0.4.4.0.)
   strTmp =
     QString("        %1 : %2.%3.%4.%5 (0x%6)")
       .arg("Profile Version",-33)
-      .arg((nProfVer & 0xF0000000) >> 28)
-      .arg((nProfVer & 0x0F000000) >> 24)
-      .arg((nProfVer & 0x00F00000) >> 20)
-      .arg((nProfVer & 0x000F0000) >> 16)
+      .arg((nProfVer & 0xFF000000) >> 24, 0, 16)
+      .arg((nProfVer & 0x00F00000) >> 20, 0, 16)
+      .arg((nProfVer & 0x000F0000) >> 16, 0, 16)
+      .arg(nProfVer & 0x0000FFFF, 0, 16)
       .arg(nProfVer, 8, 16, QChar('0'));
   m_pLog->AddLine(strTmp);
 
@@ -4657,9 +4693,11 @@ uint32_t CjfifDecode::DecodeIccHeader(uint32_t nPos)
   strTmp1 = (TestBit(nProfFlags, 0)) ? "Embedded profile" : "Profile not embedded";
   strTmp = QString("        %1 > %2").arg("Profile flags", -35).arg(strTmp1);
   m_pLog->AddLine(strTmp);
+  // Bit 1 set means the profile can't be used without the embedded colour
+  // data (ICC.1:2022 Table 21; this was reversed)
   strTmp1 =
-    (TestBit(nProfFlags, 1)) ? "Profile can be used independently of embedded" :
-    "Profile can't be used independently of embedded";
+    (TestBit(nProfFlags, 1)) ? "Profile can't be used independently of embedded" :
+    "Profile can be used independently of embedded";
   strTmp = QString("        %1 > %2").arg("Profile flags", -35).arg(strTmp1);
   m_pLog->AddLine(strTmp);
 
@@ -4684,12 +4722,14 @@ uint32_t CjfifDecode::DecodeIccHeader(uint32_t nPos)
       .arg("Device attributes", -35)
       .arg(strTmp1);
   m_pLog->AddLine(strTmp);
-  strTmp1 = (TestBit(anDevAttrib[0], 2)) ? "Media polarity = positive" : "Media polarity = negative";
+  // Bits 2 and 3 set mean negative and black & white media (ICC.1:2022
+  // Table 22; both were reversed)
+  strTmp1 = (TestBit(anDevAttrib[0], 2)) ? "Media polarity = negative" : "Media polarity = positive";
   strTmp = QString("        %1 > %2")
       .arg("Device attributes", -35)
       .arg(strTmp1);
   m_pLog->AddLine(strTmp);
-  strTmp1 = (TestBit(anDevAttrib[0], 3)) ? "Colour media" : "Black & white media";
+  strTmp1 = (TestBit(anDevAttrib[0], 3)) ? "Black & white media" : "Colour media";
   strTmp = QString("        %1 > %2")
       .arg("Device attributes", -35)
       .arg(strTmp1);
@@ -4834,7 +4874,10 @@ uint32_t CjfifDecode::DecodeApp2Flashpix()
     strTmp = QString("    Segment: CONTENTS LIST");
     m_pLog->AddLine(strTmp);
 
-    nFpxInteropCnt = (Buf(m_nPos++) << 8) + Buf(m_nPos++);
+    // Read, then advance: "(Buf(m_nPos++) << 8) + Buf(m_nPos++)" advanced m_nPos
+    // twice in one expression, which is undefined (the order is unsequenced)
+    nFpxInteropCnt = ReadBe2(m_nPos);
+    m_nPos += 2;
     strTmp = QString("      Interoperability Count = %1").arg(nFpxInteropCnt);
     m_pLog->AddLine(strTmp);
 
@@ -4842,7 +4885,8 @@ uint32_t CjfifDecode::DecodeApp2Flashpix()
     {
       strTmp = QString("      Entity Index #%1").arg(ind);
       m_pLog->AddLine(strTmp);
-      nFpxEntitySz = (Buf(m_nPos++) << 24) + (Buf(m_nPos++) << 16) + (Buf(m_nPos++) << 8) + Buf(m_nPos++);
+      nFpxEntitySz = ReadBe4(m_nPos);
+      m_nPos += 4;
 
       // If the "entity size" field is 0xFFFFFFFF, then it should be treated as
       // a "storage". It looks like we should probably be using this to determine
@@ -4913,11 +4957,13 @@ uint32_t CjfifDecode::DecodeApp2Flashpix()
     strTmp = "    Segment: STREAM DATA";
     m_pLog->AddLine(strTmp);
 
-    nFpxStIndexCont = (Buf(m_nPos++) << 8) + Buf(m_nPos++);
+    nFpxStIndexCont = ReadBe2(m_nPos);
+    m_nPos += 2;
     strTmp = QString("      Index in Contents List = %1").arg(nFpxStIndexCont);
     m_pLog->AddLine(strTmp);
 
-    nFpxStOffset = (Buf(m_nPos++) << 24) + (Buf(m_nPos++) << 16) + (Buf(m_nPos++) << 8) + Buf(m_nPos++);
+    nFpxStOffset = ReadBe4(m_nPos);
+    m_nPos += 4;
     strTmp = QString("      Offset in stream = %1 (0x%2)").arg(nFpxStOffset).arg(nFpxStOffset, 8, 16, QChar('0'));
     m_pLog->AddLine(strTmp);
 
@@ -4926,9 +4972,12 @@ uint32_t CjfifDecode::DecodeApp2Flashpix()
     // NOTE: Should only decode this if we are doing first part of stream
     // TODO: How do we know this? First reference to index #?
 
-    nFpxStWByteOrder = (Buf(m_nPos++) << 8) + Buf(m_nPos++);
-    nFpxStWFormat = (Buf(m_nPos++) << 8) + Buf(m_nPos++);
-    nFpxStDwOsVer = (Buf(m_nPos++) << 24) + (Buf(m_nPos++) << 16) + (Buf(m_nPos++) << 8) + Buf(m_nPos++);
+    nFpxStWByteOrder = ReadBe2(m_nPos);
+    m_nPos += 2;
+    nFpxStWFormat = ReadBe2(m_nPos);
+    m_nPos += 2;
+    nFpxStDwOsVer = ReadBe4(m_nPos);
+    m_nPos += 4;
 
     // FIXME:
     // NOTE: Very strange reordering required here. Doesn't seem consistent!
@@ -4952,7 +5001,8 @@ uint32_t CjfifDecode::DecodeApp2Flashpix()
         .arg(Buf(m_nPos + 14), 2, 16, QChar('0'))
         .arg(Buf(m_nPos + 15), 2, 16, QChar('0'));
     m_nPos += 16;
-    nFpxStRsvd = (Buf(m_nPos++) << 8) + Buf(m_nPos++);
+    nFpxStRsvd = ReadBe2(m_nPos);
+    m_nPos += 2;
 
     strTmp = QString("      ByteOrder = 0x%1").arg(nFpxStWByteOrder, 4, 16, QChar('0'));
     m_pLog->AddLine(strTmp);
@@ -5147,6 +5197,9 @@ void CjfifDecode::DecodeDHT(bool bInject)
       m_pLog->AddLine("");
       m_pLog->AddLine("  Expanded Form of Codes:");
     }
+
+    // This may redefine a table: drop what the previous definition left
+    m_pImgDec->ClearDhtTable(nDhtHuffTblId_Th, nDhtClass_Tc);
 
     for(uint32_t nBitLen = 1; ((!m_bStateAbort) && (nBitLen <= 16)); nBitLen++)
     {
@@ -5763,6 +5816,8 @@ uint32_t CjfifDecode::DecodeMarker()
         strFull += strTmp;
         m_pLog->AddLine(strFull);
 
+        bool bByteOrderKnown = true;
+
         switch (acIdentifierTiff[0] * 256 + acIdentifierTiff[1])
         {
           case 0x4949:         // "II"
@@ -5774,6 +5829,12 @@ uint32_t CjfifDecode::DecodeMarker()
             // Motorola alignment
             m_nImgExifEndian = 1;
             m_pLog->AddLine("  Endian          = Motorola (big)");
+            break;
+          default:
+            // Anything read with it would be garbage (the byte order was
+            // left from the previous file, or never set)
+            bByteOrderKnown = false;
+            m_pLog->AddLineErr("  ERROR: Unknown EXIF byte order (expected \"II\" or \"MM\"). Skipping the EXIF IFDs.");
             break;
         }
 
@@ -5810,7 +5871,11 @@ uint32_t CjfifDecode::DecodeMarker()
         // condition by comparing against the APP marker length.
         // Example file: http://img9.imageshack.us/img9/194/90114543.jpg
 
-        if((nPosSaved + nLength) <= (nPosExifStart + nOffsetIfd1))
+        if(!bByteOrderKnown)
+        {
+          exif_done = true;
+        }
+        else if((nPosSaved + nLength) <= (nPosExifStart + nOffsetIfd1))
         {
           // We've run out of space for any IFD, so cancel now
           exif_done = true;
@@ -6430,7 +6495,10 @@ uint32_t CjfifDecode::DecodeMarker()
             }
             else
             {
+              // As for luminance (this left dComparePercent from the
+              // previous entry, or uninitialised for the first)
               m_afStdQuantChrCompare[glb_anZigZag[nCoeffInd]] = 999.99;
+              dComparePercent = 999.99;
             }
           }
 

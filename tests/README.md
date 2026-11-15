@@ -17,9 +17,10 @@ when it is installed, so Pillow needn't be installed separately).
 
 - `harness/` builds `jpegsnoop-harness` from the app's sources (shared through
   `JPEGsnoopQt.pri`) plus a small driver:
-  - `decode <file> [--ac] [--histo] [--unknown-exif]` decodes one file in
-    non-interactive mode and prints the report (`--unknown-exif` also reports
-    unknown EXIF tags, which the app hides by default);
+  - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]`
+    decodes one file in non-interactive mode and prints the report
+    (`--unknown-exif` also reports unknown EXIF tags, which the app hides by
+    default; `--pixels` prints the decoded colour at each point);
   - `gui <file>... [--mouse] [--log] [--reprocess-first] [--histo]
     [--cycle-channels] [--repeat N] [--max-growth-mb N]` opens the files in the
     real `MainWindow` like a fresh install. `--mouse` moves and clicks over the
@@ -45,8 +46,10 @@ when it is installed, so Pillow needn't be installed separately).
   It always runs offscreen with throwaway settings, so it never shows a window
   or touches your JPEGsnoop settings.
 - `gen_cases.py` writes the test files and `cases.tsv`. Every file is built from
-  synthetic images (Pillow gradients and solid colours) plus hand-made
-  segments, so no third-party images are needed.
+  synthetic images (Pillow gradients, solid colours and seeded noise) plus
+  hand-made segments, so no third-party images are needed. Files that Pillow
+  can't write, such as unusual sampling factors or levels outside 0..255, come
+  from `dc_only_jpeg()`, a small encoder for images made of flat 8×8 blocks.
 - `run-tests.sh` runs each case with a time limit. A case fails on a crash,
   timeout, sanitizer report, missing expected output or forbidden output.
   Output of failed cases is kept in `build-tests*/logs/`.

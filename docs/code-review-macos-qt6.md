@@ -228,8 +228,75 @@ luminance found on the way. All are inherited from master.
   IDCT and histograms, differ only in the Average Pixel Luminance line. It rises by 1–15
   in 22 of them.
 
-**Still open:** the inherited R13–R15, R17 and R18; the two findings above; Developer ID
-signing and notarization (M5); latent code.
+### Inherited R13–R15, R17 and R18
+
+**Fixed:** R13–R15, R17 and R18 (its average-luminance item was fixed with C7).
+- **R13 Big-endian thumbnails:** the thumbnail's Compression value is now taken as decoded
+  for its own format. A 4-byte read made it 0x00060000 in big-endian files, so their
+  thumbnails were never analysed.
+- **R14 Redefined Huffman tables:** a DHT now clears the table it defines. The fast lookup
+  kept the old table's entries for the prefixes of the new table's longer codes. A noisy
+  64×64 image with its AC table defined twice had 14 scan errors; it now decodes cleanly.
+- **R15 Chroma placement:** subsampled blocks are now 8 pixels times their expansion
+  factor apart, and the scan-error position follows the same rule. With Y 4x1 and Cb/Cr
+  2x1, the second chroma block was drawn at x 8–23 instead of 16–31, so part of each MCU
+  had the wrong colour and the rest none. libjpeg (through Pillow) decodes the test file to
+  the same colours, within 1.
+- **R17 Clipping notes and totals:**
+  - Each "YCC Clipped" note gives the file position of its own MCU, not the end of the scan.
+  - The totals count every clipped pixel; the YCC totals stopped at the 10 that were noted.
+  - Padding up to whole MCUs is not counted: a test image reported 128 RGB clips for 96
+    clipped pixels.
+  - The totals start again at each preview calculation instead of adding up.
+  - Clipping is only counted with Histogram RGB on, and without it the report said 0 for
+    everything. It now says that clipping wasn't counted.
+- **R18:**
+  - **UserComment:** a count below 8 wrapped, and the text after the field was printed as
+    the comment.
+  - **ICC header,** checked against ICC.1:2022 (7.2.4, Tables 21 and 22) and, for the
+    flags, Little CMS. The version printed nibbles 7 to 4, so 4.2 was "0.4.2.0"; it is now
+    "4.2.0.0", as the spec writes it. "Can't be used independently", negative polarity and
+    black & white media were each reversed, so ordinary profiles (all flags 0) showed all
+    three.
+  - **EXIF byte order:** a header with neither "II" nor "MM" now gives an error and its IFDs
+    are skipped. Before, the byte order was left from the previous file, or never set; it is
+    now reset for each file.
+  - **DQT quality estimate:** a zero chroma entry counts as 999.99%, as for luminance. It
+    took the previous entry's percentage, or an uninitialised one for the first entry.
+  - **Photoshop quality:** an APP13 without one no longer zeroes a quality found earlier,
+    such as Save for Web from APP12 "Ducky". The "Photoshop IRB detected" note and its weight
+    in the assessment were lost.
+  - **Truncated scans:** the "Early EOF" error was already reported, but the scan decoder
+    decoded the zeros read past the end as image data. It now stops there and says in which
+    MCU.
+  - **BufX:** a 2- or 4-byte read ending on the last byte of its window, such as the end of
+    the file, returned 0: an IPTC Record Version of 4 showed as 0.
+  - **FlashPix fields** were read with two `m_nPos++` in one expression, which is undefined.
+    Clang's 8 `-Wunsequenced` warnings are gone. Its output was right and is unchanged; a
+    new case checks it.
+- **Also:** `BufX`, `ReadBe4` and the buffer search shifted bytes of 0x80 and above into the
+  sign bit of an `int` (undefined in C++17); they now shift unsigned values.
+
+**Found, not fixed** (inherited, from reading the code): a UserComment with the "UNICODE"
+character code is read one byte at a time and stops at the first zero byte, so it shows at
+most one character.
+
+19 new cases cover these (98 in all). The test driver can print decoded pixel colours
+(`--pixels`), and `gen_cases.py` has a small encoder for files Pillow can't write.
+
+**Checks:**
+- **Tests catch the bugs:** run against the previous commit, 18 of the 19 new cases fail.
+  The FlashPix case passes there too, as its output didn't change.
+- **All 98 pass** with and without ASan/UBSan.
+- **Sanitizer corpus still clean:** the 3,273 files give no ASan or UBSan reports. Only
+  two 65535-pixel files exceeded 60 s in the sanitizer build, as before.
+- **Expected changes only:** of 64 reports (32 valid files, with and without full IDCT and
+  histograms), 33 change, and only in the clipping totals without histograms, the offsets in
+  clipping notes, and the ICC header lines. The notes themselves are the same. Pillow reads
+  the same ICC values from the two corpus seeds with profiles.
+
+**Still open:** the findings not fixed above and under C7; Developer ID signing and
+notarization (M5); latent code.
 
 ## How this was reviewed
 

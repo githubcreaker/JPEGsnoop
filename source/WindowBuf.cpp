@@ -222,15 +222,15 @@ bool CwindowBuf::BufSearch(uint32_t nStartPos, uint32_t nSearchVal, uint32_t nSe
 
     if(nSearchLen == 4)
     {
-      nCurVal = (Buf(nCurPos + 0) << 24) + (Buf(nCurPos + 1) << 16) + (Buf(nCurPos + 2) << 8) + Buf(nCurPos + 3);
+      nCurVal = (static_cast<uint32_t>(Buf(nCurPos + 0)) << 24) + (static_cast<uint32_t>(Buf(nCurPos + 1)) << 16) + (static_cast<uint32_t>(Buf(nCurPos + 2)) << 8) + Buf(nCurPos + 3);
     }
     else if(nSearchLen == 3)
     {
-      nCurVal = (Buf(nCurPos + 0) << 16) + (Buf(nCurPos + 1) << 8) + Buf(nCurPos + 2);
+      nCurVal = (static_cast<uint32_t>(Buf(nCurPos + 0)) << 16) + (static_cast<uint32_t>(Buf(nCurPos + 1)) << 8) + Buf(nCurPos + 2);
     }
     else if(nSearchLen == 2)
     {
-      nCurVal = (Buf(nCurPos + 0) << 8) + Buf(nCurPos + 1);
+      nCurVal = (static_cast<uint32_t>(Buf(nCurPos + 0)) << 8) + Buf(nCurPos + 1);
     }
     else if(nSearchLen == 1)
     {
@@ -869,19 +869,22 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
   Q_ASSERT(m_pBufFile);
 
   nWinRel = nOffset - m_nBufWinStart;
-  if((nWinRel >= 0) && (nWinRel + nSz < m_nBufWinSize))
+  // The read may end on the window's last byte (with <, a 2- or 4-byte read
+  // ending on the last byte of the file returned 0). Bytes are shifted as
+  // unsigned: shifting a byte >= 0x80 into the sign bit of an int is undefined.
+  if((nWinRel >= 0) && (nWinRel + nSz <= m_nBufWinSize))
   {
     // Address is within current window
     if(!nByteSwap)
     {
       if(nSz == 4)
       {
-        return ((m_pBuffer[nWinRel + 0] << 24) + (m_pBuffer[nWinRel + 1] << 16) + (m_pBuffer[nWinRel + 2] << 8) +
+        return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 0]) << 24) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 1]) << 16) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 2]) << 8) +
                 (m_pBuffer[nWinRel + 3]));
       }
       else if(nSz == 2)
       {
-        return ((m_pBuffer[nWinRel + 0] << 8) + (m_pBuffer[nWinRel + 1]));
+        return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 0]) << 8) + (m_pBuffer[nWinRel + 1]));
       }
       else if(nSz == 1)
       {
@@ -898,12 +901,12 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
     {
       if(nSz == 4)
       {
-        return ((m_pBuffer[nWinRel + 3] << 24) + (m_pBuffer[nWinRel + 2] << 16) + (m_pBuffer[nWinRel + 1] << 8) +
+        return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 3]) << 24) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 2]) << 16) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 1]) << 8) +
                 (m_pBuffer[nWinRel + 0]));
       }
       else if(nSz == 2)
       {
-        return ((m_pBuffer[nWinRel + 1] << 8) + (m_pBuffer[nWinRel + 0]));
+        return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 1]) << 8) + (m_pBuffer[nWinRel + 0]));
       }
       else if(nSz == 1)
       {
@@ -929,18 +932,18 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
 
     // Now recheck the window
     // TODO: Rewrite the following in a cleaner manner
-    if((nWinRel >= 0) && (nWinRel + nSz < m_nBufWinSize))
+    if((nWinRel >= 0) && (nWinRel + nSz <= m_nBufWinSize))
     {
       if(!nByteSwap)
       {
         if(nSz == 4)
         {
-          return ((m_pBuffer[nWinRel + 0] << 24) + (m_pBuffer[nWinRel + 1] << 16) + (m_pBuffer[nWinRel + 2] << 8) +
+          return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 0]) << 24) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 1]) << 16) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 2]) << 8) +
                   (m_pBuffer[nWinRel + 3]));
         }
         else if(nSz == 2)
         {
-          return ((m_pBuffer[nWinRel + 0] << 8) + (m_pBuffer[nWinRel + 1]));
+          return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 0]) << 8) + (m_pBuffer[nWinRel + 1]));
         }
         else if(nSz == 1)
         {
@@ -957,12 +960,12 @@ uint32_t CwindowBuf::BufX(uint32_t nOffset, uint32_t nSz, bool nByteSwap)
       {
         if(nSz == 4)
         {
-          return ((m_pBuffer[nWinRel + 3] << 24) + (m_pBuffer[nWinRel + 2] << 16) + (m_pBuffer[nWinRel + 1] << 8) +
+          return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 3]) << 24) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 2]) << 16) + (static_cast<uint32_t>(m_pBuffer[nWinRel + 1]) << 8) +
                   (m_pBuffer[nWinRel + 0]));
         }
         else if(nSz == 2)
         {
-          return ((m_pBuffer[nWinRel + 1] << 8) + (m_pBuffer[nWinRel + 0]));
+          return ((static_cast<uint32_t>(m_pBuffer[nWinRel + 1]) << 8) + (m_pBuffer[nWinRel + 0]));
         }
         else if(nSz == 1)
         {

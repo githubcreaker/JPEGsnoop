@@ -11,6 +11,7 @@
 # stdout ("-" for none).
 
 import io
+import random
 import struct
 import sys
 from pathlib import Path
@@ -435,6 +436,208 @@ icc[8:12] = bytes([4, 0, 0, 0])
 app2 = seg(0xE2, b"ICC_PROFILE\x00" + bytes([1, 1]) + bytes(icc))
 case("R19_icc_fourcc", "R19", "decode", write("r_icc.jpg", insert_after_app0(c444, app2)),
      expect="'RGB ' \\(0x52474220\\)")
+
+
+# --- R13-R18: inherited decode errors -------------------------------------------
+def huff_codes(counts, values):
+    """Canonical Huffman codes (T.81 Annex C): symbol -> (code, length)."""
+    codes, code, k = {}, 0, 0
+    for length in range(1, 17):
+        for _ in range(counts[length - 1]):
+            codes[values[k]] = (code, length)
+            code += 1
+            k += 1
+        code <<= 1
+    return codes
+
+
+DC_COUNTS = [0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0]  # T.81 Table K.3
+DC_VALUES = list(range(12))
+
+
+class Bits:
+    """Entropy-coded data writer with 0xFF byte stuffing."""
+
+    def __init__(self):
+        self.out, self.acc, self.n = bytearray(), 0, 0
+
+    def put(self, value, length):
+        for i in range(length - 1, -1, -1):
+            self.acc = (self.acc << 1) | ((value >> i) & 1)
+            self.n += 1
+            if self.n == 8:
+                self.out += bytes([self.acc, 0]) if self.acc == 0xFF else bytes([self.acc])
+                self.acc, self.n = 0, 0
+
+    def pos(self):
+        """(byte, bit) of the next bit."""
+        return len(self.out), self.n
+
+    def flush(self):
+        if self.n:
+            self.put((1 << (8 - self.n)) - 1, 8 - self.n)
+        return bytes(self.out)
+
+
+def dc_only_jpeg(width, height, comps, level):
+    """Baseline JPEG made of flat 8x8 blocks (DC only, quantiser 1), with any
+    sampling factors and any level, even outside 0..255, which Pillow can't
+    write. comps: [(id, h, v)]; level(comp_index, x, y) is the component's
+    level for the block whose top-left image pixel is (x, y).
+    Returns (file, offset of the scan data, [(byte, bit) where each MCU starts
+    in the scan data])."""
+    hmax, vmax = max(c[1] for c in comps), max(c[2] for c in comps)
+    dc = huff_codes(DC_COUNTS, DC_VALUES)
+    bits, pred, mcu_pos = Bits(), [0] * len(comps), []
+    for my in range(-(-height // (8 * vmax))):
+        for mx in range(-(-width // (8 * hmax))):
+            mcu_pos.append(bits.pos())
+            for ci, (_, h, v) in enumerate(comps):
+                for by in range(v):
+                    for bx in range(h):
+                        x = (mx * hmax + bx * (hmax // h)) * 8
+                        y = (my * vmax + by * (vmax // v)) * 8
+                        coef = round((level(ci, x, y) - 128) * 8)
+                        diff, pred[ci] = coef - pred[ci], coef
+                        cat = abs(diff).bit_length()
+                        bits.put(*dc[cat])
+                        if cat:
+                            bits.put(diff if diff > 0 else diff + (1 << cat) - 1, cat)
+                        bits.put(0, 1)      # EOB: the AC table's only code
+    head = (b"\xff\xd8" + seg(0xDB, bytes([0]) + bytes([1]) * 64)
+            + seg(0xC0, bytes([8]) + struct.pack(">HHB", height, width, len(comps))
+                  + b"".join(bytes([cid, (h << 4) | v, 0]) for cid, h, v in comps))
+            + seg(0xC4, bytes([0x00] + DC_COUNTS + DC_VALUES))
+            + seg(0xC4, bytes([0x10, 1] + [0] * 15 + [0x00]))
+            + seg(0xDA, bytes([len(comps)]) + b"".join(bytes([cid, 0x00]) for cid, _, _ in comps)
+                  + bytes([0, 63, 0])))
+    return head + bits.flush() + b"\xff\xd9", len(head), mcu_pos
+
+
+# R13: a big-endian EXIF thumbnail (Compression is a SHORT, read as 4 bytes)
+thumb = jpeg(gradient(16, 16), quality=80)
+bo = ">"
+IFD1, T = 0x40, 0x80
+ifd0 = tiff_ifd(bo, 8, [entry(0x010F, ascii_("TestMake"))], next_off=IFD1)
+ifd1 = tiff_ifd(bo, IFD1, [entry(0x0103, shorts(bo, 6)), entry(0x0201, longs(bo, T)),
+                           entry(0x0202, longs(bo, len(thumb)))])
+t = bytearray(tiff(bo, {8: ifd0, IFD1: ifd1}))
+t += bytes(T - len(t)) + thumb
+case("R13_big_endian_thumbnail", "R13", "decode",
+     write("r13_be_thumb.jpg", insert_after_app0(c444, app1_exif(bytes(t)))),
+     expect="\\*\\*\\* Embedded JPEG Thumbnail \\*\\*\\*")
+
+# R14: a DHT redefining a table before the scan (allowed by T.81). The first
+# definition (all 8-bit codes) left fast-lookup entries for the prefixes of the
+# real table's longer codes, which a noisy image uses.
+rnd = random.Random(1)
+noise = Image.new("RGB", (64, 64))
+noise.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(64 * 64)])
+noise444 = jpeg(noise, quality=90, subsampling=0)
+dummy_ac = seg(0xC4, bytes([0x10]) + bytes([0] * 7 + [255] + [0] * 8) + bytes(range(255)))
+case("R14_dht_redefined", "R14", "decode", write("r14_dht_redefined.jpg", insert_after_app0(noise444, dummy_ac)),
+     "--ac", expect=DECODED, forbid="ERROR")
+
+# R15: Y 4x1, Cb/Cr 2x1. Cb is high in the left half of each 32-pixel MCU
+# (blue) and low in the right half (yellow). The second chroma block was drawn
+# at x 8-23 instead of 16-31, so x 12 was yellow and x 24-31 had no chroma.
+data, _, _ = dc_only_jpeg(64, 8, [(1, 4, 1), (2, 2, 1), (3, 2, 1)],
+                          lambda c, x, y: 128 if c != 1 else (188 if x % 32 < 16 else 68))
+name = write("r15_css_4x1_2x1.jpg", data)
+case("R15_chroma_4x1_2x1", "R15", "decode", name, "--ac --pixels 12,4/28,4",
+     expect="pixel 12,4 = 128,10[6-8],23[3-5]$")
+case("R15_chroma_4x1_2x1_right", "R15", "decode", name, "--ac --pixels 12,4/28,4",
+     expect="pixel 28,4 = 128,1(4[7-9]|50),2[1-3]$")
+
+# R17: Y above 255 in blocks 1 and 2 of a 20x8 grey image (block 2 is half
+# padding). 12 of 20 columns x 8 rows = 96 real pixels clip; the first note
+# is for MCU 1 and should give that MCU's position, not the end of the scan.
+data, scan_off, mcu_pos = dc_only_jpeg(20, 8, [(1, 1, 1)], lambda c, x, y: 128 if x < 8 else 300)
+name = write("r17_ycc_clip.jpg", data)
+byte, bit = mcu_pos[1]
+case("R17_clip_note_offset", "R17", "decode", name, "--histo",
+     expect=f"MCU=\\(   1,   0\\).* Y Overflow @ Offset 0x{scan_off + byte:08x}\\.{bit}$")
+case("R17_clip_totals_ycc", "R17", "decode", name, "--histo", expect="Y  component: \\[<0=    0\\] \\[>255=   96\\]")
+# Without the histograms nothing is counted: the totals said 0
+case("R17_clip_not_counted", "R17", "decode", name, expect="clipping in DC: not counted",
+     forbid="Y  component: \\[<0=    0\\] \\[>255=    0\\]")
+# RGB clipping comes from in-range YCC: Y 200 with Cr 250 gives red 371
+data, _, _ = dc_only_jpeg(20, 8, [(1, 1, 1), (2, 1, 1), (3, 1, 1)],
+                          lambda c, x, y: 128 if x < 8 else (200, 128, 250)[c])
+case("R17_clip_totals_rgb", "R17", "decode", write("r17_rgb_clip.jpg", data), "--histo",
+     expect="R  component: \\[<0=    0\\] \\[>255=   96\\]")
+
+# R18: UserComment with fewer than the 8 bytes of its character code
+bo = "<"
+SUB = 0x40
+ifd0 = tiff_ifd(bo, 8, [entry(0x8769, longs(bo, SUB))])
+sub = tiff_ifd(bo, SUB, [(0x9286, 7, 6, b"ASCII\x00" + b"\x00\x00Overrun text\x00")])
+case("R18_user_comment_short", "R18", "decode",
+     write("r18_user_comment.jpg", insert_after_app0(c444, app1_exif(tiff(bo, {8: ifd0, SUB: sub})))),
+     expect="UserComment +\\] = \"\"", forbid="Overrun text")
+
+# R18: ICC version 4.2, profile flag bit 1 and device attribute bits 2 and 3
+# set (ICC.1:2022 7.2.4, Tables 21 and 22)
+icc = bytearray(128)
+struct.pack_into(">I", icc, 0, 128)
+icc[4:8], icc[12:16], icc[16:20], icc[20:24], icc[36:40] = b"appl", b"mntr", b"RGB ", b"XYZ ", b"acsp"
+icc[8:12] = bytes([4, 0x20, 0, 0])
+struct.pack_into(">I", icc, 44, 0x00000003)           # embedded, not usable on its own
+struct.pack_into(">II", icc, 56, 0, 0x0000000C)       # negative, black & white media
+name = write("r18_icc_header.jpg",
+             insert_after_app0(c444, seg(0xE2, b"ICC_PROFILE\x00" + bytes([1, 1]) + bytes(icc))))
+for cid, pattern in (("R18_icc_version", "Profile Version +: 4\\.2\\.0\\.0 \\(0x04200000\\)"),
+                     ("R18_icc_flag_independent", "Profile flags +> Profile can't be used independently"),
+                     ("R18_icc_polarity", "Device attributes +> Media polarity = negative"),
+                     ("R18_icc_bw_media", "Device attributes +> Black & white media")):
+    case(cid, "R18", "decode", name, expect=pattern)
+
+# R18: EXIF TIFF header with neither "II" nor "MM"
+case("R18_exif_byte_order", "R18", "decode",
+     write("r18_exif_byte_order.jpg", insert_after_app0(c444, app1_exif(b"XX\x00\x2a" + bytes(12)))),
+     expect="ERROR: Unknown EXIF byte order")
+
+# R18: chroma DQT with a zero entry (zig-zag index 1). The estimate used the
+# previous entry's percentage for it; a zero now counts as 999.99%, as for luma.
+d = bytearray(c444)
+i = 2
+while d[i + 1] != 0xDA:                    # every DQT segment before the scan
+    end = i + 2 + struct.unpack(">H", d[i + 2:i + 4])[0]
+    j = i + 4
+    while d[i + 1] == 0xDB and j < end:
+        if d[j] & 0x0F == 1:
+            d[j + 1:j + 65] = bytes([99, 0]) + bytes([99]) * 62
+        j += 65
+    i = end
+case("R18_dqt_zero_entry", "R18", "decode", write("r18_dqt_zero.jpg", bytes(d)),
+     expect="Approx quality factor = 31\\.41 \\(scaling=159\\.19 ", forbid="scaling=152\\.67")
+
+# R18: APP12 "Ducky" Save for Web quality followed by an APP13 without one
+ducky = seg(0xEC, b"Ducky" + struct.pack(">HHI", 1, 4, 60) + bytes(2))
+app13 = seg(0xED, b"Photoshop 3.0\x00" + bim(0x0404, iptc(2, 5, b"Title")))
+case("R18_ducky_then_app13", "R18", "decode",
+     write("r18_ducky_app13.jpg", insert_after_app0(c444, ducky + app13)),
+     expect="NOTE: Photoshop IRB detected")
+
+# R18: truncated scan data (no EOI): Buf() returns 0 past the end of the file
+i = marker_pos(c444, 0xDA)
+scan = i + 2 + struct.unpack(">H", c444[i + 2:i + 4])[0]
+case("R18_truncated_scan", "R18", "decode", write("r18_truncated.jpg", c444[:scan + (len(c444) - scan) // 3]),
+     "--ac", expect="ERROR: Scan data ends at the end of the file")
+
+# R18: IPTC 2-byte field ending on the last byte of the file (BufX returned 0).
+# The block is even-length, so bim() adds no pad byte after it.
+block = bim(0x0404, iptc(2, 5, b"AB") + iptc(2, 0, b"\x00\x04"))
+assert block.endswith(b"\x00\x04")
+case("R18_bufx_last_bytes", "R18", "decode",
+     write("r18_bufx_end.jpg", b"\xff\xd8" + seg(0xED, b"Photoshop 3.0\x00" + block)),
+     expect="Record Version += 4$")
+
+# R18: FlashPix contents list (the reader advanced m_nPos twice in one expression)
+fpxr = b"FPXR\x00" + bytes([0, 1]) + struct.pack(">H", 1) + struct.pack(">I", 0x80000010) + b"\x00" \
+    + "Contents".encode("utf-16-le") + b"\x00\x00"
+case("R18_flashpix_contents", "R18", "decode", write("r18_fpxr.jpg", insert_after_app0(c444, seg(0xE2, fpxr))),
+     expect="Entity Size = 2147483664$")
 
 # --- S: settings and GUI behaviour -------------------------------------------
 # "settings" mode needs no file ("-"); see tests/harness/main.cpp

@@ -213,6 +213,7 @@ private:
   uint32_t ReadSwap2(uint32_t nPos);
   uint32_t ReadSwap4(uint32_t nPos);
   uint32_t ReadBe4(uint32_t nPos);
+  uint32_t ReadBe2(uint32_t nPos);
 
   bool ExportJpegDoRange(QString strFileIn, QString strFileOut, uint32_t nStart, uint32_t nEnd);
 

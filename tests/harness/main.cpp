@@ -1,10 +1,11 @@
 // Headless test driver for JPEGsnoopQt.
 //
-// decode <file> [--ac] [--histo] [--unknown-exif]
+// decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y[/X,Y...]]
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
-//     histograms; --unknown-exif: also report unknown EXIF tags.
+//     histograms; --unknown-exif: also report unknown EXIF tags; --pixels
+//     prints the decoded preview's colour at each point.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
 //     [--cycle-channels] [--repeat N] [--max-growth-mb N] [--zoom PCT]
@@ -85,6 +86,7 @@ static void usage()
 {
   fprintf(stderr,
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
+          "                         [--pixels X,Y[/X,Y...]]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
           "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
           "                         [--zoom PCT] [--max-zoom-mb N] [--check-preview] [--check-histo]\n"
@@ -93,7 +95,8 @@ static void usage()
           "       any mode: [--scale F]\n");
 }
 
-static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strDbDir)
+static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strPixels,
+                     const QString &strDbDir)
 {
   QPlainTextEdit edit;
   CDocLog log(&edit);
@@ -146,6 +149,24 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
            .arg(img.m_bDibTempReady && img.m_pDibTemp ? img.m_pDibTemp->width() : 0)
            .arg(img.m_bDibTempReady && img.m_pDibTemp ? img.m_pDibTemp->height() : 0)
            .arg(nStatusMsgs);
+
+  // Decoded colours at the requested points ("x,y/x,y")
+  const QStringList astrPoints = strPixels.split('/', Qt::SkipEmptyParts);
+  for(const QString &strPoint : astrPoints)
+  {
+    const QStringList astrXy = strPoint.split(',');
+    bool bOkX = false;
+    bool bOkY = false;
+    const int nX = (astrXy.size() == 2) ? astrXy.at(0).toInt(&bOkX) : 0;
+    const int nY = (astrXy.size() == 2) ? astrXy.at(1).toInt(&bOkY) : 0;
+    if(!bOkX || !bOkY || !img.m_bDibTempReady || !img.m_pDibTemp || !img.m_pDibTemp->valid(nX, nY))
+    {
+      out << QString("harness: pixel %1 unavailable\n").arg(strPoint);
+      continue;
+    }
+    const QColor col = img.m_pDibTemp->pixelColor(nX, nY);
+    out << QString("harness: pixel %1,%2 = %3,%4,%5\n").arg(nX).arg(nY).arg(col.red()).arg(col.green()).arg(col.blue());
+  }
   return 0;
 }
 
@@ -730,7 +751,8 @@ int main(int argc, char **argv)
   guiOpts.bCheckTheme = args.removeAll("--check-theme") > 0;
 
   // Options with a text value (--scale was applied above)
-  for(const char *pszOpt : { "--scale", "--zoom" })
+  QString strPixels;
+  for(const char *pszOpt : { "--scale", "--zoom", "--pixels" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -742,6 +764,8 @@ int main(int argc, char **argv)
     }
     if(QLatin1String(pszOpt) == QLatin1String("--zoom"))
       guiOpts.strZoom = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--pixels"))
+      strPixels = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -775,7 +799,7 @@ int main(int argc, char **argv)
   }
 
   if(strMode == "decode" && args.size() == 1)
-    return runDecode(args.first(), bAc, bHisto, bUnknownExif, tmpDir.path());
+    return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
     return runGui(args, guiOpts, tmpDir.path());
   if(strMode == "settings" && args.isEmpty())
