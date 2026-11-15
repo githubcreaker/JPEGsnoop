@@ -702,8 +702,10 @@ void MainWindow::AnalyzeFile()
   {
     QString strError;
 
-    // Note: msg includes m_strPathName
+    // Note: msg includes m_strPathName. Clear the previous file's report
+    // first, as for an empty file: the error was added to the end of it.
     strError = QString("ERROR: Couldn't open file: [%1]").arg(m_currentFile);
+    m_pDocLog->Clear();
     m_pDocLog->AddLineErr(strError);
 
     if(m_pAppConfig->interactive())

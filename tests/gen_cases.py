@@ -775,6 +775,12 @@ case("F4_failed_open_message", "F4", "gui", ["f4_no_such_file.jpg"], timeout=30,
      expect="harness: message box: ERROR: Couldn't open file")
 case("F4_channel_after_empty", "F4", "gui", ["ok_444.jpg", f4_empty], "--cycle-channels --check-preview",
      timeout=60, expect="harness: preview after channels missing")
+# A failed open added its error to the previous file's report, which stayed
+# (an empty file's report is cleared). scan=1 means the report has a scan decode.
+case("F4_report_after_failed_open", "F4", "gui", ["ok_444.jpg", "f4_no_such_file.jpg"], timeout=30,
+     expect="harness: file=f4_no_such_file.jpg scan=0")
+case("F4_failed_open_report", "F4", "gui", ["f4_no_such_file.jpg"], "--log", timeout=30,
+     expect="^ERROR: Couldn't open file: \\[.*f4_no_such_file\\.jpg\\]$")
 
 # F5: a histogram bin over 35,791,394 pixels overflowed 60 * count in 32 bits,
 # so the white 6000x6000 image's only bar wasn't drawn

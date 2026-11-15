@@ -394,13 +394,17 @@ fixes incomplete. Both are now fixed:
   still had the previous file's image, so a zoom or channel change drew it again. The
   decoder now forgets its image, preview and histograms whenever the views are cleared.
   The image source is always marked changed first, so the next file is decoded afresh.
+  A failed open also added its error to the end of the previous file's report, which
+  stayed; the report is now cleared first, as it already was for an empty file.
 
-7 new cases (127 in all), 6 of which fail against `cf42610`; the seventh checks that
-the test driver closes the failed open's message box, which used to wait for a click.
-The driver also checks the preview again after `--cycle-channels`.
+9 new cases (129 in all): 6 fail against `cf42610`, and the report one against
+`90f2ab2`, which had the preview fix but not this one. The other two check that
+the test driver closes the failed open's message box, which used to wait for a click,
+and that the error is in the report. The driver also checks the preview again after
+`--cycle-channels`.
 
 **Checks:**
-- **All 127 pass** with and without ASan/UBSan.
+- **All 129 pass** with and without ASan/UBSan.
 - **Cut-off sweep:** a 170-byte slices resource whose descriptor has an integer, a text
   string, a list, an enum and a nested descriptor, with its length set to every value
   from 0 to 170. Before, 152 of the 171 files read past the resource. Now no descriptor
