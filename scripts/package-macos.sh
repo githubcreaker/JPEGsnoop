@@ -12,22 +12,22 @@
 #
 # Output: <build-dir>/JPEGsnoopQt-<version>-macos-<arch>.zip
 #
-# What it does, and why:
+# What it does, and why (steps 2-5 change the app in the build folder, which
+# becomes the packaged app):
 # 1. qmake + make (output in <build-dir>/make.log).
-# 2. Copies the .app to a temporary folder and packages it there. The bundle
-#    can't be signed inside iCloud-synced folders (Desktop/Documents): the
-#    iCloud file provider tags bundle folders with com.apple.FinderInfo, which
-#    codesign rejects. The app in the build folder is left as built.
-# 3. macdeployqt copies the Qt frameworks, plugins and their libraries into the
+# 2. macdeployqt copies the Qt frameworks, plugins and their libraries into the
 #    bundle. Qt 6 finds Contents/PlugIns by itself, so no qt.conf is needed.
-# 4. Removes absolute LC_RPATHs (such as /opt/homebrew/lib), so no library can
+# 3. Removes absolute LC_RPATHs (such as /opt/homebrew/lib), so no library can
 #    be picked up from outside the bundle.
-# 5. Raises LSMinimumSystemVersion to the highest minimum macOS of any bundled
+# 4. Raises LSMinimumSystemVersion to the highest minimum macOS of any bundled
 #    binary. Homebrew builds its libraries for the macOS it runs on, so the
 #    bundle can need a newer macOS than the app itself was compiled for.
-# 6. Ad-hoc signs the bundle, checks the signature (strict) and that every
+# 5. Ad-hoc signs the bundle, checks the signature (strict) and that every
 #    library dependency resolves inside the bundle or to macOS, then zips it
 #    without extended attributes and checks the extracted copy again.
+#
+# Build outside iCloud-synced folders (Desktop/Documents): the iCloud file
+# provider tags bundle folders with com.apple.FinderInfo, which codesign rejects.
 #
 # The app is ad-hoc signed, not notarized: on other Macs Gatekeeper blocks it
 # until the user allows it in System Settings > Privacy & Security.
@@ -81,7 +81,7 @@ macdeployqt="$("$qmake" -query QT_INSTALL_BINS)/macdeployqt"
 [[ -x $macdeployqt ]] || macdeployqt=$(command -v macdeployqt || true)
 [[ -n $macdeployqt && -x $macdeployqt ]] || die "macdeployqt not found for $qmake"
 
-for tool in codesign ditto file install_name_tool lipo make otool plutil xattr; do
+for tool in codesign ditto file install_name_tool lipo make otool plutil; do
   command -v "$tool" >/dev/null || die "missing tool: $tool (install the Xcode command line tools)"
 done
 
@@ -136,23 +136,10 @@ rpaths() {
     r && $1 == "path" { sub(/^ *path /, ""); sub(/ \(offset [0-9]+\)$/, ""); print; r = 0 }'
 }
 
-# --- Package in a temporary folder outside iCloud -----------------------------
-
-stage=$(mktemp -d "${TMPDIR:-/tmp}/jpegsnoop-package.XXXXXX")
-cleanup() {
-  if [[ -n ${stage:-} && -d $stage ]]; then
-    rm -rf "$stage"
-  fi
-}
-trap cleanup EXIT
-
-staged="$stage/$APP_NAME.app"
-log "Copying $APP_NAME.app to a temporary folder"
-ditto --noextattr --noqtn "$app" "$staged"
-xattr -cr "$staged"
+# --- Package the app in the build folder --------------------------------------
 
 log "Bundling Qt with $macdeployqt"
-deploy_out=$("$macdeployqt" "$staged" -always-overwrite -no-codesign -verbose=1 2>&1) || {
+deploy_out=$("$macdeployqt" "$app" -always-overwrite -no-codesign -verbose=1 2>&1) || {
   printf '%s\n' "$deploy_out" >&2
   die "macdeployqt failed"
 }
@@ -169,15 +156,15 @@ while IFS= read -r -d '' f; do
         if ! err=$(install_name_tool -delete_rpath "$rp" "$f" 2>&1); then
           die "install_name_tool failed on $f: $err"
         fi
-        printf '    %s: removed %s\n' "${f#"$staged"/}" "$rp" >&2
+        printf '    %s: removed %s\n' "${f#"$app"/}" "$rp" >&2
         ;;
     esac
   done < <(rpaths "$f")
-done < <(macho_files "$staged")
+done < <(macho_files "$app")
 
-plist="$staged/Contents/Info.plist"
+plist="$app/Contents/Info.plist"
 bundle_min=$(
-  while IFS= read -r -d '' f; do min_macos "$f"; done < <(macho_files "$staged") |
+  while IFS= read -r -d '' f; do min_macos "$f"; done < <(macho_files "$app") |
     sort -V | tail -n 1
 )
 declared_min=$(plutil -extract LSMinimumSystemVersion raw "$plist" 2>/dev/null || echo 0)
@@ -188,12 +175,15 @@ fi
 min_os=$(plutil -extract LSMinimumSystemVersion raw "$plist")
 
 log "Signing (ad-hoc)"
-xattr -cr "$staged"
-codesign --force --deep --sign - "$staged" 2>/dev/null
-codesign --verify --deep --strict "$staged" || die "signature check failed"
+# codesign lists every file it replaces a signature on: show that only if it fails
+if ! sign_out=$(codesign --force --deep --sign - "$app" 2>&1); then
+  printf '%s\n' "$sign_out" >&2
+  die "codesign failed"
+fi
+codesign --verify --deep --strict "$app" || die "signature check failed"
 
 log "Checking that every library resolves inside the bundle or to macOS"
-# @rpath is checked against Contents/Frameworks: after step 4 the only
+# @rpath is checked against Contents/Frameworks: after step 3 the only
 # rpaths left point there (or to folders that don't exist).
 problems=0
 while IFS= read -r -d '' f; do
@@ -203,30 +193,36 @@ while IFS= read -r -d '' f; do
     [[ $dep == "$own_id" ]] && continue
     case "$dep" in
       /System/* | /usr/lib/*) continue ;;
-      @rpath/*) target="$staged/Contents/Frameworks/${dep#@rpath/}" ;;
-      @executable_path/*) target="$staged/Contents/MacOS/${dep#@executable_path/}" ;;
+      @rpath/*) target="$app/Contents/Frameworks/${dep#@rpath/}" ;;
+      @executable_path/*) target="$app/Contents/MacOS/${dep#@executable_path/}" ;;
       @loader_path/*) target="$dir/${dep#@loader_path/}" ;;
       *) target="" ;;
     esac
     if [[ -z $target || ! -e $target ]]; then
-      printf '    %s -> %s\n' "${f#"$staged"/}" "$dep" >&2
+      printf '    %s -> %s\n' "${f#"$app"/}" "$dep" >&2
       problems=$((problems + 1))
     fi
   done < <(otool -L "$f" | awk 'NR > 1 && $0 !~ /:$/ { print $1 }')
-done < <(macho_files "$staged")
+done < <(macho_files "$app")
 [[ $problems -eq 0 ]] || die "$problems library reference(s) above point outside the bundle or are missing"
 
 log "Creating $zip"
 rm -f "$zip"
-(cd "$stage" && ditto -c -k --keepParent --norsrc --noextattr --noqtn "$APP_NAME.app" "$zip")
+(cd "$build_dir" && ditto -c -k --keepParent --norsrc --noextattr --noqtn "$APP_NAME.app" "$zip")
 
 log "Checking the zipped app"
-mkdir "$stage/check"
-ditto -x -k "$zip" "$stage/check"
-codesign --verify --deep --strict "$stage/check/$APP_NAME.app" || die "zipped app fails the signature check"
+check_dir=$(mktemp -d "${TMPDIR:-/tmp}/jpegsnoop-zipcheck.XXXXXX")
+cleanup() {
+  if [[ -n ${check_dir:-} && -d $check_dir ]]; then
+    rm -rf "$check_dir"
+  fi
+}
+trap cleanup EXIT
+ditto -x -k "$zip" "$check_dir"
+codesign --verify --deep --strict "$check_dir/$APP_NAME.app" || die "zipped app fails the signature check"
 
 zip_size=$(du -h "$zip" | cut -f1 | tr -d ' ')
-app_size=$(du -sh "$staged" | cut -f1 | tr -d ' ')
+app_size=$(du -sh "$app" | cut -f1 | tr -d ' ')
 cat <<EOF
 
 Packaged $APP_NAME $version ($arch, Qt $qt_version)
