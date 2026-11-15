@@ -273,6 +273,14 @@ void Q_Viewer::onCanvasMoved(QPoint ptImg, bool bInside)
                     .arg(nCr, 5, 10, QChar('0')));
 }
 
+// Show no image: the source changed and has no decoded image (yet). The
+// canvas keeps its own copy of the image, so it showed the previous file's
+// until something else was drawn.
+void Q_Viewer::clearImage()
+{
+  canvas->setImage(QImage(), scaleFactor);
+}
+
 void Q_Viewer::drawImage()
 {
   qDebug() << "Q_Viewer::drawImage";

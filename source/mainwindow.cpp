@@ -676,8 +676,20 @@ void MainWindow::openFile(const QString &strPath)
 
 //-----------------------------------------------------------------------------
 
+// Clear the preview and histograms before showing a file's. They were only
+// replaced when the new file decoded, so after an undecodable file (such as a
+// progressive JPEG), an empty file or a failed open the previous file's stayed.
+void MainWindow::clearImageViews()
+{
+  imgWindow->clearImage();
+  rgbHisto->clear();
+  yHisto->clear();
+}
+
 void MainWindow::AnalyzeFile()
 {
+  clearImageViews();
+
   // One QFile per analysis; free the previous one (this used to leak per open)
   delete m_pFile;
   m_pFile = new QFile(m_currentFile);
@@ -741,6 +753,9 @@ void MainWindow::AnalyzeFileDo()
 
   // Reset the analyzed state in case this file is invalid (eg. zero length)
   m_bFileAnalyzed = false;
+
+  // Also reached by Reprocess, without AnalyzeFile()
+  clearImageViews();
 
   // Clear the document log
   m_pDocLog->Clear();

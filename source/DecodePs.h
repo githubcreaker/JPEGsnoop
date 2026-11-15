@@ -176,6 +176,7 @@ private:
   CDecodePs(CDecodePs&);
 
   QString PhotoshopParseGetLStrAsc(uint32_t &nPos);
+  uint32_t LimitAdvance(uint32_t nPos, uint64_t nLen) const;
   QString PhotoshopParseIndent(uint32_t nIndent);
   void PhotoshopParseReportNote(uint32_t nIndent, QString strNote);
   QString PhotoshopParseLookupEnum(teBimEnumField eEnumField, uint32_t nVal);

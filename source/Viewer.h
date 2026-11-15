@@ -78,6 +78,7 @@ class Q_Viewer : public QWidget
 public:
   explicit Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *parent = nullptr, Qt::WindowFlags f = Qt::WindowFlags());
   void drawImage();
+  void clearImage();
 
 public slots:
   void zoom(QAction *action);

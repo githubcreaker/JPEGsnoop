@@ -359,6 +359,9 @@ void CimgDecode::ResetState()
   ResetDhtLookup();
   ResetDqtTables();
 
+  // Set by JfifDecode at the first SOS (not in Reset(), which DecodeScanImg() calls)
+  m_bRgbComps = false;
+
   for(uint32_t nCompInd = 0; nCompInd < MAX_SOF_COMP_NF; nCompInd++)
   {
     m_anSofSampFactH[nCompInd] = 0;
@@ -587,6 +590,8 @@ void CimgDecode::ResetDqtTables()
 
   for(uint32_t nDestId = 0; nDestId < MAX_DQT_DEST_ID; nDestId++)
   {
+    m_abDqtDefined[nDestId] = false;
+
     for(uint32_t nCoeff = 0; nCoeff < MAX_DQT_COEFF; nCoeff++)
     {
       m_anDqtCoeff[nDestId][nCoeff] = 0;
@@ -670,6 +675,7 @@ bool CimgDecode::SetDqtEntry(uint32_t nTblDestId, uint32_t nCoeffInd, uint32_t n
   if((nTblDestId < MAX_DQT_DEST_ID) && (nCoeffInd < MAX_DQT_COEFF))
   {
     m_anDqtCoeff[nTblDestId][nCoeffInd] = nCoeffVal;
+    m_abDqtDefined[nTblDestId] = true;
 
     // Save a copy that represents the original zigzag order
     // This is used by the IDCT logic
@@ -3747,6 +3753,20 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   }
   else
   {
+    // Each selected table must have been defined by a DQT. An undefined one
+    // is all zeros and was used as it was, which zeroes every coefficient.
+    for(int32_t ind = 1; ind <= m_nNumSosComps; ind++)
+    {
+      const int32_t nTbl = m_anDqtTblSel[ind];
+
+      if((nTbl >= static_cast<int32_t>(MAX_DQT_DEST_ID)) || !m_abDqtDefined[nTbl])
+      {
+        m_pLog->AddLineErr(QString("*** ERROR: Component %1 uses quantization table %2, which isn't defined. "
+                                   "Skipping image decode ***").arg(ind).arg(nTbl));
+        return;
+      }
+    }
+
     // FIXME: Not sure that we can always depend on the indices to appear in this order.
     // May need another layer of indirection to get at the frame image component index.
     nDqtTblY = m_anDqtTblSel[DQT_DEST_Y];
@@ -4816,7 +4836,9 @@ void CimgDecode::DrawHistogram(bool bQuiet, bool bDumpHistoY)
         nHistoCurVal = m_anCcHisto_b[i];
       }
 
-      nHistoBinHeight = HISTO_BIN_HEIGHT_MAX * nHistoCurVal / nHistoPeakVal;
+      // 64-bit product: a bin of over 35.8 million pixels (a white 6000x6000
+      // image) overflowed 32 bits, and its bar went missing
+      nHistoBinHeight = static_cast<int32_t>(static_cast<int64_t>(HISTO_BIN_HEIGHT_MAX) * nHistoCurVal / nHistoPeakVal);
 
       for(int32_t y = 0; y < nHistoBinHeight; y++)
       {
@@ -4869,7 +4891,8 @@ void CimgDecode::DrawHistogram(bool bQuiet, bool bDumpHistoY)
       nHistoCurVal += m_anHistoYFull[i * 4 + 1];
       nHistoCurVal += m_anHistoYFull[i * 4 + 2];
       nHistoCurVal += m_anHistoYFull[i * 4 + 3];
-      nHistoBinHeight = HISTO_BIN_HEIGHT_MAX * nHistoCurVal / nHistoPeakVal;
+      // 64-bit product, as for the RGB histogram
+      nHistoBinHeight = static_cast<int32_t>(static_cast<int64_t>(HISTO_BIN_HEIGHT_MAX) * nHistoCurVal / nHistoPeakVal);
 
       for(int32_t y = 0; y < nHistoBinHeight; y++)
       {
@@ -5004,6 +5027,14 @@ void CimgDecode::ConvertYCCtoRGBFastFloat(PixelCc & sPix)
   nValB += 128;
   nValG += 128;
 
+  // RGB JPEG: the components were R, G and B; ranged the same way as the YCbCr
+  if(sPix.bRgbDirect)
+  {
+    nValR = (sPix.nDirectR >> 3) + 128;
+    nValG = (sPix.nDirectG >> 3) + 128;
+    nValB = (sPix.nDirectB >> 3) + 128;
+  }
+
   // --------------- Finshed the color conversion
 
   // Limit
@@ -5109,7 +5140,7 @@ void CimgDecode::ConvertYCCtoRGB(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
 
   double nValR, nValG, nValB;
 
-  if(m_bHistEn)
+  if(m_bHistEn && sPix.bInImage)
   {
     // Calc stats on preranged YCC (direct from huffman DC sums)
     m_sHisto.nPreclipYMin = (sPix.nPrerangeY < m_sHisto.nPreclipYMin) ? sPix.nPrerangeY : m_sHisto.nPreclipYMin;
@@ -5123,7 +5154,7 @@ void CimgDecode::ConvertYCCtoRGB(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     m_sHisto.nPreclipCrSum += sPix.nPrerangeCr;
   }
 
-  if(m_bHistEn)
+  if(m_bHistEn && sPix.bInImage)
   {
     // Now generate the Y histogram, if requested
     // Add the Y value to the full histogram (for image similarity calcs)
@@ -5173,6 +5204,15 @@ void CimgDecode::ConvertYCCtoRGB(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
   nValB += 128;
   nValG += 128;
 
+  // RGB JPEG: the components were R, G and B (the YCbCr above only fed the
+  // statistics); ranged the same way as the YCbCr
+  if(sPix.bRgbDirect)
+  {
+    nValR = (sPix.nDirectR + 1024) / 8;
+    nValG = (sPix.nDirectG + 1024) / 8;
+    nValB = (sPix.nDirectB + 1024) / 8;
+  }
+
   sPix.nPreclipR = nValR;
   sPix.nPreclipG = nValG;
   sPix.nPreclipB = nValB;
@@ -5189,7 +5229,7 @@ void CimgDecode::ConvertYCCtoRGB(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
      m_pLog->AddLine(strTmp);
    */
 
-  if(m_bHistEn)
+  if(m_bHistEn && sPix.bInImage)
   {
     // Bin the result into a histogram!
     //   value = 0..255
@@ -5227,7 +5267,7 @@ void CimgDecode::CapYccRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
   nCurCb = sPix.nPreclipCb;
   nCurCr = sPix.nPreclipCr;
 
-  if(m_bHistEn)
+  if(m_bHistEn && sPix.bInImage)
   {
     m_sHisto.nClipYMin = (nCurY < m_sHisto.nClipYMin) ? nCurY : m_sHisto.nClipYMin;
     m_sHisto.nClipYMax = (nCurY > m_sHisto.nClipYMax) ? nCurY : m_sHisto.nClipYMax;
@@ -5470,7 +5510,7 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
   nLimitG = static_cast<int32_t>(sPix.nPreclipG);
   nLimitB = static_cast<int32_t>(sPix.nPreclipB);
 
-  if(m_bHistEn)
+  if(m_bHistEn && sPix.bInImage)
   {
     m_sHisto.nPreclipRMin = (nLimitR < m_sHisto.nPreclipRMin) ? nLimitR : m_sHisto.nPreclipRMin;
     m_sHisto.nPreclipRMax = (nLimitR > m_sHisto.nPreclipRMax) ? nLimitR : m_sHisto.nPreclipRMax;
@@ -5621,7 +5661,7 @@ void CimgDecode::CapRgbRange(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix)
     nLimitB = 255;
   }
 
-  if(m_bHistEn)
+  if(m_bHistEn && sPix.bInImage)
   {
     m_sHisto.nClipRMin = (nLimitR < m_sHisto.nClipRMin) ? nLimitR : m_sHisto.nClipRMin;
     m_sHisto.nClipRMax = (nLimitR > m_sHisto.nClipRMax) ? nLimitR : m_sHisto.nClipRMax;
@@ -5663,7 +5703,8 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
       qDebug() << QString("CimgDecode::CalcChannelPreviewFull exit as image not decoded");
       return;
   }
-  PixelCc sPixSrc, sPixDst;
+  PixelCc sPixSrc = {};
+  PixelCc sPixDst = {};
 
   QString strTmp;
 
@@ -5733,8 +5774,13 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
 
   // Determine pixel count: the loops below run up to, not including, nRngX2
   // and nRngY2. (This counted one extra row and column, so a white 32x32
-  // image averaged 239.)
-  nNumPixels = static_cast<uint64_t>(nRngY2 - nRngY1) * (nRngX2 - nRngX1);
+  // image averaged 239.) Only pixels inside the image count: the decoded area
+  // is padded to whole MCUs, and a 9x8 image of 8 black columns and 1 white
+  // one averaged 127 instead of 28 with the 7 (white) padding columns.
+  const uint32_t nImgX2 = std::min(nRngX2, static_cast<uint32_t>(m_nDimX));
+  const uint32_t nImgY2 = std::min(nRngY2, static_cast<uint32_t>(m_nDimY));
+  nNumPixels = static_cast<uint64_t>((nImgY2 > nRngY1) ? (nImgY2 - nRngY1) : 0) *
+               ((nImgX2 > nRngX1) ? (nImgX2 - nRngX1) : 0);
 
   qDebug() << QString("CimgDecode::CalcChannelPreviewFull() new QImage X=%1 Y=%2").arg(m_nImgSizeX).arg(m_nImgSizeY);
   // Replace the previous preview (this used to leak one per decode and per
@@ -5777,18 +5823,41 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
         nTmpCr = 0;
       }
 
+      // RGB JPEG: these are R, G and B. The colour conversion uses them as
+      // they are; the rest (statistics, channel views, brightest pixel) gets
+      // the equivalent YCbCr. (They were converted as if they were YCbCr, so
+      // red showed as (75,255,28).) Pre-ranged values are (level - 128) * 8,
+      // so the conversion needs no offsets.
+      sPixSrc.bRgbDirect = m_bRgbComps && (m_nNumSosComps == NUM_CHAN_YCC);
+
+      if(sPixSrc.bRgbDirect)
+      {
+        sPixSrc.nDirectR = nTmpY;
+        sPixSrc.nDirectG = nTmpCb;
+        sPixSrc.nDirectB = nTmpCr;
+
+        const double fR = nTmpY;
+        const double fG = nTmpCb;
+        const double fB = nTmpCr;
+
+        nTmpY = static_cast<int32_t>(std::lround(0.299 * fR + 0.587 * fG + 0.114 * fB));
+        nTmpCb = static_cast<int32_t>(std::lround(-0.168736 * fR - 0.331264 * fG + 0.5 * fB));
+        nTmpCr = static_cast<int32_t>(std::lround(0.5 * fR - 0.418688 * fG - 0.081312 * fB));
+      }
+
       // Load the YCC value
       sPixSrc.nPrerangeY = nTmpY;
       sPixSrc.nPrerangeCb = nTmpCb;
       sPixSrc.nPrerangeCr = nTmpCr;
 
-      // The decoded area is padded to whole MCUs: clipping there isn't reported
+      // The decoded area is padded to whole MCUs: the padding isn't part of
+      // the image, so it is left out of the statistics and clipping counts
       sPixSrc.bInImage = (nPixX < m_nDimX) && (nPixY < m_nDimY);
 
       // Update brightest pixel search here
       int32_t nBrightness = nTmpY;
 
-      if(nBrightness > m_nBrightY)
+      if(sPixSrc.bInImage && (nBrightness > m_nBrightY))
       {
         m_nBrightY = nTmpY;
         m_nBrightCb = nTmpCb;
@@ -5819,7 +5888,10 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
 
       // Accumulate the luminance value for this pixel
       // after we have converted it to the range 0..255
-      nSumY += sPixSrc.nFinalY;
+      if(sPixSrc.bInImage)
+      {
+        nSumY += sPixSrc.nFinalY;
+      }
 
       // If we want a detailed decode of RGB, print it out
       // now if we are on the correct MCU.
@@ -5880,6 +5952,7 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
   sPixSrc.nPrerangeY = m_nBrightY;
   sPixSrc.nPrerangeCb = m_nBrightCb;
   sPixSrc.nPrerangeCr = m_nBrightCr;
+  sPixSrc.bRgbDirect = false;   // these are YCbCr (converted from RGB if need be)
   ConvertYCCtoRGBFastFloat(sPixSrc);
   m_nBrightR = sPixSrc.nFinalR;
   m_nBrightG = sPixSrc.nFinalG;

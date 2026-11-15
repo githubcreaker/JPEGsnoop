@@ -676,6 +676,128 @@ case("R22_unicode_comment_le", "R22", "decode", write("r22_comment_le.jpg", user
 case("R22_unicode_comment_be", "R22", "decode", write("r22_comment_be.jpg", user_comment_file(">", "Hello World")),
      expect="UserComment +\\] = \"Hello World\"")
 
+
+# --- F: follow-up review (docs/code-review-followup-2026-11-14.md) ----------------
+def dc_only_scans(width, height, levels, scans, ids=(1, 2, 3)):
+    """Like dc_only_jpeg, all components 1x1, but split into the given scans:
+    lists of component indexes. levels: one flat level per component."""
+    dc = huff_codes(DC_COUNTS, DC_VALUES)
+    nmcu = (-(-width // 8)) * (-(-height // 8))
+    out = (b"\xff\xd8" + seg(0xDB, bytes([0]) + bytes([1]) * 64)
+           + seg(0xC0, bytes([8]) + struct.pack(">HHB", height, width, len(levels))
+                 + b"".join(bytes([cid, 0x11, 0]) for cid in ids[:len(levels)]))
+           + seg(0xC4, bytes([0x00] + DC_COUNTS + DC_VALUES))
+           + seg(0xC4, bytes([0x10, 1] + [0] * 15 + [0x00])))
+    for comps in scans:
+        bits, pred = Bits(), {}
+        for _ in range(nmcu):
+            for ci in comps:
+                coef = round((levels[ci] - 128) * 8)
+                diff, pred[ci] = coef - pred.get(ci, 0), coef
+                cat = abs(diff).bit_length()
+                bits.put(*dc[cat])
+                if cat:
+                    bits.put(diff if diff > 0 else diff + (1 << cat) - 1, cat)
+                bits.put(0, 1)
+        out += (seg(0xDA, bytes([len(comps)]) + b"".join(bytes([ids[ci], 0x00]) for ci in comps)
+                    + bytes([0, 63, 0])) + bits.flush())
+    return out + b"\xff\xd9"
+
+
+# F1: a Y-only scan, then a scan of all three components (invalid in sequential
+# mode). The second scan header switched the decoder to 3 components while only
+# the Y map existed, so choosing an image channel read a null chroma map.
+case("F1_later_scan_state", "F1", "gui",
+     write("f1_scan1_then_scan3.jpg", dc_only_scans(16, 8, (150, 100, 200), [[0], [0, 1, 2]])),
+     "--cycle-channels", timeout=60, expect="harness: done")
+
+# F2: Photoshop descriptor whose key length (0xFFFFFFF8) wrapped the cursor back
+# 8 bytes, so the same item repeated for its 2^28 declared items
+desc = uni("") + lstr4(b"null") + struct.pack(">I", 0x10000000) + struct.pack(">I", 0xFFFFFFF8) + bytes(16)
+case("F2_ps_string_wrap", "F2", "decode",
+     write("f2_desc_wrap.jpg", app13_only(bim(0x041A, struct.pack(">II", 7, 16) + desc))), timeout=10,
+     expect="harness: decoded=")
+
+
+# F3: RGB JPEGs (Adobe APP14 transform 0, or no JFIF/APP14 and component IDs
+# 'R','G','B', as libjpeg decides). Red decoded as (75,255,28).
+def adobe(transform):
+    return seg(0xEE, b"Adobe" + struct.pack(">HHHB", 100, 0, 0, transform))
+
+
+red_rgb, _, _ = dc_only_jpeg(32, 16, [(ord("R"), 1, 1), (ord("G"), 1, 1), (ord("B"), 1, 1)],
+                             lambda c, x, y: (255, 0, 0)[c])
+case("F3_rgb_adobe", "F3", "decode", write("f3_rgb_adobe.jpg", red_rgb[:2] + adobe(0) + red_rgb[2:]),
+     "--ac --pixels 4,4", expect="pixel 4,4 = 25[3-5],[0-2],[0-2]$")
+case("F3_rgb_component_ids", "F3", "decode", write("f3_rgb_ids.jpg", red_rgb), "--ac --histo --pixels 4,4",
+     expect="pixel 4,4 = 25[3-5],[0-2],[0-2]$")
+# Transform 1 says YCbCr, whatever the component IDs: Y 128, Cb 128, Cr 255 is red-ish
+ycc_ids_rgb, _, _ = dc_only_jpeg(32, 16, [(ord("R"), 1, 1), (ord("G"), 1, 1), (ord("B"), 1, 1)],
+                                 lambda c, x, y: (128, 128, 255)[c])
+case("F3_adobe_ycc", "F3", "decode", write("f3_adobe_ycc.jpg", ycc_ids_rgb[:2] + adobe(1) + ycc_ids_rgb[2:]),
+     "--ac --pixels 4,4", expect="pixel 4,4 = 2(4[5-9]|5[0-5]),[0-9]+,[0-9]+$")
+
+# F4: an undecodable (progressive) file after a decoded one left the first
+# file's preview and histograms on screen
+case("F4_stale_preview", "F4", "gui", ["ok_444.jpg", "ok_progressive.jpg"], "--check-preview", timeout=30,
+     expect="harness: preview missing")
+case("F4_stale_histograms", "F4", "gui", ["ok_444.jpg", "ok_progressive.jpg"], "--histo --check-histo",
+     timeout=30, expect="harness: histogram [A-Za-z]+ missing")
+
+# F5: a histogram bin over 35,791,394 pixels overflowed 60 * count in 32 bits,
+# so the white 6000x6000 image's only bar wasn't drawn
+case("F5_histo_bar_overflow", "F5", "decode",
+     write("f5_white_6000.jpg", jpeg(Image.new("L", (6000, 6000), 255), quality=90)), "--histo", timeout=240,
+     expect="histogram bars rgb=[1-9][0-9]* ")
+
+# F6: 9x8 grey image, 8 black columns and 1 white one: 28 on average, but the
+# statistics included the 7 padding columns (white, copied by the encoder)
+im9 = Image.new("L", (9, 8), 0)
+for y in range(8):
+    im9.putpixel((8, y), 255)
+name = write("f6_9x8.jpg", jpeg(im9, quality=100))
+case("F6_padding_avg_luma", "F6", "decode", name, "--ac", expect="Y=\\[ 28\\] \\(range")
+case("F6_padding_histogram", "F6", "decode", name, "--ac --histo",
+     expect="R  component histo: \\[min=    0 max=  255 avg=   28\\.3\\]", forbid="avg=  127\\.5\\]")
+
+# F7: a valid sequential JPEG with one component per scan: only the first scan
+# (Y) was decoded, with no word that the preview was incomplete
+case("F7_multiscan_note", "F7", "decode",
+     write("f7_multiscan.jpg", dc_only_scans(16, 8, (150, 100, 200), [[0], [1], [2]])), "--ac",
+     expect="only the first scan is decoded")
+
+# F8: XMP with no final newline printed nothing, and the last byte was dropped
+xmp = b'<x:xmpmeta xmlns:x="adobe:ns:meta/">SINGLE-LINE-XMP</x:xmpmeta>'
+case("F8_xmp_single_line", "F8", "decode",
+     write("f8_xmp.jpg", insert_after_app0(c444, seg(0xE1, b"http://ns.adobe.com/xap/1.0/\x00" + xmp))),
+     expect="\\|<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">SINGLE-LINE-XMP</x:xmpmeta>$")
+xmp = "<x:xmpmeta>\n  <dc:title>Café</dc:title>\n</x:xmpmeta>".encode("utf-8")
+case("F8_xmp_utf8", "F8", "decode",
+     write("f8_xmp_utf8.jpg", insert_after_app0(c444, seg(0xE1, b"http://ns.adobe.com/xap/1.0/\x00" + xmp))),
+     expect="<dc:title>Café</dc:title>")
+
+
+# F9: SSHORT values were not sign-extended (-1 printed as 65535)
+def sshort_file(values):
+    count = len(values)
+    payload = struct.pack("<" + "h" * count, *values)
+    ifd0 = tiff_ifd("<", 8, [(0xC0DE, 8, count, payload)])
+    return insert_after_app0(c444, app1_exif(tiff("<", {8: ifd0})))
+
+
+case("F9_sshort_two", "F9", "decode", write("f9_sshort2.jpg", sshort_file([-1, -2])), "--unknown-exif",
+     expect="IFD0\\.0xc0de +\\] = -1, -2$")
+case("F9_sshort_array", "F9", "decode", write("f9_sshort3.jpg", sshort_file([-1, -2, -300])), "--unknown-exif",
+     expect="IFD0\\.0xc0de +\\] = -1, -2, -300$")
+
+# F10: Y selects quantization table 3, which isn't defined; it was used as all zeros
+d = bytearray(c444)
+i = marker_pos(d, 0xC0)
+assert d[i + 10] == 1
+d[i + 12] = 3
+case("F10_undefined_dqt", "F10", "decode", write("f10_dqt3.jpg", bytes(d)), "--ac",
+     expect="ERROR: Component 1 uses quantization table 3, which isn't defined", forbid="decoded=1")
+
 # --- S: settings and GUI behaviour -------------------------------------------
 # "settings" mode needs no file ("-"); see tests/harness/main.cpp
 case("S1_fresh_install_defaults", "S1", "settings", "-", expect="fresh decodeImage=1 coachIdct=1")

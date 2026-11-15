@@ -20,7 +20,8 @@ when it is installed, so Pillow needn't be installed separately).
   - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]`
     decodes one file in non-interactive mode and prints the report
     (`--unknown-exif` also reports unknown EXIF tags, which the app hides by
-    default; `--pixels` prints the decoded colour at each point);
+    default; `--pixels` prints the decoded colour at each point; with
+    `--histo` it also counts the pixels drawn in each histogram image);
   - `gui <file>... [--mouse] [--log] [--reprocess-first] [--histo]
     [--cycle-channels] [--repeat N] [--max-growth-mb N]` opens the files in the
     real `MainWindow` like a fresh install. `--mouse` moves and clicks over the
@@ -57,8 +58,9 @@ when it is installed, so Pillow needn't be installed separately).
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
 (`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
-GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags); `ok_*`
-cases are valid files that must keep decoding.
+GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags), or in
+[docs/code-review-followup-2026-11-14.md](../docs/code-review-followup-2026-11-14.md)
+(`F1`–`F10`); `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case
 

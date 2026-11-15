@@ -233,6 +233,8 @@ void CjfifDecode::Reset()
   m_bStateSofOk = false;
   m_bStateSos = false;
   m_bStateSosOk = false;
+  m_nScanDecodeNum = 0;
+  m_bImgJfif = false;
   m_bStateEoi = false;
 }
 
@@ -3286,8 +3288,8 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
           // Refer to Exif2-2 spec, page 14.
           // Currently selecting 2 byte conversion from [1:0] out of [3:0]
 
-          // TODO: Ensure that ReadSwap2 handles signed notation properly
-          anValuesS[0] = ReadSwap2(m_nPos);
+          // ReadSwap2() is unsigned: take the 16 bits as int16_t (-1 printed as 65535)
+          anValuesS[0] = static_cast<int16_t>(ReadSwap2(m_nPos));
           strValOut = QString("%1").arg(anValuesS[0]);
           strFull += strValOut;
           strFull += "]";
@@ -3298,9 +3300,9 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
           strFull = "        Signed Short=[";
           // 2 signed shorts in 1 word
 
-          // TODO: Ensure that ReadSwap2 handles signed notation properly
-          anValuesS[0] = ReadSwap2(m_nPos + 0);
-          anValuesS[1] = ReadSwap2(m_nPos + 2);
+          // ReadSwap2() is unsigned: take the 16 bits as int16_t (-1 printed as 65535)
+          anValuesS[0] = static_cast<int16_t>(ReadSwap2(m_nPos + 0));
+          anValuesS[1] = static_cast<int16_t>(ReadSwap2(m_nPos + 2));
           strValOut = QString("%1, %2").arg(anValuesS[0]).arg(anValuesS[1]);
           strFull += strValOut;
           strFull += "]";
@@ -3331,7 +3333,7 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
               strValOut += ", ";
             }
 
-            anValuesS[nInd] = ReadSwap2(nPosExifStart + nIfdOffset + (2 * nInd));
+            anValuesS[nInd] = static_cast<int16_t>(ReadSwap2(nPosExifStart + nIfdOffset + (2 * nInd)));
             strValTmp = QString("%1").arg(anValuesS[nInd]);
             strValOut += strValTmp;
           }
@@ -5779,23 +5781,31 @@ uint32_t CjfifDecode::DecodeMarker()
 
         m_nPos++;
 
-        // NOTE: This code currently treats the strings from the XMP section
-        // as single byte characters. In reality, it should probably be
-        // updated to support unicode properly.
+        // XMP in JPEG is UTF-8 (XMP Specification Part 3, 1.1.3), so each
+        // line is decoded as UTF-8 rather than one byte per character.
 
-        uint32_t nPosMarkerEnd = nPosSaved + nLength - 1;
+        // The segment ends at nPosSaved + nLength, exclusive. (The end used
+        // to be one byte earlier, which dropped the packet's last byte.)
+        uint32_t nPosMarkerEnd = nPosSaved + nLength;
         // A segment shorter than its identifier would make this wrap to ~4 GB
         uint32_t sXmpLen = (nPosMarkerEnd > m_nPos) ? (nPosMarkerEnd - m_nPos) : 0;
 
         uint8_t cXmpChar;
 
-        bool bNonSpace;
+        bool bNonSpace = false;
 
-        QString strLine;
+        QByteArray abLine;
 
-        // Reset state
-        strLine = "          |";
-        bNonSpace = false;
+        // Print one line if it has anything but spaces
+        auto flushLine = [&]() {
+          if(bNonSpace)
+          {
+            m_pLog->AddLine(QString("          |") + QString::fromUtf8(abLine));
+          }
+
+          abLine.clear();
+          bNonSpace = false;
+        };
 
         for(uint32_t nInd = 0; nInd < sXmpLen; nInd++)
         {
@@ -5811,21 +5821,18 @@ uint32_t CjfifDecode::DecodeMarker()
           // Detect Linefeed, print out line
           if(cXmpChar == 0x0A)
           {
-            // Only print line if some non-space elements!
-            if(bNonSpace)
-            {
-              m_pLog->AddLine(strLine);
-            }
-            // Reset state
-            strLine = "          |";
-            bNonSpace = false;
+            flushLine();
           }
           else
           {
-            // Add the char
-            strLine += QChar(cXmpChar);
+            // Add the byte
+            abLine.append(static_cast<char>(cXmpChar));
           }
         }
+
+        // The last line has no linefeed after it (it was never printed, so a
+        // single-line packet showed nothing)
+        flushLine();
       }
       else if(strcmp(acIdentifier, "Exif") == 0)        //@@
       {
@@ -6179,6 +6186,9 @@ uint32_t CjfifDecode::DecodeMarker()
       {
         // Only process remainder if it is JFIF. This marker
         // is also used for application-specific functions.
+
+        // (A JFIF file's three components are YCbCr; see the SOS handling)
+        m_bImgJfif = true;
 
         m_nPos += static_cast<uint32_t>((strlen(m_acApp0Identifier)) + 1);
 
@@ -7315,13 +7325,57 @@ uint32_t CjfifDecode::DecodeMarker()
         {
           m_pLog->AddLineWarn("  NOTE: Scan decode disabled as DHT not decoded.");
         }
+        else if(m_nScanDecodeNum > 0)
+        {
+          // Only the first scan is decoded. A later scan header must not
+          // change the image details either: they describe the pixel maps
+          // the first scan filled (a 3-component scan after a Y-only one
+          // left null chroma maps that the preview then read).
+          m_nScanDecodeNum++;
+          m_pLog->AddLine("");
+          m_pLog->AddLineWarn(QString("  NOTE: Scan %1 isn't decoded: only the first scan is decoded, so the preview "
+                                      "doesn't include this one.").arg(m_nScanDecodeNum));
+        }
         else
         {
+          m_nScanDecodeNum++;
           m_pLog->AddLine("");
+
+          if(m_nSosNumCompScan_Ns < m_nSofNumComps_Nf)
+          {
+            m_pLog->AddLineWarn(QString("  NOTE: This scan has %1 of the image's %2 components, and only the first "
+                                        "scan is decoded: the preview is incomplete.")
+                                  .arg(m_nSosNumCompScan_Ns).arg(m_nSofNumComps_Nf));
+          }
 
           // Set the primary image details
           m_pImgDec->SetImageDetails(m_nSofSampsPerLine_X, m_nSofNumLines_Y,
                                      m_nSofNumComps_Nf, m_nSosNumCompScan_Ns, m_nImgRstEn, m_nImgRstInterval);
+
+          // RGB JPEG? (as libjpeg decides: JFIF means YCbCr; otherwise
+          // Adobe APP14 transform 0 means RGB; with neither, component IDs
+          // 'R','G','B' do). It was always converted as YCbCr.
+          bool bRgb = false;
+
+          if((m_nSofNumComps_Nf == 3) && !m_bImgJfif)
+          {
+            if(m_nApp14ColTransform >= 0)
+            {
+              bRgb = (m_nApp14ColTransform == 0);
+            }
+            else
+            {
+              bRgb = (m_anSofQuantCompId[1] == 'R') && (m_anSofQuantCompId[2] == 'G') &&
+                     (m_anSofQuantCompId[3] == 'B');   // indexes 1..Nf
+            }
+          }
+
+          m_pImgDec->SetRgbComponents(bRgb);
+
+          if(bRgb)
+          {
+            m_pLog->AddLine("  Components are R, G and B (not Y, Cb and Cr): no YCbCr conversion");
+          }
 
           // Only recalculate the scan decoding if we need to (i.e. file
           // changed, offset changed, scan option changed)

@@ -320,7 +320,66 @@ character.
   histograms change, and only in their min/max values; the averages are the same. None of
   these files has a large RATIONAL or a Unicode comment.
 
-**Still open:** Developer ID signing and notarization (M5); latent code.
+### Follow-up review (F1–F10)
+
+[docs/code-review-followup-2026-11-14.md](code-review-followup-2026-11-14.md) reviewed
+commit `fa81c75` and found ten more problems, all inherited from master. Each was
+reproduced here first, with the review's own numbers, before fixing.
+
+**Fixed:**
+- **F1 Later scan headers (crash):** only the first scan sets the image details. A
+  3-component scan after a Y-only one switched the decoder to three components while only
+  the Y map existed, so choosing an image channel read a null chroma map (a crash in normal
+  builds too).
+- **F2 Photoshop string lengths (hang):** a length from the file may move the cursor no
+  further than the end of its resource block, and never so far that the position wraps.
+  Descriptor items, list items and slices must each move forward. A key length of
+  0xFFFFFFF8 moved the cursor back 8 bytes, so one item repeated for 2^28 declared items.
+  The Unicode string reader had the same unchecked length.
+- **F3 RGB JPEGs:** three components are RGB when libjpeg would say so: no JFIF APP0, and
+  Adobe APP14 transform 0, or no APP14 and component IDs 'R','G','B'. The preview then uses
+  R, G and B as they are, and the statistics, channel views and brightest pixel get the
+  equivalent YCbCr. Red decoded as (75,255,28); the test images now match libjpeg.
+- **F4 Stale preview:** the preview and both histograms are cleared before each file is
+  analysed (open, Reprocess, empty file, failed open), so an undecodable file such as a
+  progressive JPEG no longer shows the previous file's image.
+- **F5 Histogram bars:** bar heights use a 64-bit product. A bin of over 35.8 million
+  pixels overflowed, so a white 6000×6000 image's only bar wasn't drawn.
+- **F6 MCU padding:** average luminance, the histograms, their statistics and the
+  brightest-pixel search use only pixels inside the image, like the clipping counts
+  (R17). A 9×8 image of eight black columns and one white averaged 127 instead of 28.
+- **F7 Multi-scan JPEGs:** still only the first scan is decoded, but the report now says
+  so. It warns when the first scan lacks some of the image's components and for each
+  scan that isn't decoded.
+- **F8 XMP:** the packet runs to the true end of the segment (its last byte was dropped),
+  the last line is printed even without a final newline, and lines are decoded as UTF-8.
+- **F9 SSHORT:** values are sign-extended in all three paths: -1, -2 printed as
+  65535, 65534.
+- **F10 Undefined DQT:** a component whose quantization table was never defined is an
+  error, and the scan isn't decoded. It was used as an all-zero table.
+
+**Also:** the SOF component IDs are stored at index 1..Nf, which a header comment had
+wrong.
+
+16 new cases cover these (120 in all). In decode mode with `--histo`, the test driver
+also counts the pixels drawn in each histogram image, so F5 shows in normal builds too.
+
+**Checks:**
+- **Tests catch the bugs:** run against the previous commit, 15 of the 16 new cases fail.
+  The one that passes, an Adobe file saying YCbCr, is a control: it must stay YCbCr.
+- **All 120 pass** with and without ASan/UBSan.
+- **Sanitizer corpus still clean:** the 3,273 files give no ASan or UBSan reports; the
+  same two 65535-pixel files are slow under the sanitizers.
+- **Expected changes only:** of the 64 reports of 32 valid files, 14 change, all for the
+  7 files whose size isn't a whole number of MCUs. Only average luminance, histogram
+  statistics and histogram bars change: the 97×61 images now average 66 instead of 64.
+
+**Not fixed:** the unfinished port features the follow-up review lists. Select All,
+Find, Export JPEG/TIFF, Detailed Decode and About do nothing; Batch Process isn't in any
+menu; PSD images aren't decoded (see section 8).
+
+**Still open:** Developer ID signing and notarization (M5); latent code; the unfinished
+port features above.
 
 ## How this was reviewed
 

@@ -335,7 +335,7 @@ private:
 
   // Define Quantization table details for the indexed Component Identifier
   // - Component identifier (SOF:Ci) has a range of 0..255
-  uint32_t m_anSofQuantCompId[MAX_SOF_COMP_NF]; // SOF:Ci, index is i-1
+  uint32_t m_anSofQuantCompId[MAX_SOF_COMP_NF]; // SOF:Ci, index is i (1..Nf)
   uint32_t m_anSofQuantTblSel_Tqi[MAX_SOF_COMP_NF];
   uint32_t m_anSofHorzSampFact_Hi[MAX_SOF_COMP_NF];
   uint32_t m_anSofVertSampFact_Vi[MAX_SOF_COMP_NF];
@@ -389,6 +389,8 @@ private:
   bool m_bStateSofOk;
   bool m_bStateSos;
   bool m_bStateSosOk;
+  uint32_t m_nScanDecodeNum;    // Scans that reached the decode step (only the first is decoded)
+  bool m_bImgJfif;              // Saw a JFIF APP0 (its components are then YCbCr)
   bool m_bStateEoi;
 
   teDbAdd m_eDbReqSuggest;

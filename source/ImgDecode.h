@@ -236,6 +236,13 @@ typedef struct
   // Inside the image? (False for the padding up to whole MCUs, which isn't
   // reported or counted as clipped.)
   bool bInImage;
+
+  // RGB JPEG: the components were R, G and B (pre-ranged, like nPrerange*)
+  // and are used as they are; nPrerange* then hold the equivalent YCbCr
+  bool bRgbDirect;
+  int32_t nDirectR;
+  int32_t nDirectG;
+  int32_t nDirectB;
 } PixelCc;
 
 // Per-pixel stats: clipping (overflow and underflow) in YCC and RGB
@@ -329,6 +336,7 @@ public:
 
   // Config
   void SetImageDimensions(uint32_t nWidth, uint32_t nHeight);
+  void SetRgbComponents(bool bRgb) { m_bRgbComps = bRgb; }
   void SetImageDetails(uint32_t nDimX, uint32_t nDimY, uint32_t nCompsSOF, uint32_t nCompsSOS, bool bRstEn,
                        uint32_t nRstInterval);
   void SetSofSampFactors(uint32_t nCompInd, uint32_t nSampFactH, uint32_t nSampFactV);
@@ -418,6 +426,7 @@ public:
   bool m_bPreviewIsJpeg;        // Is the preview image from decoded JPEG?
 
   // DQT Table
+  bool m_abDqtDefined[MAX_DQT_DEST_ID];   // Which tables a DQT defined (others are all zeros)
   uint16_t m_anDqtCoeff[MAX_DQT_DEST_ID][MAX_DQT_COEFF];  // Normal ordering
   uint16_t m_anDqtCoeffZz[MAX_DQT_DEST_ID][MAX_DQT_COEFF];        // Original zigzag ordering
   int32_t m_anDqtTblSel[MAX_DQT_COMP];      // DQT table selector for image component in frame
@@ -673,6 +682,7 @@ private:
 
   // Image Analysis, histograms
   bool m_bHistEn;               // Histograms enabled? (by AppConfig)
+  bool m_bRgbComps;             // Components are R, G, B rather than Y, Cb, Cr (set per scan)
   bool m_bStatClipEn;           // UNUSED: Enable scan clipping stats?
   uint32_t m_nNumPixels;
   PixelCcHisto m_sHisto;        // YCC/RGB histogram (min/max/avg)

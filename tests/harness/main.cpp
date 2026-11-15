@@ -4,7 +4,8 @@
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
-//     histograms; --unknown-exif: also report unknown EXIF tags; --pixels
+//     histograms, and a line counting the pixels drawn in each histogram
+//     image; --unknown-exif: also report unknown EXIF tags; --pixels
 //     prints the decoded preview's colour at each point.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
@@ -149,6 +150,25 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
            .arg(img.m_bDibTempReady && img.m_pDibTemp ? img.m_pDibTemp->width() : 0)
            .arg(img.m_bDibTempReady && img.m_pDibTemp ? img.m_pDibTemp->height() : 0)
            .arg(nStatusMsgs);
+
+  // Histogram images: how many pixels differ from the background (the top-left
+  // pixel; bars grow up from the bottom). -1 if there is no image.
+  if(bHisto)
+  {
+    auto barPixels = [](const QImage *pImg) -> qsizetype {
+      if(!pImg || pImg->isNull())
+        return -1;
+      const QRgb rgbBack = pImg->pixel(0, 0);
+      qsizetype nCount = 0;
+      for(int nY = 0; nY < pImg->height(); nY++)
+        for(int nX = 0; nX < pImg->width(); nX++)
+          nCount += (pImg->pixel(nX, nY) != rgbBack) ? 1 : 0;
+      return nCount;
+    };
+    out << QString("harness: histogram bars rgb=%1 y=%2\n")
+             .arg(img.isRgbHistogramReady() ? barPixels(img.rgbHistogram()) : -1)
+             .arg(img.isYHistogramReady() ? barPixels(img.yHistogram()) : -1);
+  }
 
   // Decoded colours at the requested points ("x,y/x,y")
   const QStringList astrPoints = strPixels.split('/', Qt::SkipEmptyParts);

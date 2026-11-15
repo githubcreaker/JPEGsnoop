@@ -74,6 +74,7 @@ private:
   void createActions(void);
   void createMenus(void);
   void enableMenus();
+  void clearImageViews();
   void AnalyzeFile();
   void AnalyzeFileDo();
   void AnalyzeClose();

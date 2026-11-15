@@ -699,6 +699,23 @@ QString CDecodePs::PhotoshopParseIndent(uint32_t nIndent)
 // - String length prefix
 // - If length is 0 then fixed 4-character string
 // - Otherwise it is defined length string (no terminator required)
+// How far a length read from the file may move the cursor at nPos: no further
+// than the end of the current resource block (when nPos is inside one), and
+// never so far that the 32-bit position wraps. Lengths were added unchecked,
+// so 0xFFFFFFF8 moved the cursor back 8 bytes and a descriptor repeated the
+// same item for every one of its 2^28 declared items.
+uint32_t CDecodePs::LimitAdvance(uint32_t nPos, uint64_t nLen) const
+{
+  uint64_t nMax = 0xFFFFFFFFull - nPos;
+
+  if(nPos < m_nPosBlockEnd)
+  {
+    nMax = m_nPosBlockEnd - nPos;
+  }
+
+  return static_cast<uint32_t>((nLen < nMax) ? nLen : nMax);
+}
+
 QString CDecodePs::PhotoshopParseGetLStrAsc(uint32_t &nPos)
 {
   uint32_t nStrLen;
@@ -709,6 +726,8 @@ QString CDecodePs::PhotoshopParseGetLStrAsc(uint32_t &nPos)
 
   if(nStrLen != 0)
   {
+    // The length comes from the file (see LimitAdvance)
+    nStrLen = LimitAdvance(nPos, nStrLen);
     strVal = m_pWBuf->BufReadStrn(nPos, nStrLen);
     nPos += nStrLen;
   }
@@ -769,8 +788,9 @@ QString CDecodePs::PhotoshopParseGetBimLStrUni(uint32_t nPos, uint32_t &nPosOffs
     }
   }
 
-  // Update the file position offset
-  nPosOffset += nStrLenActual * 2;
+  // Update the file position offset. The length comes from the file, and
+  // doubling it could wrap too (see LimitAdvance).
+  nPosOffset += LimitAdvance(nPos + nPosOffset, static_cast<uint64_t>(nStrLenActual) * 2);
   // Return
   return strVal;
 }
@@ -3041,11 +3061,20 @@ void CDecodePs::PhotoshopParseSliceHeader(uint32_t &nPos, uint32_t nIndent, uint
       PhotoshopParseReportNote(nIndent, "-----");
     for(uint32_t nSliceInd = 0; (nSliceInd < nNumSlices) && (nPos < m_nPosBlockEnd); nSliceInd++)
     {
+      const uint32_t nPosSlice = nPos;
       QString strSliceInd;
 
       strSliceInd = QString("Slice #%1:").arg(nSliceInd);
       PhotoshopParseReportNote(nIndent, strSliceInd);
       PhotoshopParseSliceResource(nPos, nIndent + 1, nPosEnd);
+
+      // Every slice must move forward (as for descriptor items)
+      if(nPos <= nPosSlice)
+      {
+        PhotoshopParseReportNote(nIndent, "ERROR: Slice didn't advance. Stopping.");
+        nPos = m_nPosBlockEnd;
+        break;
+      }
     }
     if(nNumSlices > 0)
       PhotoshopParseReportNote(nIndent, "-----");
@@ -3407,6 +3436,7 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
 
   for(uint32_t nDescInd = 0; (nDescInd < nDescNumItems) && (nPos < m_nPosBlockEnd); nDescInd++)
   {
+    const uint32_t nPosItem = nPos;
     QString strDescInd;
 
     strDescInd = QString("Descriptor item #%1:").arg(nDescInd);
@@ -3423,6 +3453,14 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
     PhotoshopParseReportFldStr(nIndent + 1, "OSType key", strOsType);
 
     PhotoshopParseHandleOsType(strOsType, nPos, nIndent + 1);
+
+    // Every item must move forward, or the count could keep it going
+    if(nPos <= nPosItem)
+    {
+      PhotoshopParseReportNote(nIndent, "ERROR: Descriptor item didn't advance. Stopping.");
+      nPos = m_nPosBlockEnd;
+      break;
+    }
   }
 
   if(nDescNumItems > 0)
@@ -3462,6 +3500,7 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
 
   for(uint32_t nItemInd = 0; (nItemInd < nNumItems) && (nPos < m_nPosBlockEnd); nItemInd++)
   {
+    const uint32_t nPosItem = nPos;
     QString strItemInd;
 
     strItemInd = QString("Item #%1:").arg(nItemInd);
@@ -3475,6 +3514,14 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
     PhotoshopParseReportFldStr(nIndent + 1, "OSType key", strVal);
 
     PhotoshopParseHandleOsType(strOsType, nPos, nIndent + 1);
+
+    // Every item must move forward (as for descriptor items)
+    if(nPos <= nPosItem)
+    {
+      PhotoshopParseReportNote(nIndent, "ERROR: List item didn't advance. Stopping.");
+      nPos = m_nPosBlockEnd;
+      break;
+    }
   }
 
   if(nNumItems > 0)
