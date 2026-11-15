@@ -18,6 +18,9 @@
 
 #include <math.h>
 
+#include <cmath>
+#include <limits>
+
 #include <QtDebug>
 #include <QtWidgets>
 
@@ -38,6 +41,27 @@
 
 // ------------------------------------------------------
 // Main code
+
+// Convert to int16_t, saturating at its limits (NaN gives the minimum).
+// Corrupt coefficients can make IDCT results far larger than int16_t holds,
+// and converting an out-of-range double to an integer type is undefined.
+static int16_t SaturateInt16(double fVal)
+{
+  constexpr int16_t nMin = std::numeric_limits<int16_t>::min();
+  constexpr int16_t nMax = std::numeric_limits<int16_t>::max();
+
+  if(!(fVal > nMin))
+  {
+    return nMin;
+  }
+
+  if(!(fVal < nMax))
+  {
+    return nMax;
+  }
+
+  return static_cast<int16_t>(fVal);
+}
 
 // Constructor for the Image Decoder
 // - This constructor is called only once by Document class
@@ -2942,7 +2966,9 @@ void CimgDecode::SetFullRes(int32_t nMcuX, int32_t nMcuY, int32_t nComp, uint32_
 #else
       fVal = m_afIdctBlock[nYX];
       // TODO: Why do I need AC value x8 multiplier?
-      nVal = (static_cast<int16_t>(fVal * 8) + nDcOffset);
+      // Truncate before adding the DC offset, as before, but saturate instead
+      // of an undefined conversion when a corrupt block is out of range
+      nVal = SaturateInt16(std::trunc(fVal * 8) + nDcOffset);
 #endif
 
       // NOTE: These range checks were already done in DecodeScanImg()
@@ -5468,8 +5494,8 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
   uint32_t nPixMapW = m_nBlkXMax * BLK_SZ_X;
   uint32_t nPixmapInd;
   uint32_t nRngX1, nRngX2, nRngY1, nRngY2;
-  uint32_t nSumY;
-  uint32_t nNumPixels = 0;
+  uint64_t nSumY;               // 32 bits wrapped above 16.8 million white pixels
+  uint64_t nNumPixels = 0;
 
   // TODO: Update ranges to take into account the visible view region
   // The approach might include:
@@ -5523,8 +5549,10 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
     m_pLog->AddLine(strTmp);
   }
 
-  // Determine pixel count
-  nNumPixels = (nRngY2 - nRngY1 + 1) * (nRngX2 - nRngX1 + 1);
+  // Determine pixel count: the loops below run up to, not including, nRngX2
+  // and nRngY2. (This counted one extra row and column, so a white 32x32
+  // image averaged 239.)
+  nNumPixels = static_cast<uint64_t>(nRngY2 - nRngY1) * (nRngX2 - nRngX1);
 
   qDebug() << QString("CimgDecode::CalcChannelPreviewFull() new QImage X=%1 Y=%2").arg(m_nImgSizeX).arg(m_nImgSizeY);
   // Replace the previous preview (this used to leak one per decode and per
@@ -5678,7 +5706,7 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
     nNumPixels = 1;
   }
 
-  m_nAvgY = nSumY / nNumPixels;
+  m_nAvgY = static_cast<int32_t>(nSumY / nNumPixels);
   m_bAvgYValid = true;
 }
 

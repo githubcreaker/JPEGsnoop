@@ -186,8 +186,50 @@ or 1.5× screen.
 - **Not checked in the running app:** the menu, icons and Dark Mode switch were checked
   with the test driver and Qt's macOS platform, but not by using the app on screen.
 
-**Still open:** the rest of C7; the inherited R13–R15, R17 and R18; Developer ID signing
-and notarization (M5); latent code.
+### Rest of C7
+
+**Fixed:** the three C7 items left after the crash fixes, plus two errors in the average
+luminance found on the way. All are inherited from master.
+- **IDCT range:** a pixel value beyond `int16_t`, from corrupt coefficients, now
+  saturates at -32768 or 32767. Before, the conversion was undefined, and on arm64 it
+  wrapped: a crafted 16×16 edge reported pre-ranged Y from -25928 to 25416. Valid files
+  never get near the limits.
+- **Histogram sums:** they are 64-bit. In 32 bits they overflowed on valid images: a
+  plain white 1600×1400 image reported a pre-ranged Y average of -901.4 instead of
+  1016.0.
+- **Average Pixel Luminance:** this line is in every report, with histograms on or off.
+  - Its sum was 32-bit, so it wrapped above 16.8 million bright pixels: a white
+    4200×4100 image reported 5 instead of 255. A 24-megapixel photo is affected when its
+    average is above about 179.
+  - It divided by (width + 1) × (height + 1) instead of width × height, so it was always
+    low: 239 for a white 32×32 image. Small images are affected most.
+- **GPS degrees and minutes:** the decoder reads each 32-bit part of a fraction as signed,
+  so a corrupt value can be negative, and it was converted to an unsigned integer
+  (undefined). It is now printed signed: `-1 deg 30' 0.000"` where the arm64 build printed
+  `0 deg`.
+
+**Found, not fixed** (inherited, report output):
+- The histogram minimums and maximums start at 0 instead of at the first value, so a
+  minimum never shows above 0 or a maximum below 0. A white image shows `min=0`.
+- EXIF `RATIONAL` values are read as signed, but the EXIF standard makes them unsigned,
+  so a part at 2^31 or above prints negative (the GPS case above).
+
+5 new cases cover these (79 in all).
+
+**Checks:**
+- **Tests catch the bugs:** run against the previous commit, all 5 new cases fail, with
+  and without the sanitizers.
+- **All 79 pass** with and without ASan/UBSan.
+- **Sanitizer corpus clean:** the 3,273 files from the [sanitizer run](#sanitizer-run)
+  give no ASan or UBSan reports. After the crash fixes, 98 still had C7 reports. Nine very
+  tall or wide files exceeded 60 s in the unoptimised sanitizer build with eight running
+  at once. A normal build decodes them in 0.5–7.3 s, the same as before the change.
+- **Expected changes only:** reports of 32 valid files, decoded with and without full
+  IDCT and histograms, differ only in the Average Pixel Luminance line. It rises by 1–15
+  in 22 of them.
+
+**Still open:** the inherited R13–R15, R17 and R18; the two findings above; Developer ID
+signing and notarization (M5); latent code.
 
 ## How this was reviewed
 

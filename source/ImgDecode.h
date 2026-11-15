@@ -252,49 +252,51 @@ typedef struct
 } PixelCcClip;
 
 // Min-max and average pixel stats for histogram
+// The sums are over every pixel, so they are 64-bit: 32-bit sums overflowed
+// on a plain white 1600x1400 image.
 typedef struct
 {
   int32_t nPreclipYMin;
   int32_t nPreclipYMax;
-  int32_t nPreclipYSum;
+  int64_t nPreclipYSum;
   int32_t nPreclipCbMin;
   int32_t nPreclipCbMax;
-  int32_t nPreclipCbSum;
+  int64_t nPreclipCbSum;
   int32_t nPreclipCrMin;
   int32_t nPreclipCrMax;
-  int32_t nPreclipCrSum;
+  int64_t nPreclipCrSum;
 
   int32_t nClipYMin;
   int32_t nClipYMax;
-  int32_t nClipYSum;
+  int64_t nClipYSum;
   int32_t nClipCbMin;
   int32_t nClipCbMax;
-  int32_t nClipCbSum;
+  int64_t nClipCbSum;
   int32_t nClipCrMin;
   int32_t nClipCrMax;
-  int32_t nClipCrSum;
+  int64_t nClipCrSum;
 
   int32_t nClipRMin;
   int32_t nClipRMax;
-  int32_t nClipRSum;
+  int64_t nClipRSum;
   int32_t nClipGMin;
   int32_t nClipGMax;
-  int32_t nClipGSum;
+  int64_t nClipGSum;
   int32_t nClipBMin;
   int32_t nClipBMax;
-  int32_t nClipBSum;
+  int64_t nClipBSum;
 
   int32_t nPreclipRMin;
   int32_t nPreclipRMax;
-  int32_t nPreclipRSum;
+  int64_t nPreclipRSum;
   int32_t nPreclipGMin;
   int32_t nPreclipGMax;
-  int32_t nPreclipGSum;
+  int64_t nPreclipGSum;
   int32_t nPreclipBMin;
   int32_t nPreclipBMax;
-  int32_t nPreclipBSum;
+  int64_t nPreclipBSum;
 
-  uint32_t nCount;
+  uint64_t nCount;
 } PixelCcHisto;
 
 class CimgDecode : public QObject

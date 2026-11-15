@@ -152,6 +152,40 @@ sos3 = b"\xff\xda" + struct.pack(">H", 12) + bytes([3, 1, 0x00, 2, 0x00, 3, 0x00
 case("C5_sof1_sos3", "C5", "decode", write("c5_sof1_sos3.jpg", gray[:i] + sos3 + gray[end:]), "--ac")
 
 
+# C7: a sharp edge coded at quality 100, then decoded with every quantiser
+# set to 64, gives IDCT results beyond int16_t. They now saturate at its
+# limits (before: an undefined conversion, which wrapped to -25928..25416).
+def with_dqt_values(data, q):
+    d = bytearray(data)
+    i = marker_pos(d, 0xDB)
+    end = i + 2 + struct.unpack(">H", d[i + 2:i + 4])[0]
+    j = i + 4
+    while j < end:
+        assert d[j] >> 4 == 0, "8-bit tables only"
+        d[j + 1:j + 65] = bytes([q]) * 64
+        j += 65
+    return bytes(d)
+
+
+edge = Image.new("L", (16, 16))
+edge.putdata([255 if x >= 4 else 0 for y in range(16) for x in range(16)])
+case("C7_idct_out_of_range", "C7", "decode",
+     write("c7_idct_range.jpg", with_dqt_values(jpeg(edge, quality=100), 64)), "--ac --histo",
+     expect="Y  component histo: \\[min=-32768 max=32767")
+
+# C7: the histogram sums are over every pixel. In 32 bits the pre-ranged Y sum
+# (1016 per white pixel) overflowed at 2.1 million pixels, and the average
+# luminance sum wrapped at 16.8 million. Both are valid images.
+case("C7_histo_sum_2mp", "C7", "decode",
+     write("c7_white_1600x1400.jpg", jpeg(Image.new("L", (1600, 1400), 255), quality=95)), "--histo",
+     timeout=90, expect="Y  component histo: \\[min= +[0-9]+ max= 1016 avg= 1016\\.0\\]")
+case("C7_avg_luma_17mp", "C7", "decode",
+     write("c7_white_4200x4100.jpg", jpeg(Image.new("L", (4200, 4100), 255), quality=95)),
+     timeout=90, expect="Y=\\[255\\] \\(range")
+# The average divided by (width + 1) x (height + 1): 239 for a white 32x32 image
+case("C7_avg_luma_count", "C7", "decode", "c4_white.jpg", expect="Y=\\[255\\] \\(range")
+
+
 # --- H: hangs -----------------------------------------------------------------
 def ifd_be(entries, next_off):
     b = struct.pack(">H", len(entries))
@@ -307,6 +341,15 @@ for cid, finding, pattern in (
         ("R19_light_source", "R19", "Daylight fluorescent \\(D 5700 - 7100K\\)"),
         ("XP_unicode_tag", "XP", "Hello XP comment")):
     case(cid, finding, "decode", name, "--unknown-exif", expect=pattern)
+
+# C7: a GPS degree of 0xFFFFFFFF/1 is read as -1 and was converted to an
+# unsigned int (undefined; 0 on arm64, 4294967295 on x86)
+ifd0 = tiff_ifd(bo, 8, [entry(0x8825, longs(bo, GPS))])
+gps = tiff_ifd(bo, GPS, [entry(0x0001, ascii_("N")),
+                         entry(0x0002, rationals(bo, (0xFFFFFFFF, 1), (30, 1), (0, 1)))])
+case("C7_gps_negative_degree", "C7", "decode",
+     write("c7_gps_negative.jpg", insert_after_app0(c444, app1_exif(tiff(bo, {8: ifd0, GPS: gps})))),
+     expect="GPSLatitude +\\] = -1 deg 30' 0\\.000\"")
 
 # JPEG comment from known editing software
 com = seg(0xFE, b"CREATOR: gd-jpeg v1.0 (using IJG JPEG v62), quality = 80")

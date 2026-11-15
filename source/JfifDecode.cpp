@@ -2372,18 +2372,22 @@ bool CjfifDecode::PrintValGPS(uint32_t nCount, double fCoord1, double fCoord2, d
 {
   double fTemp;
 
-  uint32_t nCoordDeg;
+  int64_t nCoordDeg;
 
-  uint32_t nCoordMin;
+  int64_t nCoordMin;
 
   double fCoordSec;
 
   // TODO: Extend to support 1 & 2 coordinate GPS entries
   if(nCount == 3)
   {
-    nCoordDeg = uint32_t (fCoord1);
+    // Whole degrees and minutes, truncated toward zero. They are signed:
+    // DecodeValRational() reads the 32-bit parts as signed, so a corrupt
+    // value can be negative, and converting a negative double to an unsigned
+    // type is undefined. The values come from 32-bit fractions, so they fit.
+    nCoordDeg = static_cast<int64_t>(fCoord1);
 
-    nCoordMin = uint32_t (fCoord2);
+    nCoordMin = static_cast<int64_t>(fCoord2);
 
     if(fCoord3 == 0)
     {
