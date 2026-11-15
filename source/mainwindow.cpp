@@ -804,8 +804,10 @@ void MainWindow::AnalyzeFileDo()
     qDebug() << QString("MainWindow::AnalyzeFileDo() DibTempReady=%1 PreviewIsJpeg=%2")
                 .arg(m_pImgDec->m_bDibTempReady)
                 .arg(m_pImgDec->m_bPreviewIsJpeg);
-    if(m_pImgDec->m_bDibTempReady & m_pImgDec->m_bPreviewIsJpeg)
-    {    
+    // A JPEG scan or a Photoshop file's image (m_bPreviewIsJpeg is false
+    // for the latter, which used to keep it from being shown)
+    if(m_pImgDec->m_bDibTempReady)
+    {
       imgWindow->drawImage();
     }
 

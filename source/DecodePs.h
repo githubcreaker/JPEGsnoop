@@ -149,6 +149,7 @@ struct tsImageInfo
   uint32_t nImageHeight;
   uint32_t nNumChans;
   uint32_t nDepthBpp;
+  uint32_t nColorMode;          // 1 = grayscale, 3 = RGB, ...
 };
 
 class CDecodePs
@@ -159,7 +160,9 @@ public:
 
   void Reset();
 
-  bool DecodePsd(uint32_t nPos, QImage * pDibTemp, int32_t &nWidth, int32_t &nHeight);
+  // pDibTemp: where to draw the composite image (nullptr for none). It is
+  // left null when the image can't be shown.
+  bool DecodePsd(uint32_t nPos, QImage * pDibTemp, uint32_t &nWidth, uint32_t &nHeight);
   // nPosLimit: end (exclusive) of the containing segment or section
   bool PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit);
 
@@ -202,7 +205,9 @@ private:
   void PhotoshopParseStringUni(uint32_t &nPos, uint32_t nIndent);
   void PhotoshopParseHandleOsType(QString strOsType, uint32_t &nPos, uint32_t nIndent);
   void PhotoshopParseFileHeader(uint32_t &nPos, uint32_t nIndent, tsImageInfo * psImageInfo);
-  void PhotoshopParseColorModeSection(uint32_t &nPos, uint32_t nIndent);
+  bool PsdFits(uint32_t nPos, uint64_t nLen, const QString &strWhat);
+  uint64_t PsdRowBytes(uint32_t nWidth) const;
+  bool PhotoshopParseColorModeSection(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseImageResourcesSection(uint32_t &nPos, uint32_t nIndent);
   void PhotoshopParseVersionInfo(uint32_t &nPos, uint32_t nIndent);
   void PhotoshopParseResolutionInfo(uint32_t &nPos, uint32_t nIndent);
@@ -221,8 +226,8 @@ private:
   void PhotoshopParseLayerSelectId(uint32_t &nPos, uint32_t nIndent);
   void PhotoshopParseJpegQuality(uint32_t &nPos, uint32_t nIndent, uint32_t nPosEnd);
 
-  bool PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent, QImage * pDibTemp);
-  bool PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent, QImage * pDibTemp);
+  bool PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent);
+  bool PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * psLayerInfo);
   bool PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseLayerBlendingRanges(uint32_t &nPos, uint32_t nIndent);
@@ -230,12 +235,14 @@ private:
                                       unsigned char *pDibBits);
   bool PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent);
-  bool PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImageInfo * psImageInfo, unsigned char *pDibBits);
+  bool PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImageInfo * psImageInfo, QImage * pDibTemp);
 
-  bool PhotoshopDecodeRowUncomp(uint32_t &nPos, uint32_t nWidth, uint32_t nHeight, uint32_t nRow, uint32_t nChanID,
+  bool PhotoshopDecodeRowUncomp(uint32_t &nPos, uint32_t nRowBytes, uint32_t nRow, uint32_t nChanID,
                                 unsigned char *pDibBits);
-  bool PhotoshopDecodeRowRle(uint32_t &nPos, uint32_t nWidth, uint32_t nHeight, uint32_t nRow, uint32_t nRowLen,
-                             uint32_t nChanID, unsigned char *pDibBits);
+  bool PhotoshopDecodeRowRle(uint32_t &nPos, uint32_t nRowBytes, uint32_t nRow, uint32_t nRowLen, uint32_t nChanID,
+                             unsigned char *pDibBits);
+  void PhotoshopSetPixel(unsigned char *pDibBits, uint32_t nWidth, uint32_t nRow, uint32_t nCol, uint32_t nChanID,
+                         unsigned char nVal);
 
   QString PhotoshopDispHexWord(uint32_t nVal);
 
@@ -270,6 +277,11 @@ private:
 
   // Current Descriptor/List nesting depth (they can recurse through OSTypes)
   uint32_t m_nDescriptorDepth;
+
+  // Whether the image being drawn is grayscale (its one channel goes to R, G and B)
+  bool m_bDibGray;
+  // Bits per sample, from the file header (layers have the same depth)
+  uint32_t m_nDepthBpp;
 };
 
 #endif

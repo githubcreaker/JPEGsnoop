@@ -91,6 +91,7 @@ private slots:
 
 private:
   bool imageReady() const;
+  bool scanReady() const;
 
   CSnoopConfig *m_pAppConfig;
   CimgDecode *m_pImgDecoder;

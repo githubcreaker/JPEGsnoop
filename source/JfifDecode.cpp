@@ -10089,34 +10089,46 @@ void CjfifDecode::ProcessFile(QFile *inFile)
   uint32_t nHeight = 0;
 
 #ifdef PS_IMG_DEC_EN
-  // If PSD image decoding is enabled, associate the PSD parsing with
-  // the current DIB. After decoding, flag the DIB as ready for display.
+  // If PSD image decoding is enabled, draw the composite image into the
+  // preview. After decoding, flag the preview as ready for display.
+  // (This call was commented out, so a PSD file was parsed as a JPEG.)
+  if(!m_pImgDec->m_pDibTemp)
+  {
+    m_pImgDec->m_pDibTemp = new QImage;
+  }
 
   // Attempt decode as PSD
-  bool bDecPsdOk;
+  bool bDecPsdOk = m_pPsDec->DecodePsd(nStartPos, m_pImgDec->m_pDibTemp, nWidth, nHeight);
 
-//@@  bDecPsdOk = m_pPsDec->DecodePsd(nStartPos, &m_pImgDec->m_pDibTemp, nWidth, nHeight);
-  bDecPsdOk = false;
-
-  if(bDecPsdOk)
+  if(m_pPsDec->m_bPsd)
   {
     // FIXME: The following is a bit of a hack
-    m_pImgDec->m_bDibTempReady = true;
+    // The preview is the PSD's image, or none (a 16-bit image, say)
+    m_pImgDec->m_bDibTempReady = bDecPsdOk && !m_pImgDec->m_pDibTemp->isNull();
     m_pImgDec->m_bPreviewIsJpeg = false;        // MCU/Block info not available
-    m_pImgDec->SetImageDimensions(nWidth, nHeight);
+
+    if(m_pImgDec->m_bDibTempReady)
+    {
+      m_pImgDec->SetImageDimensions(nWidth, nHeight);
+    }
 
     // Clear the image information
     // The primary reason for this is to ensure we don't have stale information from a previous
     // JPEG image (eg. real image border inside MCU border which would be overlayed during draw).
     m_pImgDec->SetImageDetails(0, 0, 0, 0, false, 0);
 
-    // No more processing of file
-    // - Otherwise we'd continue to attempt to decode as JPEG
+    // No more processing of file, even if the PSD decode stopped at an
+    // error: a JPEG decode would only add "File did not start with JPEG marker"
+    if(m_pStatBar)
+    {
+      m_pStatBar->showMessage("Done");
+    }
+
     return;
   }
 #else
   // Don't attempt to display Photoshop image data
-  if(m_pPsDec->DecodePsd(nStartPos, nullptr, nWidth, nHeight))
+  if(m_pPsDec->DecodePsd(nStartPos, nullptr, nWidth, nHeight) || m_pPsDec->m_bPsd)
   {
     return;
   }

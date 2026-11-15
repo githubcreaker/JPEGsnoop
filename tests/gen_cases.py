@@ -885,6 +885,141 @@ for zoom, scale in (("12.5", "2"), ("50", "2"), ("100", "2"), ("150", "1.5"), ("
 case("M4_histograms_retina", "M4", "gui", name, "--scale 2 --histo --check-histo", timeout=60,
      expect="histogram yHistogram .*scale=2: ok$", forbid="histogram .*(missing|: wrong)")
 
+
+# --- PSD: Photoshop files ---------------------------------------------------------
+# The PSD decode call was commented out, so a .psd file was parsed as a JPEG
+# ("File did not start with JPEG marker"), and the PSD parser had never run in
+# this port. These check its image, and the memory and loop bugs it had.
+def packbits(row):
+    """PackBits-encode one row: runs of 3+ equal bytes repeat, the rest is literal."""
+    out = bytearray()
+    i = 0
+    while i < len(row):
+        j = i
+        while j < len(row) and j - i < 128 and row[j] == row[i]:
+            j += 1
+        if j - i >= 3:
+            out += bytes([257 - (j - i), row[i]])  # count 1-n as a signed byte
+            i = j
+            continue
+        j = i
+        while j < len(row) and j - i < 128 and not (j + 2 < len(row) and row[j] == row[j + 1] == row[j + 2]):
+            j += 1
+        out += bytes([j - i - 1]) + row[i:j]
+        i = j
+    return bytes(out)
+
+
+def psd_rows(plane, row_bytes, rle):
+    """A channel's rows: raw, or (row length table, PackBits rows)."""
+    rows = [plane[i:i + row_bytes] for i in range(0, len(plane), row_bytes)]
+    if not rle:
+        return b"", b"".join(rows)
+    enc = [packbits(r) for r in rows]
+    return b"".join(struct.pack(">H", len(e)) for e in enc), b"".join(enc)
+
+
+def psd(w, h, planes, depth=8, mode=3, rle=True, layers=b""):
+    """Header, no colour mode data or resources, the layer section, then the image data."""
+    head = b"8BPS" + struct.pack(">H", 1) + b"\0" * 6
+    head += struct.pack(">HIIHH", len(planes), h, w, depth, mode)
+    head += struct.pack(">I", 0) + struct.pack(">I", 0) + struct.pack(">I", len(layers)) + layers
+    enc = [psd_rows(p, len(p) // h, rle) for p in planes]
+    return head + struct.pack(">H", 1 if rle else 0) + b"".join(t for t, _ in enc) + b"".join(d for _, d in enc)
+
+
+def psd_layers(w, h, planes, name, bad_row=False):
+    """Layer and mask section: one RLE layer (channels 0-2) named in a "luni" block."""
+    chans = []
+    for cid, p in enumerate(planes):
+        table, data = psd_rows(p, w, True)
+        if bad_row and cid == 1:
+            data = bytes([257 - (w - 1)]) + data[1:]  # row 0 repeats one byte too few
+        chans.append((cid, struct.pack(">H", 1) + table + data))
+    rec = struct.pack(">iiiiH", 0, 0, h, w, len(chans))
+    rec += b"".join(struct.pack(">HI", cid, len(d)) for cid, d in chans)
+    rec += b"8BIMnorm" + bytes([255, 0, 0, 0])
+    luni = struct.pack(">I", len(name)) + name.encode("utf-16-be")
+    luni += b"\0" * (-len(luni) % 4)
+    extra = struct.pack(">II", 0, 0) + b"\x07Layer 1" + b"8BIMluni" + struct.pack(">I", len(luni)) + luni
+    rec += struct.pack(">I", len(extra)) + extra
+    info = struct.pack(">h", 1) + rec + b"".join(d for _, d in chans)
+    info += b"\0" * (len(info) % 2)
+    return struct.pack(">I", len(info)) + info + struct.pack(">I", 0)  # then an empty global mask
+
+
+# 37x23 RGB: R = 7x, G = 11y, B = 200 (B's rows are one repeat run; R's are literal)
+pw, ph = 37, 23
+p_r = bytes((x * 7) % 256 for y in range(ph) for x in range(pw))
+p_g = bytes((y * 11) % 256 for y in range(ph) for x in range(pw))
+p_b = bytes([200]) * (pw * ph)
+P_PIX = "--pixels 10,5/36,22"
+P_WANT = "pixel 10,5 = 70,55,200$"
+psd_rle = write("psd_rgb_rle.psd", psd(pw, ph, [p_r, p_g, p_b]))
+case("PSD_rgb_rle", "PSD", "decode", psd_rle, P_PIX, expect=P_WANT)
+case("PSD_rgb_rle_corner", "PSD", "decode", psd_rle, P_PIX, expect="pixel 36,22 = 252,242,200$")
+case("PSD_rgb_rle_preview", "PSD", "decode", psd_rle, expect="harness: decoded=0 preview=37x23 ")
+case("PSD_rgb_raw", "PSD", "decode", write("psd_rgb_raw.psd", psd(pw, ph, [p_r, p_g, p_b], rle=False)), P_PIX,
+     expect=P_WANT)
+case("PSD_gray", "PSD", "decode", write("psd_gray.psd", psd(pw, ph, [p_r], mode=1)), P_PIX,
+     expect="pixel 10,5 = 70,70,70$")
+# An alpha channel after R, G and B isn't drawn
+case("PSD_rgb_alpha", "PSD", "decode", write("psd_rgba.psd", psd(pw, ph, [p_r, p_g, p_b, p_g])), P_PIX,
+     expect=P_WANT)
+# 16-bit samples: rows are counted in bytes (a byte a pixel failed on row 0),
+# and the image isn't drawn
+p_16 = b"".join(struct.pack(">H", (x * 1000) % 65536) for y in range(ph) for x in range(pw))
+case("PSD_16bit", "PSD", "decode", write("psd_gray16.psd", psd(pw, ph, [p_16], depth=16, mode=1)),
+     expect="Image not shown: only 8-bit RGB and grayscale images are drawn", forbid="ERROR")
+# A layer is reported (with its Unicode name) and the composite still drawn
+psd_lay = write("psd_layer.psd", psd(pw, ph, [p_r, p_g, p_b], layers=psd_layers(pw, ph, [p_r, p_g, p_b], "Café")))
+case("PSD_layer_name", "PSD", "decode", psd_lay, expect='Layer Name \\(Unicode\\) += "Café"')
+case("PSD_layer_composite", "PSD", "decode", psd_lay, P_PIX, expect=P_WANT, forbid="ERROR")
+# A bad layer channel skips the rest of the layers instead of the whole file
+psd_badlay = write("psd_bad_layer.psd",
+                   psd(pw, ph, [p_r, p_g, p_b], layers=psd_layers(pw, ph, [p_r, p_g, p_b], "Bad", bad_row=True)))
+case("PSD_bad_layer_error", "PSD", "decode", psd_badlay, expect="ERROR: RLE row 0 at .* doesn't decode to 37 bytes")
+case("PSD_bad_layer_composite", "PSD", "decode", psd_badlay, P_PIX, expect=P_WANT)
+# B's last row (the file's last 2 bytes, one repeat run) becomes a 128-byte
+# literal run: it was written past the end of the image
+psd_over = write("psd_rle_overrun.psd", psd(pw, ph, [p_r, p_g, p_b])[:-2] + bytes([127]) + bytes(128))
+case("PSD_rle_overrun", "PSD", "decode", psd_over, expect="ERROR: RLE row 22 at .* doesn't decode to 37 bytes")
+case("PSD_rle_overrun_no_image", "PSD", "decode", psd_over, expect="harness: decoded=0 preview=0x0 ")
+# Truncated raw image data: reported, not read as zeros
+case("PSD_truncated", "PSD", "decode", write("psd_truncated.psd", psd(pw, ph, [p_r, p_g, p_b], rle=False)[:-100]),
+     expect="ERROR: Image data at \\[0x00000028\\] runs past the end of the file")
+# Two channels of 2^31 rows: 2 * 2^31 wrapped to 0, so the row table was empty
+# and the decode read past it (heap overflow)
+wrap = psd(1, 1, [b"\0", b"\0"])
+wrap = wrap[:12] + struct.pack(">HII", 2, 0x80000000, 1) + wrap[22:]  # channels, height, width
+case("PSD_rows_wrap", "PSD", "decode", write("psd_rows_wrap.psd", wrap),
+     expect="ERROR: Image data row length table at \\[0x00000028\\] runs past the end of the file")
+# An additional layer info length of 0xFFFFFFF4 wrapped the position back to
+# the same block: the decode never ended
+addtl = b"8BIMabcd" + struct.pack(">I", 0xFFFFFFF4)
+lm = struct.pack(">II", 0, 0) + addtl + b"\0" * 8
+case("PSD_addtl_wrap", "PSD", "decode",
+     write("psd_addtl_wrap.psd", psd(1, 1, [b"\0"] * 3, layers=lm)), timeout=20,
+     expect="ERROR: Additional layer info \\[abcd\\] at .* runs past the end of the file")
+# A layer whose bottom is above its top: a height near 4 billion, and a 16 GB
+# row length table
+tall = struct.pack(">iiiiH", 0, 0, -16, 1, 1) + struct.pack(">HI", 0, 2) + b"8BIMnorm" + bytes([255, 0, 0, 0])
+tall += struct.pack(">I", 12) + struct.pack(">II", 0, 0) + b"\0" * 4
+tall = struct.pack(">h", 1) + tall + struct.pack(">H", 1) + b"\0" * 32
+tall = struct.pack(">I", len(tall)) + tall + struct.pack(">I", 0)
+case("PSD_layer_tall", "PSD", "decode", write("psd_layer_tall.psd", psd(1, 1, [b"\0"] * 3, layers=tall)),
+     expect="ERROR: Channel row length table at .* runs past the end of the file")
+# Raw rows of 0 bytes (depth 0) fit in the file whatever the height: 3 * 2^31
+# of them would be stepped through one by one
+empty = psd(1, 1, [b"\0"] * 3, rle=False)
+empty = empty[:14] + struct.pack(">IIH", 0x7FFFFFFF, 1, 0) + empty[24:-3]  # height, width, depth
+case("PSD_empty_rows", "PSD", "decode", write("psd_empty_rows.psd", empty), timeout=20,
+     expect="Image data decode complete: +@ 0x00000028")
+# The preview window shows a PSD (it was only drawn for a JPEG scan), at the
+# zoom picked, and mouse moves and channel changes keep it. It has no MCUs.
+case("PSD_gui_preview", "PSD", "gui", ["ok_444.jpg", psd_rle], "--zoom 800 --check-preview --mouse --cycle-channels",
+     timeout=60, expect="harness: preview after channels zoom=8 .* image=37x23 .*: ok$", forbid="missing|differ|gave")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

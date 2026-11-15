@@ -225,17 +225,25 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
   connect(m_pAppConfig, SIGNAL(scanImageAc(bool)), this, SLOT(scanImageAc(bool)));
 }
 
-// Does the decoder hold a decoded image? (It may have been reset since the
-// preview was drawn, e.g. by opening a file it can't decode.)
+// Does the decoder hold an image to show? (It may have been reset since the
+// preview was drawn, e.g. by opening a file it can't decode.) A Photoshop
+// file's image is shown too, though no JPEG scan was decoded.
 bool Q_Viewer::imageReady() const
 {
-  return m_pImgDecoder->IsImgDecoded() && m_pImgDecoder->m_bDibTempReady && m_pImgDecoder->m_pDibTemp;
+  return m_pImgDecoder->m_bDibTempReady && m_pImgDecoder->m_pDibTemp;
+}
+
+// Is the image a decoded JPEG scan? Only then are there MCUs and blocks to
+// look up under the mouse.
+bool Q_Viewer::scanReady() const
+{
+  return imageReady() && m_pImgDecoder->IsImgDecoded() && m_pImgDecoder->IsPreviewReady();
 }
 
 void Q_Viewer::onCanvasReleased(QPoint ptImg, bool bInside)
 {
   // SetMarkerBlk() takes 8x8 block coordinates, not pixels
-  if(bInside && imageReady())
+  if(bInside && scanReady())
   {
     m_pImgDecoder->SetMarkerBlk(m_pImgDecoder->PixelToBlk(ptImg));
   }
@@ -250,7 +258,7 @@ void Q_Viewer::onCanvasMoved(QPoint ptImg, bool bInside)
   int32_t nCb;
   int32_t nCr;
 
-  if(!bInside || !imageReady())
+  if(!bInside || !scanReady())
   {
     mcuLabel->clear();
     fileLabel->clear();
@@ -292,7 +300,12 @@ void Q_Viewer::drawImage()
       return;
   }
 
-  setWindowTitle(m_strPreview + " " + m_strIdct + " " + m_strZoom);
+  // Like the Windows version, a non-JPEG image (from a Photoshop file) is
+  // just "Image": it has no channel view or IDCT mode
+  if(m_pImgDecoder->IsPreviewReady())
+    setWindowTitle(m_strPreview + " " + m_strIdct + " " + m_strZoom);
+  else
+    setWindowTitle("Image " + m_strZoom);
   canvas->setImage(*m_pImgDecoder->m_pDibTemp, scaleFactor);
   scrollArea->setVisible(true);
   setVisible(true);

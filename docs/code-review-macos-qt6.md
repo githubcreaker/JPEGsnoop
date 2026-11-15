@@ -419,8 +419,80 @@ and that the error is in the report. The driver also checks the preview again af
   for `cf42610`, as are the reports of the 639 corpus files that contain 8BIM resources
   (none of which has a descriptor).
 
-**Still open:** Developer ID signing and notarization (M5); latent code; the unfinished
-port features above.
+### PSD decoding
+
+The follow-up review's list of port gaps included the PSD decode call, which was still
+commented out, so a `.psd` file was parsed as a JPEG and reported only "File did not
+start with JPEG marker". The call is back, and the composite image is shown in the
+preview, as on Windows. The PSD parser had never run in this port, and it needed these
+fixes first:
+
+**Fixed:**
+- **Image:** the Windows code drew into a DIB, which is stored bottom row first; the
+  port's `QImage` version allocated an image and drew nothing into it. The image is now
+  drawn into the preview the right way up. 8-bit RGB and grayscale images are shown.
+  Other depths and colour modes, and sizes over Photoshop's 30,000-pixel limit, get a
+  note that the image isn't shown.
+- **Preview window:** it only showed a decoded JPEG scan. It now shows a PSD image, titled
+  "Image" as on Windows. Over a PSD, the mouse doesn't look up MCUs, which it hasn't got.
+- **Memory safety and hangs** (the PSD items in section 7, all inherited):
+  - **Row table:** `nNumChans * nHeight` wrapped in 32 bits, so the table was empty and
+    the decode read past it (heap overflow). The count is now 64-bit.
+  - **Lengths near 4 GB:** an additional layer info length of 0xFFFFFFF4 wrapped the
+    position back to the same block, so the decode never ended. Every length is now
+    checked against the end of the file before it is used: sections, layer records,
+    channel lists, masks, blending ranges, extra data, additional layer info, row tables
+    and image data.
+  - **Inverted layers:** a layer whose bottom was above its top was nearly 4 billion rows
+    tall and allocated a 16 GB row table. That table must now fit in the file.
+  - **RLE runs past the row:** they were written past the row and past the image. A row
+    must now decode to exactly its size. The run count is now an `int8_t` (a `char` is
+    unsigned on Linux arm64), and -128 does nothing, as PackBits defines.
+  - **Leaks:** a layer's channel arrays were freed only after a successful decode; now they
+    always are.
+  - **Bad dimensions:** a width or depth of 0 with a huge height no longer steps through
+    billions of empty rows.
+- **Rows sized by depth:** rows were counted at a byte per pixel, so a 16-bit RLE image
+  failed on its first row (inherited). 1-, 16- and 32-bit rows are now the right size,
+  though only 8-bit images are drawn.
+- **A bad layer or resource no longer hides the image:** each section's length is known,
+  so an error in one is reported and the decode goes on after it. One RGBA file written
+  by macOS's `sips` has a layer channel whose rows don't match its row lengths. The
+  Windows code would stop there and show nothing; now the composite is shown.
+- **Also:**
+  - After a PSD error the decode stops, instead of going on to parse the file as a JPEG.
+  - Layer masks and blending ranges are skipped by their lengths. Nothing in them is
+    reported, and reading them field by field relied on guesses about their layout.
+  - "8B64" additional layer info is accepted.
+  - The debug-build asserts on "Lr16" blocks and RLE errors are gone.
+  - The PSD-only branch for builds without image decoding compiles.
+
+Layers aren't drawn, as on Windows, where nothing turned that on.
+
+19 new cases (148 in all): 18 fail against `6ad33ef`. The other checks that a bad RLE
+row leaves no image, which holds trivially when nothing is decoded.
+
+**Checks:**
+- **All 148 pass** with and without ASan/UBSan.
+- **Pixels:** five PSDs written by macOS's `sips` (RGB, grayscale, RGB with alpha and a
+  layer, a flat colour, and 1000×700 with noise) decode to the same pixels as Pillow's
+  reading of them, all 777,751. A sixth, 16-bit, is reported without an image.
+- **GUI:** PSD previews at 12.5%, 100% and 800% match the decoded image, with mouse moves
+  and channel changes. Going from a JPEG to a PSD and back shows each image, and a bad
+  PSD after a good one shows none.
+- **Fuzzing, partial:** an ASan/UBSan run over 47,146 damaged copies of 19 PSDs (every
+  cut in the first 1,200 bytes, 4- and 2-byte fields set to extreme values at every
+  offset in the first 600 bytes, and random changes) was stopped after 24 minutes,
+  about 3,000 files, because the whole set would take five to six hours. It used the
+  build before the empty-row check. None of the files it reached crashed or gave a
+  sanitizer report, and none was slow without the sanitizers.
+- **No change for other files:** the 64 reports of the 32 valid files are the same as
+  for `6ad33ef`.
+- **Not checked at run time: leaks.** macOS's ASan has no leak checker.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; the other
+unfinished port features (Select All, Find, Export JPEG/TIFF, Detailed Decode, About and
+Batch Process).
 
 ## How this was reviewed
 
