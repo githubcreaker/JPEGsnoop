@@ -461,8 +461,9 @@ fixes first:
   Windows code would stop there and show nothing; now the composite is shown.
 - **Also:**
   - After a PSD error the decode stops, instead of going on to parse the file as a JPEG.
-  - Layer masks and blending ranges are skipped by their lengths. Nothing in them is
-    reported, and reading them field by field relied on guesses about their layout.
+  - Layer masks and blending ranges are skipped by their lengths (a mask's rectangles are
+    read first; see below). Reading them field by field relied on guesses about their
+    layout.
   - "8B64" additional layer info is accepted.
   - The debug-build asserts on "Lr16" blocks and RLE errors are gone.
   - The PSD-only branch for builds without image decoding compiles.
@@ -489,6 +490,45 @@ row leaves no image, which holds trivially when nothing is decoded.
 - **No change for other files:** the 64 reports of the 32 valid files are the same as
   for `6ad33ef`.
 - **Not checked at run time: leaks.** macOS's ASan has no leak checker.
+
+**Second check of `052cf64`:** a reviewer found three more problems. All are now fixed,
+along with a fourth that the fixes exposed:
+- **Size overflow (hang):** the raw image size, rows times row bytes, could still wrap in
+  64 bits. A small file whose header gave 32768 channels of 2^20 rows, 2^29 bytes each,
+  passed the size check and then stepped through 2^35 rows. The header must now be within
+  Photoshop's limits for a PSD (56 channels, 30,000 pixels a side, and 1, 8, 16 or 32
+  bits a sample), and every size is multiplied with an overflow check.
+- **Tagged block padding** (inherited): every block's length was padded to 4 bytes, but
+  in a layer record the specification pads it to an even number. After a 10-byte "luni"
+  name such as "Cat", the next block was read 2 bytes late: its signature was reported
+  as unknown, and the layer ID it held was lost. Blocks in a layer record are now padded
+  to 2, and those at the end of the layer section to 4, as psd-tools reads them.
+- **Mask channels** (inherited): every channel was decoded at the layer's size, so a 4×4
+  layer's 2×2 user mask gave an RLE error and lost the rest of the layers. The user mask
+  (-2) and real user mask (-3) channels now use their rectangles from the layer mask
+  data. Each channel is also bounded by its length in the layer record, and the next
+  starts after it, so a bad channel is skipped on its own.
+- **Global layer mask info** (inherited): it is optional, but it was always read, from
+  whatever followed the layer info. Files from `sips` have none, and once the bad channel
+  no longer stopped the layers, their image data was read as this field, giving a false
+  error. It is now read only if the section has room for it and no tagged block
+  starts there, as psd-tools does.
+
+4 new cases (152 in all), which all fail against `052cf64`; the size one times out.
+Two cases now expect the new messages, and the empty-row case now uses a layer, because
+the header limits stop such a composite first.
+
+**Checks:**
+- **All 152 pass** with and without ASan/UBSan.
+- **psd-tools agrees:** it reads the new files as intended: layer ID 7 after "Cat", mask
+  channels of 2×2 and 1×3, and no global layer mask info. The five `sips` PSDs still
+  match Pillow's pixels, and the RGBA one now reports only its bad channel.
+- **Fuzzing:** 11,563 damaged copies of five layer and mask files ran with no crashes
+  or hangs (cut at every byte up to 700, 4- and 2-byte fields set to extreme values at
+  every offset up to 450, and random changes). Under ASan/UBSan, 1,500 of them, picked at
+  random, gave no reports.
+- **Still no change for other files:** the 64 reports of the 32 valid files are the same
+  as for `6ad33ef`.
 
 **Still open:** Developer ID signing and notarization (M5); latent code; the other
 unfinished port features (Select All, Find, Export JPEG/TIFF, Detailed Decode, About and

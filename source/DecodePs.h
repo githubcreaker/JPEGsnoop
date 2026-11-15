@@ -133,6 +133,12 @@ struct tsLayerInfo
   uint32_t *pnChanID;
   uint32_t nWidth;
   uint32_t nHeight;
+  // Sizes of the user mask (channel -2) and the real user mask (channel -3),
+  // from the layer mask data: their channels have these sizes, not the layer's
+  uint32_t nMaskWidth;
+  uint32_t nMaskHeight;
+  uint32_t nRealMaskWidth;
+  uint32_t nRealMaskHeight;
 };
 
 // From Layer Info
@@ -229,12 +235,13 @@ private:
   bool PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * psLayerInfo);
-  bool PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent);
+  bool PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo, bool bRealMask);
   bool PhotoshopParseLayerBlendingRanges(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent, uint32_t nWidth, uint32_t nHeight, uint32_t nChan,
-                                      unsigned char *pDibBits);
+                                      uint32_t nPosChanEnd, unsigned char *pDibBits);
+  bool ChanFits(uint32_t nPos, uint64_t nLen, uint32_t nPosChanEnd, const QString &strWhat);
   bool PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nIndent);
-  bool PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent);
+  bool PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nAlign);
   bool PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImageInfo * psImageInfo, QImage * pDibTemp);
 
   bool PhotoshopDecodeRowUncomp(uint32_t &nPos, uint32_t nRowBytes, uint32_t nRow, uint32_t nChanID,

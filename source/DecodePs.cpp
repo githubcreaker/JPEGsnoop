@@ -396,7 +396,10 @@ bool CDecodePs::DecodePsd(uint32_t nPos, QImage * pDibTemp, uint32_t &nWidth, ui
 // table, or wrapped the 32-bit position back to the same block forever.
 bool CDecodePs::PsdFits(uint32_t nPos, uint64_t nLen, const QString &strWhat)
 {
-  if(static_cast<uint64_t>(nPos) + nLen <= m_pWBuf->GetPosEof())
+  const uint64_t nPosEof = m_pWBuf->GetPosEof();
+
+  // (Written so that it can't overflow, whatever nLen is)
+  if((nPos <= nPosEof) && (nLen <= nPosEof - nPos))
   {
     return true;
   }
@@ -404,6 +407,20 @@ bool CDecodePs::PsdFits(uint32_t nPos, uint64_t nLen, const QString &strWhat)
   m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of the file. Stopping.")
                        .arg(strWhat).arg(nPos, 8, 16, QChar('0')));
   return false;
+}
+
+// The size of nCount items of nSize bytes, or UINT64_MAX if that overflows (it
+// can't fit in a file then). Sizes from 32-bit fields multiplied in 64 bits
+// could still wrap to a small number: a small file with a huge raw image
+// passed the size check and was then stepped through billions of rows.
+static uint64_t PsdSize(uint64_t nCount, uint64_t nSize)
+{
+  if((nSize != 0) && (nCount > UINT64_MAX / nSize))
+  {
+    return UINT64_MAX;
+  }
+
+  return nCount * nSize;
 }
 
 // Bytes in one row of a channel: a 1-bit image packs 8 pixels in a byte, and
@@ -1808,8 +1825,17 @@ bool CDecodePs::PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent)
     if(bDecOk)
       bDecOk &= PhotoshopParseLayerInfo(nPos, nIndent);
 
-    if(bDecOk)
-      bDecOk &= PhotoshopParseGlobalLayerMaskInfo(nPos, nIndent);
+    // The global layer mask info is optional: the layer info can fill the
+    // section (as in files from macOS's sips), or tagged blocks can follow it
+    // directly (psd-tools reads it the same way). It used to be read from
+    // whatever followed, such as the image data.
+    if(bDecOk && (nPos < nPosEnd) && (nPosEnd - nPos >= 4))
+    {
+      const QString strSig = m_pWBuf->BufReadStrn(nPos, 4);
+
+      if((strSig != "8BIM") && (strSig != "8B64"))
+        bDecOk &= PhotoshopParseGlobalLayerMaskInfo(nPos, nIndent);
+    }
 
     if(bDecOk)
     {
@@ -1818,7 +1844,7 @@ bool CDecodePs::PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent)
       // the end looked like 4 GB to go.
       while((bDecOk) && (nPos < nPosEnd) && (nPosEnd - nPos > 12))
       {
-        bDecOk &= PhotoshopParseAddtlLayerInfo(nPos, nIndent);
+        bDecOk &= PhotoshopParseAddtlLayerInfo(nPos, nIndent, 4);
       }
     }
   }
@@ -1958,15 +1984,50 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
         // Fetch the channel ID to determine what RGB channel to map to
         // - Layer 0 (background):           0->R, 1->G, 2->B
         // - Layer n (other):      65535->A, 0->R, 1->G, 2->B
-        uint32_t nChanID = sLayerAllInfo.psLayers[nLayerInd].pnChanID[nChanInd];
+        const tsLayerInfo &sLayer = sLayerAllInfo.psLayers[nLayerInd];
+        uint32_t nChanID = sLayer.pnChanID[nChanInd];
+
+        // The layer record gives each channel's data length: the channel
+        // must be in the file, and the next one starts after it, so a
+        // problem with one channel doesn't lose the rest of the layers
+        const uint32_t nChanLen = sLayer.pnChanLen[nChanInd];
+
+        if(!PsdFits(nPos, nChanLen, "Channel image data"))
+        {
+          bDecOk = false;
+          break;
+        }
+
+        const uint32_t nPosChanEnd = nPos + nChanLen;
+
+        // A user mask (-2) or real user mask (-3) has its own size, from the
+        // layer mask data. (Every channel got the layer's size, so a 4x4
+        // layer's 2x2 mask gave an RLE error and lost the rest.)
+        uint32_t nChanWidth = nWidth;
+        uint32_t nChanHeight = nHeight;
+
+        if(nChanID == 0xFFFE)
+        {
+          nChanWidth = sLayer.nMaskWidth;
+          nChanHeight = sLayer.nMaskHeight;
+        }
+        else if(nChanID == 0xFFFD)
+        {
+          nChanWidth = sLayer.nRealMaskWidth;
+          nChanHeight = sLayer.nRealMaskHeight;
+        }
 
         // Parse, and optionally paint the DIB
         // NOTE: For uncompressed channels, the width & height generally appear to be zero
         //       According to the spec:
         //       If the compression code is 0, the image data is just the raw image data,
         //       whose size is calculated as (LayerBottom-LayerTop)* (LayerRight-LayerLeft)
+        if(!PhotoshopParseChannelImageData(nPos, nIndent + 1, nChanWidth, nChanHeight, nChanID, nPosChanEnd, pDibBits))
+        {
+          m_pLog->AddLineWarn("NOTE: Skipping to the next channel");
+        }
 
-        bDecOk &= PhotoshopParseChannelImageData(nPos, nIndent + 1, nWidth, nHeight, nChanID, pDibBits);
+        nPos = nPosChanEnd;
       }
 
       strLine = QString("CurPos @ 0x%1, bDecOk=%2, LastLayer @ 0x%3, LastChan @ 0x%4")
@@ -2036,7 +2097,7 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
   PhotoshopParseReportFldNum(nIndent, "Number of channels", nNumChans, "");
 
   // 6 bytes per channel (ID and data length)
-  if(!PsdFits(nPos, static_cast<uint64_t>(nNumChans) * 6, "Layer channel list"))
+  if(!PsdFits(nPos, PsdSize(nNumChans, 6), "Layer channel list"))
   {
     return false;
   }
@@ -2087,8 +2148,16 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
 
   const uint32_t nPosExtraEnd = nPosExtra + nExtraDataLen;
 
+  // The real user mask's rectangle is only there with a real user mask channel
+  bool bRealMask = false;
+
+  for(uint32_t nChanInd = 0; nChanInd < nNumChans; nChanInd++)
+  {
+    bRealMask |= (pLayerInfo->pnChanID[nChanInd] == 0xFFFD);
+  }
+
   if(bDecOk)
-    bDecOk &= PhotoshopParseLayerMask(nPos, nIndent);
+    bDecOk &= PhotoshopParseLayerMask(nPos, nIndent, pLayerInfo, bRealMask);
 
   if(bDecOk)
     bDecOk &= PhotoshopParseLayerBlendingRanges(nPos, nIndent);
@@ -2111,7 +2180,7 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
   while((bDecOk) && (nPos < nPosExtraEnd))
   {
     if(bDecOk)
-      bDecOk &= PhotoshopParseAddtlLayerInfo(nPos, nIndent);
+      bDecOk &= PhotoshopParseAddtlLayerInfo(nPos, nIndent, 2);
   }
 
   // The record ends with its extra data
@@ -2130,18 +2199,40 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent)
+bool CDecodePs::PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo, bool bRealMask)
 {
   PhotoshopParseReportNote(nIndent, "Layer Mask / Adjustment layer data:");
 
   uint32_t nLayerMaskLen = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
-  // The rectangles, colour and flags aren't reported, so skip them by the
-  // length. (Reading the fields one by one depended on flags and sizes the
-  // code only guessed at, and on a wrong guess the record went out of step.)
   if(!PsdFits(nPos, nLayerMaskLen, "Layer mask data"))
   {
     return false;
+  }
+
+  // Keep the rectangles, which give the mask channels' sizes: the user mask's
+  // first (top, left, bottom, right), then the default colour and flags; with
+  // a real user mask channel, its flags, background and rectangle follow (in
+  // that order, before any mask parameters, as psd-tools reads them). The
+  // rest isn't reported, so the data is then skipped by its length. (Reading
+  // the fields one by one relied on guesses about the layout, and on a wrong
+  // guess the record went out of step.)
+  if(nLayerMaskLen >= 16)
+  {
+    const uint32_t nTop = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
+    const uint32_t nLeft = m_pWBuf->BufX(nPos + 4, 4, PS_BSWAP);
+
+    pLayerInfo->nMaskHeight = m_pWBuf->BufX(nPos + 8, 4, PS_BSWAP) - nTop;
+    pLayerInfo->nMaskWidth = m_pWBuf->BufX(nPos + 12, 4, PS_BSWAP) - nLeft;
+  }
+
+  if(bRealMask && (nLayerMaskLen >= 36))
+  {
+    const uint32_t nTop = m_pWBuf->BufX(nPos + 20, 4, PS_BSWAP);
+    const uint32_t nLeft = m_pWBuf->BufX(nPos + 24, 4, PS_BSWAP);
+
+    pLayerInfo->nRealMaskHeight = m_pWBuf->BufX(nPos + 28, 4, PS_BSWAP) - nTop;
+    pLayerInfo->nRealMaskWidth = m_pWBuf->BufX(nPos + 32, 4, PS_BSWAP) - nLeft;
   }
 
   nPos += nLayerMaskLen;
@@ -2172,21 +2263,38 @@ bool CDecodePs::PhotoshopParseLayerBlendingRanges(uint32_t &nPos, uint32_t nInde
   return true;
 }
 
+// Does a field of nLen bytes at nPos end within its channel's data, whose
+// length the layer record gives? If not, report it.
+bool CDecodePs::ChanFits(uint32_t nPos, uint64_t nLen, uint32_t nPosChanEnd, const QString &strWhat)
+{
+  if((nPos <= nPosChanEnd) && (nLen <= nPosChanEnd - nPos))
+  {
+    return true;
+  }
+
+  m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of the channel's data, at [0x%3].")
+                       .arg(strWhat).arg(nPos, 8, 16, QChar('0')).arg(nPosChanEnd, 8, 16, QChar('0')));
+  return false;
+}
+
 // Parse the Photoshop IRB Channel image data
 // INPUT:
 // - nPos               = File position at start of block
 // - nIndent    = Indent level for formatted output
+// - nWidth, nHeight = The channel's size (a mask's, or else the layer's)
 // - nChan      = Channel being parsed (used for DIB mapping)
+// - nPosChanEnd = End of the channel's data (from the layer record), which
+//                the caller has checked is in the file
 // - pDibBits   = Preview pixels to draw into (nullptr if disabled)
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
 bool CDecodePs::PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent, uint32_t nWidth, uint32_t nHeight,
-                                               uint32_t nChan, unsigned char *pDibBits)
+                                               uint32_t nChan, uint32_t nPosChanEnd, unsigned char *pDibBits)
 {
   bool bDecOk = true;
 
-  if(!PsdFits(nPos, 2, "Channel image data"))
+  if(!ChanFits(nPos, 2, nPosChanEnd, "Compression method"))
   {
     return false;
   }
@@ -2201,7 +2309,7 @@ bool CDecodePs::PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent,
 
   if(nRowBytes64 > 0xFFFFFFFFull)
   {
-    m_pLog->AddLineErr(QString("ERROR: Channel rows of %1 bytes are too long. Stopping.").arg(nRowBytes64));
+    m_pLog->AddLineErr(QString("ERROR: Channel rows of %1 bytes are too long.").arg(nRowBytes64));
     return false;
   }
 
@@ -2224,10 +2332,10 @@ bool CDecodePs::PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent,
     // -   LOOP [nHeight]
     // -     16-bit: row length
     // -   ENDLOOP
-    // The table, and then the rows, must be in the file. (A layer whose
-    // bottom is above its top has a height near 4 billion: its table took
-    // 16 GB.)
-    if(!PsdFits(nPos, static_cast<uint64_t>(nHeight) * 2, "Channel row length table"))
+    // The table, and then the rows, must be in the channel's data. (A layer
+    // whose bottom is above its top has a height near 4 billion: its table
+    // took 16 GB.)
+    if(!ChanFits(nPos, PsdSize(nHeight, 2), nPosChanEnd, "Channel row length table"))
     {
       return false;
     }
@@ -2241,7 +2349,7 @@ bool CDecodePs::PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent,
       nDataLen += anRowLen[nRow];
     }
 
-    if(!PsdFits(nPos, nDataLen, "RLE channel data"))
+    if(!ChanFits(nPos, nDataLen, nPosChanEnd, "RLE channel data"))
     {
       return false;
     }
@@ -2261,7 +2369,7 @@ bool CDecodePs::PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent,
       return true;
     }
 
-    if(!PsdFits(nPos, static_cast<uint64_t>(nHeight) * nRowBytes, "Channel image data"))
+    if(!ChanFits(nPos, PsdSize(nHeight, nRowBytes), nPosChanEnd, "Channel image data"))
     {
       return false;
     }
@@ -2273,7 +2381,8 @@ bool CDecodePs::PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent,
   }
   else
   {
-    m_pLog->AddLineWarn("Unsupported compression method. Stopping.");
+    // (Such as ZIP, which Photoshop can use for layers)
+    m_pLog->AddLineWarn("Unsupported compression method.");
     bDecOk = false;
     return bDecOk;
   }
@@ -2401,7 +2510,7 @@ bool CDecodePs::PhotoshopDecodeRowRle(uint32_t &nPos, uint32_t nRowBytes, uint32
   // run can go past it)
   if((!bDecOk) || (nCol != nRowBytes) || (nRowOffsetComp > nRowLen))
   {
-    m_pLog->AddLineErr(QString("ERROR: RLE row %1 at [0x%2] doesn't decode to %3 bytes. Stopping.")
+    m_pLog->AddLineErr(QString("ERROR: RLE row %1 at [0x%2] doesn't decode to %3 bytes.")
                          .arg(nRow).arg(nPosRow, 8, 16, QChar('0')).arg(nRowBytes));
     return false;
   }
@@ -2453,6 +2562,21 @@ bool CDecodePs::PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImag
     return false;
   }
 
+  // Photoshop's limits for a PSD file: up to 56 channels and 30,000 pixels a
+  // side, with 1, 8, 16 or 32 bits a sample. (The sizes below are also
+  // checked for overflow: a small file whose header gave 32768 channels of
+  // 2^20 rows, 2^29 bytes each, passed the size check and then stepped
+  // through billions of rows.)
+  const uint32_t nDepth = psImageInfo->nDepthBpp;
+
+  if((nNumChans > 56) || (nWidth > 30000) || (nHeight > 30000) ||
+     ((nDepth != 1) && (nDepth != 8) && (nDepth != 16) && (nDepth != 32)))
+  {
+    m_pLog->AddLineErr(QString("ERROR: An image of %1x%2 pixels, %3 channels and %4 bits a sample is outside "
+                               "the PSD limits. Stopping.").arg(nWidth).arg(nHeight).arg(nNumChans).arg(nDepth));
+    return false;
+  }
+
   // The channels' rows, one channel after another (64-bit: the product of
   // the 32-bit header fields used to wrap, so a 2-channel image 2^31 rows
   // tall got an empty row table and read past it)
@@ -2480,7 +2604,7 @@ bool CDecodePs::PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImag
 
   if(nCompressionMethod == 1)
   {
-    if(!PsdFits(nPos, nRows * 2, "Image data row length table"))
+    if(!PsdFits(nPos, PsdSize(nRows, 2), "Image data row length table"))
     {
       return false;
     }
@@ -2501,18 +2625,17 @@ bool CDecodePs::PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImag
   }
   else if(nRowBytes == 0)
   {
-    // Empty raw rows (a width or depth of 0) would pass the size check
-    // whatever the height, and then be stepped through one by one
+    // Empty raw rows (a width of 0) would pass the size check whatever the
+    // height, and then be stepped through one by one
     return true;
   }
-  else if(!PsdFits(nPos, nRows * nRowBytes, "Image data"))
+  else if(!PsdFits(nPos, PsdSize(nRows, nRowBytes), "Image data"))
   {
     return false;
   }
 
   // Allocate the preview. Only 8-bit RGB and grayscale images are drawn (a
-  // 16-bit sample is two bytes, and the other colour modes need converting),
-  // up to Photoshop's limit of 30000 pixels a side.
+  // 16-bit sample is two bytes, and the other colour modes need converting).
   unsigned char *pDibBits = nullptr;
 
 #ifdef PS_IMG_DEC_EN
@@ -2526,9 +2649,9 @@ bool CDecodePs::PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImag
     {
       PhotoshopParseReportNote(nIndent + 1, "Image not shown: only 8-bit RGB and grayscale images are drawn");
     }
-    else if((nWidth == 0) || (nWidth > 30000) || (nHeight > 30000))
+    else if(nWidth == 0)
     {
-      PhotoshopParseReportNote(nIndent + 1, "Image not shown: its size is outside 1..30000 pixels");
+      PhotoshopParseReportNote(nIndent + 1, "Image not shown: it has no pixels");
     }
     else
     {
@@ -2628,10 +2751,14 @@ bool CDecodePs::PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nInde
 // INPUT:
 // - nPos               = File position at start of block
 // - nIndent    = Indent level for formatted output
+// - nAlign     = What the length is padded to: 2 in a layer record (Adobe's
+//                specification rounds the length up to an even number), and
+//                4 at the end of the layer and mask section (as psd-tools
+//                reads Photoshop's files)
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent)
+bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nAlign)
 {
   bool bDecOk = true;
 
@@ -2767,14 +2894,15 @@ bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent)
   // Skip data
   nPos = nPosStart + nLen;
 
-  // FIXME: It appears that we need to pad out to ensure that
-  // length is multiple of 4 (not file position).
+  // Pad the length to a multiple of nAlign. (It was always 4, so after a
+  // 10-byte "luni" name, such as "Cat", the next block was read 2 bytes late
+  // and its signature reported as unknown.)
   uint32_t nMod;
 
-  nMod = (nLen % 4);
+  nMod = (nLen % nAlign);
   if(nMod != 0)
   {
-    nPos += (4 - nMod);
+    nPos += (nAlign - nMod);
   }
 
   return bDecOk;

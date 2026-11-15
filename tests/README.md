@@ -56,8 +56,9 @@ when it is installed, so Pillow needn't be installed separately).
   hand-made segments, so no third-party images are needed. Files that Pillow
   can't write, such as unusual sampling factors or levels outside 0..255, come
   from `dc_only_jpeg()`, a small encoder for images made of flat 8×8 blocks.
-  Photoshop files come from `psd()`, which writes raw or PackBits image data
-  and, with `psd_layers()`, a layer.
+  Photoshop files come from `psd()`, which writes raw or PackBits image data,
+  and layers from `psd_layers()` (one) or `psd_layer_section()` (any, with
+  masks and tagged blocks).
 - `run-tests.sh` runs each case with a time limit. A case fails on a crash,
   timeout, sanitizer report, missing expected output or forbidden output.
   Output of failed cases is kept in `build-tests*/logs/`.

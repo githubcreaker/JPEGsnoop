@@ -928,24 +928,45 @@ def psd(w, h, planes, depth=8, mode=3, rle=True, layers=b""):
     return head + struct.pack(">H", 1 if rle else 0) + b"".join(t for t, _ in enc) + b"".join(d for _, d in enc)
 
 
-def psd_layers(w, h, planes, name, bad_row=False):
+def psd_rle_channel(plane, w):
+    """A layer channel's data: compression 1, the row length table, the rows."""
+    table, data = psd_rows(plane, w, True)
+    return struct.pack(">H", 1) + table + data
+
+
+def psd_block(key, data):
+    """A tagged block in a layer record (its length is even, as the specification says)."""
+    return b"8BIM" + key + struct.pack(">I", len(data)) + data + b"\0" * (len(data) % 2)
+
+
+def psd_layer_record(rect, chans, name, mask=b"", blocks=b""):
+    """A layer record: rect is (top, left, bottom, right), chans [(id, channel data)]."""
+    rec = struct.pack(">iiiiH", *rect, len(chans))
+    rec += b"".join(struct.pack(">hI", cid, len(d)) for cid, d in chans)
+    rec += b"8BIMnorm" + bytes([255, 0, 0, 0])
+    luni = psd_block(b"luni", struct.pack(">I", len(name)) + name.encode("utf-16-be"))
+    extra = struct.pack(">I", len(mask)) + mask + struct.pack(">I", 0) + b"\x07Layer 1" + luni + blocks
+    return rec + struct.pack(">I", len(extra)) + extra
+
+
+def psd_layer_section(layers, global_mask=True):
+    """Layer and mask section from [(record, [channel data])], then an empty global mask."""
+    info = struct.pack(">h", len(layers)) + b"".join(r for r, _ in layers)
+    info += b"".join(d for _, chans in layers for d in chans)
+    info += b"\0" * (len(info) % 2)
+    return struct.pack(">I", len(info)) + info + (struct.pack(">I", 0) if global_mask else b"")
+
+
+def psd_layers(w, h, planes, name, bad_row=False, blocks=b"", global_mask=True):
     """Layer and mask section: one RLE layer (channels 0-2) named in a "luni" block."""
     chans = []
     for cid, p in enumerate(planes):
-        table, data = psd_rows(p, w, True)
+        data = psd_rle_channel(p, w)
         if bad_row and cid == 1:
-            data = bytes([257 - (w - 1)]) + data[1:]  # row 0 repeats one byte too few
-        chans.append((cid, struct.pack(">H", 1) + table + data))
-    rec = struct.pack(">iiiiH", 0, 0, h, w, len(chans))
-    rec += b"".join(struct.pack(">HI", cid, len(d)) for cid, d in chans)
-    rec += b"8BIMnorm" + bytes([255, 0, 0, 0])
-    luni = struct.pack(">I", len(name)) + name.encode("utf-16-be")
-    luni += b"\0" * (-len(luni) % 4)
-    extra = struct.pack(">II", 0, 0) + b"\x07Layer 1" + b"8BIMluni" + struct.pack(">I", len(luni)) + luni
-    rec += struct.pack(">I", len(extra)) + extra
-    info = struct.pack(">h", 1) + rec + b"".join(d for _, d in chans)
-    info += b"\0" * (len(info) % 2)
-    return struct.pack(">I", len(info)) + info + struct.pack(">I", 0)  # then an empty global mask
+            data = data[:2 + 2 * h] + bytes([257 - (w - 1)]) + data[3 + 2 * h:]  # row 0 repeats one byte too few
+        chans.append((cid, data))
+    rec = psd_layer_record((0, 0, h, w), chans, name, blocks=blocks)
+    return psd_layer_section([(rec, [d for _, d in chans])], global_mask)
 
 
 # 37x23 RGB: R = 7x, G = 11y, B = 200 (B's rows are one repeat run; R's are literal)
@@ -989,11 +1010,17 @@ case("PSD_rle_overrun_no_image", "PSD", "decode", psd_over, expect="harness: dec
 case("PSD_truncated", "PSD", "decode", write("psd_truncated.psd", psd(pw, ph, [p_r, p_g, p_b], rle=False)[:-100]),
      expect="ERROR: Image data at \\[0x00000028\\] runs past the end of the file")
 # Two channels of 2^31 rows: 2 * 2^31 wrapped to 0, so the row table was empty
-# and the decode read past it (heap overflow)
+# and the decode read past it (heap overflow). It is now outside the PSD limits.
 wrap = psd(1, 1, [b"\0", b"\0"])
 wrap = wrap[:12] + struct.pack(">HII", 2, 0x80000000, 1) + wrap[22:]  # channels, height, width
 case("PSD_rows_wrap", "PSD", "decode", write("psd_rows_wrap.psd", wrap),
-     expect="ERROR: Image data row length table at \\[0x00000028\\] runs past the end of the file")
+     expect="ERROR: An image of 1x2147483648 pixels, 2 channels and 8 bits a sample is outside the PSD limits")
+# 32768 raw channels of 2^20 rows of 2^29 bytes: the size, 2^64, wrapped to 0
+# in 64 bits, so the check passed and the decode stepped through 2^35 rows
+huge = psd(1, 1, [b"\0"], rle=False)
+huge = huge[:12] + struct.pack(">HII", 32768, 1 << 20, 1 << 29) + huge[22:]  # channels, height, width
+case("PSD_size_overflow", "PSD", "decode", write("psd_size_overflow.psd", huge), timeout=20,
+     expect="ERROR: An image of 536870912x1048576 pixels, 32768 channels and 8 bits a sample is outside")
 # An additional layer info length of 0xFFFFFFF4 wrapped the position back to
 # the same block: the decode never ended
 addtl = b"8BIMabcd" + struct.pack(">I", 0xFFFFFFF4)
@@ -1008,13 +1035,40 @@ tall += struct.pack(">I", 12) + struct.pack(">II", 0, 0) + b"\0" * 4
 tall = struct.pack(">h", 1) + tall + struct.pack(">H", 1) + b"\0" * 32
 tall = struct.pack(">I", len(tall)) + tall + struct.pack(">I", 0)
 case("PSD_layer_tall", "PSD", "decode", write("psd_layer_tall.psd", psd(1, 1, [b"\0"] * 3, layers=tall)),
-     expect="ERROR: Channel row length table at .* runs past the end of the file")
-# Raw rows of 0 bytes (depth 0) fit in the file whatever the height: 3 * 2^31
-# of them would be stepped through one by one
-empty = psd(1, 1, [b"\0"] * 3, rle=False)
-empty = empty[:14] + struct.pack(">IIH", 0x7FFFFFFF, 1, 0) + empty[24:-3]  # height, width, depth
-case("PSD_empty_rows", "PSD", "decode", write("psd_empty_rows.psd", empty), timeout=20,
-     expect="Image data decode complete: +@ 0x00000028")
+     expect="ERROR: Channel row length table at .* runs past the end of the channel's data")
+# A layer named "Cat" has a 10-byte "luni" block. Padding it to 4 bytes read the
+# next block ("lyid") 2 bytes late: "signature unknown", and the ID was lost.
+lyid = psd_block(b"lyid", struct.pack(">I", 7))
+case("PSD_luni_even_padding", "PSD", "decode",
+     write("psd_layer_cat.psd", psd(pw, ph, [p_r, p_g, p_b], layers=psd_layers(pw, ph, [p_r, p_g, p_b], "Cat",
+                                                                                blocks=lyid))),
+     expect="Layer ID += 7 ", forbid="ERROR|signature unknown")
+# The global layer mask info is optional: here the layer info fills the section
+# (as macOS's sips writes it). It was read from the image data after it.
+case("PSD_no_global_mask", "PSD", "decode",
+     write("psd_no_global_mask.psd",
+           psd(pw, ph, [p_r, p_g, p_b], layers=psd_layers(pw, ph, [p_r, p_g, p_b], "Plain", global_mask=False))),
+     P_PIX, expect=P_WANT, forbid="ERROR|NOTE: Skipping")
+# A 4x4 layer with a 2x2 user mask (channel -2) and a 1x3 real user mask (-3),
+# then a second layer: each mask channel was decoded as 4x4, which gave an RLE
+# error and lost the rest of the layers
+q = 4
+quad = [bytes((x * 60 + c * 20) % 256 for y in range(q) for x in range(q)) for c in range(3)]
+mask = struct.pack(">iiii", 1, 1, 3, 3) + bytes([0, 0])  # user mask: rectangle, colour, flags
+mask += bytes([0, 255]) + struct.pack(">iiii", 0, 0, 3, 1)  # real user mask: flags, background, rectangle
+masked = [(c, psd_rle_channel(quad[c], q)) for c in range(3)]
+masked += [(-2, psd_rle_channel(bytes([255, 0, 0, 255]), 2)), (-3, psd_rle_channel(bytes([9, 9, 9]), 1))]
+second = [(c, psd_rle_channel(quad[c], q)) for c in range(3)]
+masks = psd_layer_section([(psd_layer_record((0, 0, q, q), masked, "Masked", mask=mask), [d for _, d in masked]),
+                           (psd_layer_record((0, 0, q, q), second, "Second", blocks=lyid), [d for _, d in second])])
+case("PSD_mask_channels", "PSD", "decode", write("psd_masks.psd", psd(q, q, quad, layers=masks)),
+     expect="Layer   2/  2, Channel  3/ 3", forbid="ERROR|NOTE: Skipping")
+# A layer 0 pixels wide and 2^31 - 1 tall: its raw rows of 0 bytes fit in any
+# length, so they would be stepped through one by one
+empty_chan = [(0, struct.pack(">H", 0))]
+empty = psd_layer_section([(psd_layer_record((0, 0, 0x7FFFFFFF, 0), empty_chan, "Empty"), [empty_chan[0][1]])])
+case("PSD_empty_rows", "PSD", "decode", write("psd_empty_rows.psd", psd(pw, ph, [p_r, p_g, p_b], layers=empty)),
+     P_PIX, timeout=20, expect=P_WANT, forbid="ERROR")
 # The preview window shows a PSD (it was only drawn for a JPEG scan), at the
 # zoom picked, and mouse moves and channel changes keep it. It has no MCUs.
 case("PSD_gui_preview", "PSD", "gui", ["ok_444.jpg", psd_rle], "--zoom 800 --check-preview --mouse --cycle-channels",
