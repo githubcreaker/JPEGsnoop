@@ -34,11 +34,16 @@ when it is installed, so Pillow needn't be installed separately).
     - `--zoom PCT` picks that View > Zoom level (`800` for 800%), and
       `--max-zoom-mb N` reports whether showing it took more than N MB;
     - `--check-preview` compares the preview with the decoded image: its size, where
-      mouse positions land in the image, and the pixels drawn, in screen pixels;
+      mouse positions land in the image, and the pixels drawn, in screen pixels
+      (with `--cycle-channels`, again after the channels, as "preview after
+      channels");
     - `--check-histo` checks that the histograms are drawn at screen resolution;
     - `--check-theme` reports the lowest contrast between report text and its
       background, then switches between light and dark palettes and reports it again
-      (`--dark` starts with a dark palette, as macOS Dark Mode does);
+      (`--dark` starts with a dark palette, as macOS Dark Mode does).
+
+    A message box, such as the one for a file that can't be opened, is closed
+    and its text printed as `harness: message box: ...`;
   - `settings` exercises settings load/store, option toggles and the
     Configuration dialog;
   - `--scale F`, in any mode, runs as if on a screen with F device pixels per
@@ -58,9 +63,9 @@ when it is installed, so Pillow needn't be installed separately).
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
 (`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
-GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags), or in
-[docs/code-review-followup-2026-11-14.md](../docs/code-review-followup-2026-11-14.md)
-(`F1`–`F10`); `ok_*` cases are valid files that must keep decoding.
+GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F10`
+are in its "Follow-up review" section); `ok_*` cases are valid files that must keep
+decoding.
 
 ## Adding a case
 

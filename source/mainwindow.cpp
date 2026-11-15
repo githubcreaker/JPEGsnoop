@@ -679,8 +679,12 @@ void MainWindow::openFile(const QString &strPath)
 // Clear the preview and histograms before showing a file's. They were only
 // replaced when the new file decoded, so after an undecodable file (such as a
 // progressive JPEG), an empty file or a failed open the previous file's stayed.
+// The decoder forgets its image too, or a zoom or channel change drew it
+// again. (AnalyzeFile()'s callers mark the image source changed first, so the
+// next file is always decoded afresh.)
 void MainWindow::clearImageViews()
 {
+  m_pImgDec->ClearDecodedImage();
   imgWindow->clearImage();
   rgbHisto->clear();
   yHisto->clear();

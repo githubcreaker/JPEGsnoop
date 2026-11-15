@@ -288,6 +288,8 @@ void CDecodePs::Reset()
   m_nQualitySaveForWeb = 0;
   m_bAbort = false;
   m_nPosBlockEnd = 0;
+  m_bInResBlock = false;
+  m_bBlockOverrun = false;
   m_nDescriptorDepth = 0;
 }
 
@@ -699,21 +701,53 @@ QString CDecodePs::PhotoshopParseIndent(uint32_t nIndent)
 // - String length prefix
 // - If length is 0 then fixed 4-character string
 // - Otherwise it is defined length string (no terminator required)
-// How far a length read from the file may move the cursor at nPos: no further
-// than the end of the current resource block (when nPos is inside one), and
-// never so far that the 32-bit position wraps. Lengths were added unchecked,
-// so 0xFFFFFFF8 moved the cursor back 8 bytes and a descriptor repeated the
-// same item for every one of its 2^28 declared items.
+// How far a length read from the file may move the cursor at nPos: while a
+// resource block is being parsed, no further than its end (nothing once nPos
+// is at or past it), and never so far that the 32-bit position wraps. Lengths
+// were added unchecked, so 0xFFFFFFF8 moved the cursor back 8 bytes and a
+// descriptor repeated the same item for every one of its 2^28 declared items.
 uint32_t CDecodePs::LimitAdvance(uint32_t nPos, uint64_t nLen) const
 {
   uint64_t nMax = 0xFFFFFFFFull - nPos;
 
-  if(nPos < m_nPosBlockEnd)
+  if(m_bInResBlock)
   {
-    nMax = m_nPosBlockEnd - nPos;
+    nMax = (nPos < m_nPosBlockEnd) ? (m_nPosBlockEnd - nPos) : 0;
   }
 
   return static_cast<uint32_t>((nLen < nMax) ? nLen : nMax);
+}
+
+// Whether the resource block being parsed has nLen more bytes at nPos
+// (always true outside a block)
+bool CDecodePs::BlockRoom(uint32_t nPos, uint64_t nLen) const
+{
+  return !m_bInResBlock || ((nPos <= m_nPosBlockEnd) && (nLen <= m_nPosBlockEnd - nPos));
+}
+
+// A field at nPos doesn't fit in its resource block: report it (once per
+// block) and move nPos to the block's end, which also ends the parsing loops.
+// (Reading on used to take the field from whatever followed the block.)
+void CDecodePs::BlockOverrun(uint32_t &nPos, const QString &strWhat)
+{
+  if(!m_bInResBlock)
+  {
+    return;
+  }
+
+  if(!m_bBlockOverrun)
+  {
+    m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of its 8BIM resource, at [0x%3]. Stopping.")
+                         .arg(strWhat)
+                         .arg(nPos, 8, 16, QChar('0'))
+                         .arg(m_nPosBlockEnd, 8, 16, QChar('0')));
+    m_bBlockOverrun = true;
+  }
+
+  if(nPos < m_nPosBlockEnd)
+  {
+    nPos = m_nPosBlockEnd;
+  }
 }
 
 QString CDecodePs::PhotoshopParseGetLStrAsc(uint32_t &nPos)
@@ -722,14 +756,35 @@ QString CDecodePs::PhotoshopParseGetLStrAsc(uint32_t &nPos)
 
   QString strVal = "";
 
+  // The length prefix has to be inside the resource too
+  if(!BlockRoom(nPos, 4))
+  {
+    BlockOverrun(nPos, "String");
+    return strVal;
+  }
+
   nStrLen = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   if(nStrLen != 0)
   {
-    // The length comes from the file (see LimitAdvance)
-    nStrLen = LimitAdvance(nPos, nStrLen);
-    strVal = m_pWBuf->BufReadStrn(nPos, nStrLen);
-    nPos += nStrLen;
+    // The length comes from the file (see LimitAdvance). Show the part that
+    // is inside the resource.
+    const uint32_t nStrLenAvail = LimitAdvance(nPos, nStrLen);
+
+    strVal = m_pWBuf->BufReadStrn(nPos, nStrLenAvail);
+    if(BlockRoom(nPos, nStrLen))
+    {
+      nPos += nStrLenAvail;
+    }
+    else
+    {
+      // To the block's end
+      BlockOverrun(nPos, QString("String of length %1").arg(nStrLen));
+    }
+  }
+  else if(!BlockRoom(nPos, 4))
+  {
+    BlockOverrun(nPos, "String");
   }
   else
   {
@@ -755,13 +810,28 @@ QString CDecodePs::PhotoshopParseGetBimLStrUni(uint32_t nPos, uint32_t &nPosOffs
 
   uint32_t nStrLenActual, nStrLenTrunc;
 
-  nPosOffset = 0;
-  nStrLenActual = m_pWBuf->BufX(nPos + nPosOffset, 4, PS_BSWAP);
-  nPosOffset += 4;
-  nStrLenTrunc = nStrLenActual;
-
   // Initialize return
   strVal = "";
+
+  // The length prefix has to be inside the resource too
+  nPosOffset = 0;
+  if(!BlockRoom(nPos, 4))
+  {
+    uint32_t nPosEnd = nPos;
+
+    BlockOverrun(nPosEnd, "Unicode string");
+    nPosOffset = nPosEnd - nPos;
+    return strVal;
+  }
+
+  nStrLenActual = m_pWBuf->BufX(nPos + nPosOffset, 4, PS_BSWAP);
+  nPosOffset += 4;
+
+  // The length comes from the file, and doubling it could wrap too (see
+  // LimitAdvance). Read only the characters inside the resource.
+  const uint32_t nStrBytesAvail = LimitAdvance(nPos + nPosOffset, static_cast<uint64_t>(nStrLenActual) * 2);
+
+  nStrLenTrunc = nStrBytesAvail / 2;
 
   if(nStrLenTrunc > 0)
   {
@@ -788,9 +858,19 @@ QString CDecodePs::PhotoshopParseGetBimLStrUni(uint32_t nPos, uint32_t &nPosOffs
     }
   }
 
-  // Update the file position offset. The length comes from the file, and
-  // doubling it could wrap too (see LimitAdvance).
-  nPosOffset += LimitAdvance(nPos + nPosOffset, static_cast<uint64_t>(nStrLenActual) * 2);
+  // Update the file position offset
+  if(BlockRoom(nPos + nPosOffset, static_cast<uint64_t>(nStrLenActual) * 2))
+  {
+    nPosOffset += nStrBytesAvail;
+  }
+  else
+  {
+    // To the block's end
+    uint32_t nPosEnd = nPos + nPosOffset;
+
+    BlockOverrun(nPosEnd, QString("Unicode string of length %1").arg(nStrLenActual));
+    nPosOffset = nPosEnd - nPos;
+  }
   // Return
   return strVal;
 }
@@ -2832,6 +2912,16 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
 
   m_nPosBlockEnd = nPos + nBimLen;
 
+  // The block's end limits the string readers while it is parsed, on every
+  // return path (the PSD layer records use the readers outside any block)
+  struct BlockScope
+  {
+    bool &bInBlock;
+    explicit BlockScope(bool &bFlag) : bInBlock(bFlag) { bInBlock = true; }
+    ~BlockScope() { bInBlock = false; }
+  } sBlockScope(m_bInResBlock);
+  m_bBlockOverrun = false;
+
   if(nBimLen == 0)
   {
     // If length is zero, then skip this block
@@ -3348,11 +3438,26 @@ void CDecodePs::PhotoshopParseHandleOsType(QString strOsType, uint32_t &nPos, ui
   }
   else if(strOsType == "long")
   {
-    PhotoshopParseInteger(nPos, nIndent);
+    // The fixed-size values have to be inside the resource too
+    if(BlockRoom(nPos, 4))
+    {
+      PhotoshopParseInteger(nPos, nIndent);
+    }
+    else
+    {
+      BlockOverrun(nPos, "Integer");
+    }
   }
   else if(strOsType == "bool")
   {
-    PhotoshopParseBool(nPos, nIndent);
+    if(BlockRoom(nPos, 1))
+    {
+      PhotoshopParseBool(nPos, nIndent);
+    }
+    else
+    {
+      BlockOverrun(nPos, "Boolean");
+    }
   }
   else if(strOsType == "GlbO")
   {
@@ -3427,6 +3532,14 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
   strVal = PhotoshopParseGetLStrAsc(nPos);
   PhotoshopParseReportFldStr(nIndent, "classID", strVal);
 
+  // The count, and each item's type, have to be inside the resource too
+  if(!BlockRoom(nPos, 4))
+  {
+    BlockOverrun(nPos, "Descriptor item count");
+    m_nDescriptorDepth--;
+    return;
+  }
+
   uint32_t nDescNumItems = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   PhotoshopParseReportFldNum(nIndent, "Num items in descriptor", nDescNumItems, "");
@@ -3444,6 +3557,12 @@ void CDecodePs::PhotoshopParseDescriptor(uint32_t &nPos, uint32_t nIndent)
 
     strVal = PhotoshopParseGetLStrAsc(nPos);
     PhotoshopParseReportFldStr(nIndent + 1, "Key", strVal);
+
+    if(!BlockRoom(nPos, 4))
+    {
+      BlockOverrun(nPos, "Descriptor item type");
+      break;
+    }
 
     QString strOsType;
 
@@ -3491,6 +3610,14 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
 
   m_nDescriptorDepth++;
 
+  // As for descriptors: the count and item types have to be inside the resource
+  if(!BlockRoom(nPos, 4))
+  {
+    BlockOverrun(nPos, "List item count");
+    m_nDescriptorDepth--;
+    return;
+  }
+
   uint32_t nNumItems = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   PhotoshopParseReportFldNum(nIndent, "Num items in list", nNumItems, "");
@@ -3506,12 +3633,18 @@ void CDecodePs::PhotoshopParseList(uint32_t &nPos, uint32_t nIndent)
     strItemInd = QString("Item #%1:").arg(nItemInd);
     PhotoshopParseReportNote(nIndent, strItemInd);
 
+    if(!BlockRoom(nPos, 4))
+    {
+      BlockOverrun(nPos, "List item type");
+      break;
+    }
+
     QString strOsType;
 
     // Four characters (master: %c%c%c%c), not their codes
     strOsType = QString(QChar(Buf(nPos + 0))) + QChar(Buf(nPos + 1)) + QChar(Buf(nPos + 2)) + QChar(Buf(nPos + 3));
     nPos += 4;
-    PhotoshopParseReportFldStr(nIndent + 1, "OSType key", strVal);
+    PhotoshopParseReportFldStr(nIndent + 1, "OSType key", strOsType);
 
     PhotoshopParseHandleOsType(strOsType, nPos, nIndent + 1);
 

@@ -20,11 +20,13 @@
 //     --histo turns the histograms on; --cycle-channels shows each
 //     View > Image Chan channel after each file; --repeat opens the files N
 //     times; --max-growth-mb reports whether memory grew by more than N MB
-//     after the first round (a leak check).
+//     after the first round (a leak check). A message box (such as a failed
+//     open's) is closed and its text printed as "harness: message box:".
 //     After each file in the first round: --zoom picks that View > Zoom
 //     level ("800" for 800%), and --max-zoom-mb reports whether showing it
 //     took more than N MB; --check-preview compares the preview's size, mouse
-//     mapping and drawn pixels with the decoded image; --check-histo checks
+//     mapping and drawn pixels with the decoded image (and again, as "preview
+//     after channels", after --cycle-channels); --check-histo checks
 //     the histograms are drawn at the screen's resolution; --check-theme
 //     reports the report's lowest text contrast, then switches between light
 //     and dark palettes and reports it again. --dark starts with a dark
@@ -49,6 +51,7 @@
 #include <QFileInfo>
 #include <QLineEdit>
 #include <QLabel>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QPalette>
 #include <QPixmap>
@@ -62,6 +65,7 @@
 #include <QTextBlock>
 #include <QTextDocument>
 #include <QTextStream>
+#include <QTimer>
 #include <QtMath>
 #include <cmath>
 #include <cstdio>
@@ -337,13 +341,13 @@ static void exerciseMouse()
 // pixels drawn, in screen (device) pixels. Below 100% each screen pixel must
 // be one pixel of the smoothly reduced image; from 100% each image pixel must
 // be a sharp block of zoom x zoom screen pixels.
-static void checkPreview(QTextStream &out)
+static void checkPreview(QTextStream &out, const QString &strWhat = QStringLiteral("preview"))
 {
   Q_Viewer *pViewer = findViewer();
   PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
   if(!pCanvas || pCanvas->image().isNull())
   {
-    out << "harness: preview missing\n";
+    out << "harness: " << strWhat << " missing\n";
     return;
   }
 
@@ -435,8 +439,8 @@ static void checkPreview(QTextStream &out)
   if((nChecked == 0) || (nBad > 0))
     errors << QString("%1 of %2 screen pixels differ").arg(nBad).arg(nChecked);
 
-  out << QString("harness: preview zoom=%1 scale=%2 canvas=%3x%4 image=%5x%6 pixels=%7: %8\n")
-           .arg(dZoom).arg(dDpr).arg(pCanvas->width()).arg(pCanvas->height())
+  out << QString("harness: %1 zoom=%2 scale=%3 canvas=%4x%5 image=%6x%7 pixels=%8: %9\n")
+           .arg(strWhat).arg(dZoom).arg(dDpr).arg(pCanvas->width()).arg(pCanvas->height())
            .arg(img.width()).arg(img.height()).arg(nChecked)
            .arg(errors.isEmpty() ? QString("ok") : errors.join("; "));
 }
@@ -661,6 +665,18 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 
   QTextStream out(stdout);
 
+  // A message box (such as "Couldn't open file") waits for a click that
+  // never comes here: print its text and close it
+  QTimer timerMsgBox;
+  QObject::connect(&timerMsgBox, &QTimer::timeout, [&out]() {
+    if(QMessageBox *pBox = qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
+    {
+      out << "harness: message box: " << pBox->text() << "\n";
+      pBox->done(QMessageBox::Ok);
+    }
+  });
+  timerMsgBox.start(100);
+
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
   if(opts.bReprocessFirst)
@@ -705,7 +721,11 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
       if(opts.bMouse)
         exerciseMouse();
       if(opts.bCycleChannels)
+      {
         cycleChannels(window);
+        if((nRound == 0) && opts.bCheckPreview)
+          checkPreview(out, "preview after channels");
+      }
     }
 
     // Measure from the end of the first round, once caches have warmed up

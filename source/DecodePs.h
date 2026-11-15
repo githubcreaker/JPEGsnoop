@@ -177,6 +177,8 @@ private:
 
   QString PhotoshopParseGetLStrAsc(uint32_t &nPos);
   uint32_t LimitAdvance(uint32_t nPos, uint64_t nLen) const;
+  bool BlockRoom(uint32_t nPos, uint64_t nLen) const;
+  void BlockOverrun(uint32_t &nPos, const QString &strWhat);
   QString PhotoshopParseIndent(uint32_t nIndent);
   void PhotoshopParseReportNote(uint32_t nIndent, QString strNote);
   QString PhotoshopParseLookupEnum(teBimEnumField eEnumField, uint32_t nVal);
@@ -260,6 +262,11 @@ private:
   // End (exclusive) of the image resource block being parsed. Loops driven by
   // counts read from the file also stop here, so a bogus count can't run on.
   uint32_t m_nPosBlockEnd;
+  // Whether a resource block is being parsed, so m_nPosBlockEnd limits the
+  // string readers (the PSD layer records use them outside any block)
+  bool m_bInResBlock;
+  // Whether this block's overrun has been reported (once per block)
+  bool m_bBlockOverrun;
 
   // Current Descriptor/List nesting depth (they can recurse through OSTypes)
   uint32_t m_nDescriptorDepth;

@@ -677,7 +677,7 @@ case("R22_unicode_comment_be", "R22", "decode", write("r22_comment_be.jpg", user
      expect="UserComment +\\] = \"Hello World\"")
 
 
-# --- F: follow-up review (docs/code-review-followup-2026-11-14.md) ----------------
+# --- F: follow-up review (see docs/code-review-macos-qt6.md) ------------------
 def dc_only_scans(width, height, levels, scans, ids=(1, 2, 3)):
     """Like dc_only_jpeg, all components 1x1, but split into the given scans:
     lists of component indexes. levels: one flat level per component."""
@@ -719,6 +719,26 @@ case("F2_ps_string_wrap", "F2", "decode",
      expect="harness: decoded=")
 
 
+# F2 (second review): the limit stopped at the resource's end. A descriptor cut
+# off right after its name read its classID from the data after the resource,
+# here a 40,000-character string. Also the 4-character form of the classID,
+# and a name whose length is inside the resource but whose text isn't.
+def ps_after_resource(name, inside, after):
+    blocks = bim(0x041A, struct.pack(">II", 7, 16) + inside) + after
+    return write(name, app13_only(blocks))
+
+
+case("F2_ps_classid_after_end", "F2", "decode",
+     ps_after_resource("f2_classid_after.jpg", uni(""), struct.pack(">I", 40000) + b"A" * 40000), timeout=10,
+     expect="harness: decoded=", forbid="AAAAAAAA")
+case("F2_ps_fixed_after_end", "F2", "decode",
+     ps_after_resource("f2_fixed_after.jpg", uni("") + struct.pack(">I", 0), b"ZZZZ" + bytes(8)), timeout=10,
+     expect="harness: decoded=", forbid="ZZZZ")
+case("F2_ps_name_after_end", "F2", "decode",
+     ps_after_resource("f2_name_after.jpg", struct.pack(">I", 200), ("B" * 200).encode("utf-16-be")), timeout=10,
+     expect="harness: decoded=", forbid="BBBBBBBB")
+
+
 # F3: RGB JPEGs (Adobe APP14 transform 0, or no JFIF/APP14 and component IDs
 # 'R','G','B', as libjpeg decides). Red decoded as (75,255,28).
 def adobe(transform):
@@ -743,6 +763,18 @@ case("F4_stale_preview", "F4", "gui", ["ok_444.jpg", "ok_progressive.jpg"], "--c
      expect="harness: preview missing")
 case("F4_stale_histograms", "F4", "gui", ["ok_444.jpg", "ok_progressive.jpg"], "--histo --check-histo",
      timeout=30, expect="harness: histogram [A-Za-z]+ missing")
+# (second review) An empty file or a failed open cleared the screen, but the
+# decoder still had the first file's image, so a zoom or channel change drew it
+# again
+f4_empty = write("f4_empty.jpg", b"")
+case("F4_zoom_after_empty", "F4", "gui", ["ok_444.jpg", f4_empty], "--zoom 100 --check-preview", timeout=30,
+     expect="harness: preview missing")
+case("F4_zoom_after_failed_open", "F4", "gui", ["ok_444.jpg", "f4_no_such_file.jpg"], "--zoom 100 --check-preview",
+     timeout=30, expect="harness: preview missing")
+case("F4_failed_open_message", "F4", "gui", ["f4_no_such_file.jpg"], timeout=30,
+     expect="harness: message box: ERROR: Couldn't open file")
+case("F4_channel_after_empty", "F4", "gui", ["ok_444.jpg", f4_empty], "--cycle-channels --check-preview",
+     timeout=60, expect="harness: preview after channels missing")
 
 # F5: a histogram bin over 35,791,394 pixels overflowed 60 * count in 32 bits,
 # so the white 6000x6000 image's only bar wasn't drawn
@@ -771,7 +803,7 @@ xmp = b'<x:xmpmeta xmlns:x="adobe:ns:meta/">SINGLE-LINE-XMP</x:xmpmeta>'
 case("F8_xmp_single_line", "F8", "decode",
      write("f8_xmp.jpg", insert_after_app0(c444, seg(0xE1, b"http://ns.adobe.com/xap/1.0/\x00" + xmp))),
      expect="\\|<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">SINGLE-LINE-XMP</x:xmpmeta>$")
-xmp = "<x:xmpmeta>\n  <dc:title>Café</dc:title>\n</x:xmpmeta>".encode("utf-8")
+xmp = "<x:xmpmeta>\n  <dc:title>Café</dc:title>\n</x:xmpmeta>".encode()
 case("F8_xmp_utf8", "F8", "decode",
      write("f8_xmp_utf8.jpg", insert_after_app0(c444, seg(0xE1, b"http://ns.adobe.com/xap/1.0/\x00" + xmp))),
      expect="<dc:title>Café</dc:title>")

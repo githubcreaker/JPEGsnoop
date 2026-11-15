@@ -321,6 +321,7 @@ public:
 
   void Reset();                 // Called during start of SOS decode
   void ResetState();            // Called at start of new JFIF Decode
+  void ClearDecodedImage();     // The image source changed: forget the decoded image
 
   void SetStatusBar(QStatusBar *pStatBar);
   void DecodeScanImg(uint32_t bStart, bool bDisplay, bool bQuiet);

@@ -354,6 +354,21 @@ CimgDecode::~CimgDecode()
 // - m_bScanErrorsDisable
 // - m_nMarkersBlkNum
 //
+// The image source changed (a new file, or Reprocess): the decoded image,
+// preview and histograms are the previous file's until the next decode. An
+// empty file or a failed open never reaches a decode, so without this a zoom
+// or channel change drew the previous file's image again.
+void CimgDecode::ClearDecodedImage()
+{
+  m_bImgDecoded = false;
+  m_bDibTempReady = false;
+  m_bPreviewIsJpeg = false;
+  m_bDibHistRgbReady = false;
+  m_bDibHistYReady = false;
+  m_bBrightValid = false;
+  m_bAvgYValid = false;
+}
+
 void CimgDecode::ResetState()
 {
   ResetDhtLookup();

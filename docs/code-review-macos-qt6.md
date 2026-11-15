@@ -322,7 +322,7 @@ character.
 
 ### Follow-up review (F1–F10)
 
-[docs/code-review-followup-2026-11-14.md](code-review-followup-2026-11-14.md) reviewed
+A follow-up review on 2026-11-14 (not in the repository) checked
 commit `fa81c75` and found ten more problems, all inherited from master. Each was
 reproduced here first, with the review's own numbers, before fixing.
 
@@ -377,6 +377,43 @@ also counts the pixels drawn in each histogram image, so F5 shows in normal buil
 **Not fixed:** the unfinished port features the follow-up review lists. Select All,
 Find, Export JPEG/TIFF, Detailed Decode and About do nothing; Batch Process isn't in any
 menu; PSD images aren't decoded (see section 8).
+
+**Second check of `cf42610`:** the same reviewer found F1, F3 and F5–F10 fixed, and two
+fixes incomplete. Both are now fixed:
+- **F2:** the limit stopped applying once the cursor reached the resource's end. A
+  descriptor that ended right after its name read its classID length from the data after
+  the resource, and then that many characters (a million, in the reviewer's file). Now,
+  while a resource is parsed, descriptors and lists read nothing past its end. A field
+  that doesn't fit (a string's length or text, the 4-character form, a descriptor or
+  list count, an item's type, or an integer or boolean value) is reported once with its
+  offset, and parsing of that resource stops at its end. The limit applies only inside
+  resources: the PSD layer records use the same string reader, with the old wrap check
+  only. Lists also printed their OSType key from the wrong variable, so it was always
+  empty.
+- **F4:** after an empty file or a failed open, the screen was cleared, but the decoder
+  still had the previous file's image, so a zoom or channel change drew it again. The
+  decoder now forgets its image, preview and histograms whenever the views are cleared.
+  The image source is always marked changed first, so the next file is decoded afresh.
+
+7 new cases (127 in all), 6 of which fail against `cf42610`; the seventh checks that
+the test driver closes the failed open's message box, which used to wait for a click.
+The driver also checks the preview again after `--cycle-channels`.
+
+**Checks:**
+- **All 127 pass** with and without ASan/UBSan.
+- **Cut-off sweep:** a 170-byte slices resource whose descriptor has an integer, a text
+  string, a list, an enum and a nested descriptor, with its length set to every value
+  from 0 to 170. Before, 152 of the 171 files read past the resource. Now no descriptor
+  does: 154 report the overrun and stop, and 8 cut between items just end the
+  descriptor early, as before. The 7 cut inside the slice header's two 4-byte version
+  numbers still read those fixed fields past the end, which the existing "Parsing
+  exceeded expected length" error reports, as for other resource types. Under ASan/UBSan
+  the sweep gives no reports.
+- **Sanitizer corpus still clean:** the 3,273 files give no ASan or UBSan reports; the
+  same two 65535-pixel files are slow under the sanitizers.
+- **No change for valid files:** the 64 reports of the 32 valid files are the same as
+  for `cf42610`, as are the reports of the 639 corpus files that contain 8BIM resources
+  (none of which has a descriptor).
 
 **Still open:** Developer ID signing and notarization (M5); latent code; the unfinished
 port features above.
