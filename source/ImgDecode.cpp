@@ -63,6 +63,44 @@ static int16_t SaturateInt16(double fVal)
   return static_cast<int16_t>(fVal);
 }
 
+// Clear the min/max/average pixel statistics. Each minimum starts at the
+// largest value and each maximum at the smallest, so the first pixel sets
+// both. (They started at 0: a white image showed min=0, a black one max=0.)
+static void ResetHistoStats(PixelCcHisto &sHisto)
+{
+  memset(&sHisto, 0, sizeof(sHisto));
+
+  for(int32_t *pnMin : { &sHisto.nPreclipYMin, &sHisto.nPreclipCbMin, &sHisto.nPreclipCrMin,
+                         &sHisto.nClipYMin, &sHisto.nClipCbMin, &sHisto.nClipCrMin,
+                         &sHisto.nClipRMin, &sHisto.nClipGMin, &sHisto.nClipBMin,
+                         &sHisto.nPreclipRMin, &sHisto.nPreclipGMin, &sHisto.nPreclipBMin })
+  {
+    *pnMin = std::numeric_limits<int32_t>::max();
+  }
+
+  for(int32_t *pnMax : { &sHisto.nPreclipYMax, &sHisto.nPreclipCbMax, &sHisto.nPreclipCrMax,
+                         &sHisto.nClipYMax, &sHisto.nClipCbMax, &sHisto.nClipCrMax,
+                         &sHisto.nClipRMax, &sHisto.nClipGMax, &sHisto.nClipBMax,
+                         &sHisto.nPreclipRMax, &sHisto.nPreclipGMax, &sHisto.nPreclipBMax })
+  {
+    *pnMax = std::numeric_limits<int32_t>::min();
+  }
+}
+
+// One "component histo" line of the pixel statistics (zeros if no pixel
+// was counted, instead of the starting extremes and a NaN average)
+static QString HistoStatLine(const QString &strComp, int32_t nMin, int32_t nMax, int64_t nSum, uint64_t nCount)
+{
+  const bool bAny = (nCount != 0);
+  const double dAvg = bAny ? static_cast<double>(nSum) / static_cast<double>(nCount) : 0.0;
+
+  return QString("    %1 component histo: [min=%2 max=%3 avg=%4]")
+      .arg(strComp, -2)
+      .arg(bAny ? nMin : 0, 5)
+      .arg(bAny ? nMax : 0, 5)
+      .arg(dAvg, 7, 'f', 1);
+}
+
 // Constructor for the Image Decoder
 // - This constructor is called only once by Document class
 CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfig, QObject *_parent) : QObject(_parent), m_pLog(pLog), m_pWBuf(pWBuf),
@@ -111,7 +149,7 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
   m_nDetailVlcY = 0;
   m_nDetailVlcLen = 1;
 
-  m_sHisto.nClipYMin = 0;
+  ResetHistoStats(m_sHisto);
 
   connect(this, SIGNAL(updateImage()), _parent, SLOT(updateImage()));
 
@@ -3813,7 +3851,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   if(bDisplay)
   {
     memset(&m_sStatClip, 0, sizeof(m_sStatClip));
-    memset(&m_sHisto, 0, sizeof(m_sHisto));
+    ResetHistoStats(m_sHisto);
 
     // FIXME: Histo should now be done after color convert
     memset(&m_anCcHisto_r, 0, sizeof(m_anCcHisto_r));
@@ -4595,58 +4633,31 @@ void CimgDecode::ReportColorStats()
   {
     strTmp = QString("  YCC histogram in DC (DCT sums : pre-ranged:");
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    Y  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nPreclipYMin, 5)
-        .arg(m_sHisto.nPreclipYMax, 5)
-        .arg(static_cast<double>(m_sHisto.nPreclipYSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("Y", m_sHisto.nPreclipYMin, m_sHisto.nPreclipYMax, m_sHisto.nPreclipYSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    Cb component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nPreclipCbMin, 5)
-        .arg(m_sHisto.nPreclipCbMax, 5)
-        .arg(static_cast<double>(m_sHisto.nPreclipCbSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("Cb", m_sHisto.nPreclipCbMin, m_sHisto.nPreclipCbMax, m_sHisto.nPreclipCbSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    Cr component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nPreclipCrMin, 5)
-        .arg(m_sHisto.nPreclipCrMax, 5)
-        .arg(static_cast<double>(m_sHisto.nPreclipCrSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("Cr", m_sHisto.nPreclipCrMin, m_sHisto.nPreclipCrMax, m_sHisto.nPreclipCrSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
     m_pLog->AddLine("");
 
     strTmp = QString("  YCC histogram in DC:");
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    Y  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nClipYMin, 5)
-        .arg(m_sHisto.nClipYMax, 5)
-        .arg(static_cast<double>(m_sHisto.nClipYSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("Y", m_sHisto.nClipYMin, m_sHisto.nClipYMax, m_sHisto.nClipYSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    Cb component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nClipCbMin, 5)
-        .arg(m_sHisto.nClipCbMax, 5)
-        .arg(static_cast<double>(m_sHisto.nClipCbSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("Cb", m_sHisto.nClipCbMin, m_sHisto.nClipCbMax, m_sHisto.nClipCbSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    Cr component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nClipCrMin, 5)
-        .arg(m_sHisto.nClipCrMax, 5)
-        .arg(static_cast<double>(m_sHisto.nClipCrSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("Cr", m_sHisto.nClipCrMin, m_sHisto.nClipCrMax, m_sHisto.nClipCrSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
     m_pLog->AddLine("");
 
     strTmp = QString("  RGB histogram in DC (before clip):");
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    R  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nPreclipRMin, 5)
-        .arg(m_sHisto.nPreclipRMax, 5)
-        .arg(static_cast<double>(m_sHisto.nPreclipRSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("R", m_sHisto.nPreclipRMin, m_sHisto.nPreclipRMax, m_sHisto.nPreclipRSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    G  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nPreclipGMin, 5)
-        .arg(m_sHisto.nPreclipGMax, 5)
-        .arg(static_cast<double>(m_sHisto.nPreclipGSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("G", m_sHisto.nPreclipGMin, m_sHisto.nPreclipGMax, m_sHisto.nPreclipGSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    B  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nPreclipBMin, 5)
-        .arg(m_sHisto.nPreclipBMax, 5)
-        .arg(static_cast<double>(m_sHisto.nPreclipBSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("B", m_sHisto.nPreclipBMin, m_sHisto.nPreclipBMax, m_sHisto.nPreclipBSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
     m_pLog->AddLine("");
   }
@@ -4721,20 +4732,11 @@ void CimgDecode::DrawHistogram(bool bQuiet, bool bDumpHistoY)
   {
     strTmp = QString("  RGB histogram in DC (after clip):");
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    R  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nClipRMin, 5)
-        .arg(m_sHisto.nClipRMax, 5)
-        .arg(static_cast<double>(m_sHisto.nClipRSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("R", m_sHisto.nClipRMin, m_sHisto.nClipRMax, m_sHisto.nClipRSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    G  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nClipGMin, 5)
-        .arg(m_sHisto.nClipGMax, 5)
-        .arg(static_cast<double>(m_sHisto.nClipGSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("G", m_sHisto.nClipGMin, m_sHisto.nClipGMax, m_sHisto.nClipGSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
-    strTmp = QString("    B  component histo: [min=%1 max=%2 avg=%3]")
-        .arg(m_sHisto.nClipBMin, 5)
-        .arg(m_sHisto.nClipBMax, 5)
-        .arg(static_cast<double>(m_sHisto.nClipBSum) / static_cast<double>(m_sHisto.nCount), 7, 'f', 1);
+    strTmp = HistoStatLine("B", m_sHisto.nClipBMin, m_sHisto.nClipBMax, m_sHisto.nClipBSum, m_sHisto.nCount);
     m_pLog->AddLine(strTmp);
     m_pLog->AddLine("");
   }

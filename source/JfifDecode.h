@@ -241,8 +241,8 @@ private:
   void GenLookupHuffMask();
 
   // Field parsing
-  bool DecodeValRational(uint32_t nPos, double &nVal);
-  QString DecodeValFraction(uint32_t nPos);
+  bool DecodeValRational(uint32_t nPos, double &nVal, bool bSigned);
+  QString DecodeValFraction(uint32_t nPos, bool bSigned);
   bool DecodeValGPS(uint32_t nPos, QString & strCoord);
   bool PrintValGPS(uint32_t nCount, double fCoord1, double fCoord2, double fCoord3, QString & strCoord);
   QString DecodeIccDateTime(uint32_t anVal[3]);

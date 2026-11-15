@@ -310,6 +310,10 @@ def rationals(bo, *v):
     return (5, len(v), b"".join(struct.pack(bo + "II", n, d) for n, d in v))
 
 
+def srationals(bo, *v):
+    return (10, len(v), b"".join(struct.pack(bo + "ii", n, d) for n, d in v))
+
+
 def entry(tag, value):
     return (tag,) + value
 
@@ -343,11 +347,12 @@ for cid, finding, pattern in (
         ("XP_unicode_tag", "XP", "Hello XP comment")):
     case(cid, finding, "decode", name, "--unknown-exif", expect=pattern)
 
-# C7: a GPS degree of 0xFFFFFFFF/1 is read as -1 and was converted to an
-# unsigned int (undefined; 0 on arm64, 4294967295 on x86)
+# C7: a negative GPS degree was converted to an unsigned int (undefined; 0 on
+# arm64, 4294967295 on x86). GPSLatitude is RATIONAL, so declare it SRATIONAL:
+# since R21 a RATIONAL can't be negative.
 ifd0 = tiff_ifd(bo, 8, [entry(0x8825, longs(bo, GPS))])
 gps = tiff_ifd(bo, GPS, [entry(0x0001, ascii_("N")),
-                         entry(0x0002, rationals(bo, (0xFFFFFFFF, 1), (30, 1), (0, 1)))])
+                         entry(0x0002, srationals(bo, (-1, 1), (30, 1), (0, 1)))])
 case("C7_gps_negative_degree", "C7", "decode",
      write("c7_gps_negative.jpg", insert_after_app0(c444, app1_exif(tiff(bo, {8: ifd0, GPS: gps})))),
      expect="GPSLatitude +\\] = -1 deg 30' 0\\.000\"")
@@ -638,6 +643,38 @@ fpxr = b"FPXR\x00" + bytes([0, 1]) + struct.pack(">H", 1) + struct.pack(">I", 0x
     + "Contents".encode("utf-16-le") + b"\x00\x00"
 case("R18_flashpix_contents", "R18", "decode", write("r18_fpxr.jpg", insert_after_app0(c444, seg(0xE2, fpxr))),
      expect="Entity Size = 2147483664$")
+
+# R20: histogram minimums and maximums started at 0, so a white image showed
+# min=0 and a black one max=0
+case("R20_histo_min_white", "R20", "decode", "c4_white.jpg", "--ac --histo",
+     expect="Y  component histo: \\[min= 1016 max= 1016 avg= 1016\\.0\\]")
+case("R20_histo_max_black", "R20", "decode", "ok_black.jpg", "--ac --histo",
+     expect="Y  component histo: \\[min=-1024 max=-1024 avg=-1024\\.0\\]")
+
+# R21: RATIONAL parts are unsigned (TIFF 6.0, EXIF), but were read as signed
+bo = "<"
+ifd0 = tiff_ifd(bo, 8, [entry(0x011A, rationals(bo, (3000000000, 1))), entry(0x8825, longs(bo, GPS))])
+gps = tiff_ifd(bo, GPS, [entry(0x0001, ascii_("N")),
+                         entry(0x0002, rationals(bo, (0xFFFFFFFF, 1), (30, 1), (0, 1)))])
+name = write("r21_rational_unsigned.jpg", insert_after_app0(c444, app1_exif(tiff(bo, {8: ifd0, GPS: gps}))))
+case("R21_rational_unsigned", "R21", "decode", name, expect="XResolution +\\] = 3000000000/1")
+case("R21_rational_unsigned_gps", "R21", "decode", name, expect="GPSLatitude +\\] = 4294967295 deg 30' 0\\.000\"")
+
+
+# R22: UserComment in Unicode (UCS-2, in the EXIF byte order) was read one byte
+# at a time and stopped at the first zero byte
+def user_comment_file(bo, text):
+    sub_off = 0x40
+    comment = b"UNICODE\x00" + text.encode("utf-16-le" if bo == "<" else "utf-16-be")
+    ifd0 = tiff_ifd(bo, 8, [entry(0x8769, longs(bo, sub_off))])
+    sub = tiff_ifd(bo, sub_off, [(0x9286, 7, len(comment), comment)])
+    return insert_after_app0(c444, app1_exif(tiff(bo, {8: ifd0, sub_off: sub})))
+
+
+case("R22_unicode_comment_le", "R22", "decode", write("r22_comment_le.jpg", user_comment_file("<", "Hello World")),
+     expect="UserComment +\\] = \"Hello World\"")
+case("R22_unicode_comment_be", "R22", "decode", write("r22_comment_be.jpg", user_comment_file(">", "Hello World")),
+     expect="UserComment +\\] = \"Hello World\"")
 
 # --- S: settings and GUI behaviour -------------------------------------------
 # "settings" mode needs no file ("-"); see tests/harness/main.cpp

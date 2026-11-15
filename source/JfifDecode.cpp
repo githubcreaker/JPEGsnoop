@@ -2307,31 +2307,36 @@ bool CjfifDecode::DecodeMakerSubType()
 // INPUT:
 // - pos                Buffer position
 // - val                Floating point value
+// - bSigned            SRATIONAL (two signed 32-bit parts) rather than
+//                      RATIONAL (two unsigned parts). RATIONAL used to be read
+//                      as signed too, so 3000000000/1 came out negative.
 //
 // RETURN:
 // - Was the conversion successful?
 //
-bool CjfifDecode::DecodeValRational(uint32_t nPos, double &nVal)
+bool CjfifDecode::DecodeValRational(uint32_t nPos, double &nVal, bool bSigned)
 {
-  int nValNumer;
-
-  int nValDenom;
+  const uint32_t nValNumer = ByteSwap4(Buf(nPos + 0), Buf(nPos + 1), Buf(nPos + 2), Buf(nPos + 3));
+  const uint32_t nValDenom = ByteSwap4(Buf(nPos + 4), Buf(nPos + 5), Buf(nPos + 6), Buf(nPos + 7));
 
   nVal = 0;
-
-  nValNumer = ByteSwap4(Buf(nPos + 0), Buf(nPos + 1), Buf(nPos + 2), Buf(nPos + 3));
-  nValDenom = ByteSwap4(Buf(nPos + 4), Buf(nPos + 5), Buf(nPos + 6), Buf(nPos + 7));
 
   if(nValDenom == 0)
   {
     // Divide by zero!
     return false;
   }
+
+  if(bSigned)
+  {
+    nVal = static_cast<double>(static_cast<int32_t>(nValNumer)) / static_cast<double>(static_cast<int32_t>(nValDenom));
+  }
   else
   {
     nVal = static_cast<double>(nValNumer) / static_cast<double>(nValDenom);
-    return true;
   }
+
+  return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -2340,20 +2345,22 @@ bool CjfifDecode::DecodeValRational(uint32_t nPos, double &nVal)
 //
 // INPUT:
 // - pos                Buffer position
+// - bSigned            SRATIONAL rather than RATIONAL (see DecodeValRational)
 //
 // RETURN:
 // - Formatted string
 //
-QString CjfifDecode::DecodeValFraction(uint32_t nPos)
+QString CjfifDecode::DecodeValFraction(uint32_t nPos, bool bSigned)
 {
-  QString strTmp;
+  const uint32_t nValNumer = ReadSwap4(nPos + 0);
+  const uint32_t nValDenom = ReadSwap4(nPos + 4);
 
-  int nValNumer = ReadSwap4(nPos + 0);
+  if(bSigned)
+  {
+    return QString("%1/%2").arg(static_cast<int32_t>(nValNumer)).arg(static_cast<int32_t>(nValDenom));
+  }
 
-  int nValDenom = ReadSwap4(nPos + 4);
-
-  strTmp = QString("%1/%2").arg(nValNumer).arg(nValDenom);
-  return strTmp;
+  return QString("%1/%2").arg(nValNumer).arg(nValDenom);
 }
 
 //-----------------------------------------------------------------------------
@@ -2384,10 +2391,10 @@ bool CjfifDecode::PrintValGPS(uint32_t nCount, double fCoord1, double fCoord2, d
   // TODO: Extend to support 1 & 2 coordinate GPS entries
   if(nCount == 3)
   {
-    // Whole degrees and minutes, truncated toward zero. They are signed:
-    // DecodeValRational() reads the 32-bit parts as signed, so a corrupt
-    // value can be negative, and converting a negative double to an unsigned
-    // type is undefined. The values come from 32-bit fractions, so they fit.
+    // Whole degrees and minutes, truncated toward zero. They are signed: a
+    // file can store them as SRATIONAL, so they can be negative, and
+    // converting a negative double to an unsigned type is undefined. The
+    // values come from 32-bit fractions, so they fit.
     nCoordDeg = static_cast<int64_t>(fCoord1);
 
     nCoordMin = static_cast<int64_t>(fCoord2);
@@ -2436,19 +2443,19 @@ bool CjfifDecode::DecodeValGPS(uint32_t nPos, QString & strCoord)
   bRet = true;
   if(bRet)
   {
-    bRet = DecodeValRational(nPos, fCoord1);
+    bRet = DecodeValRational(nPos, fCoord1, false);
     nPos += 8;
   }
 
   if(bRet)
   {
-    bRet = DecodeValRational(nPos, fCoord2);
+    bRet = DecodeValRational(nPos, fCoord2, false);
     nPos += 8;
   }
 
   if(bRet)
   {
-    bRet = DecodeValRational(nPos, fCoord3);
+    bRet = DecodeValRational(nPos, fCoord3, false);
     nPos += 8;
   }
 
@@ -3210,8 +3217,8 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
             strValOut += ", ";
           }
 
-          strValTmp = DecodeValFraction(nPosExifStart + nIfdOffset + (nInd * 8));
-          bRet = DecodeValRational(nPosExifStart + nIfdOffset + (nInd * 8), fValReal);
+          strValTmp = DecodeValFraction(nPosExifStart + nIfdOffset + (nInd * 8), false);
+          bRet = DecodeValRational(nPosExifStart + nIfdOffset + (nInd * 8), fValReal, false);
           afValues[nInd] = fValReal;
           strValOut += strValTmp;
         }
@@ -3354,8 +3361,8 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
             strValOut += ", ";
           }
 
-          strValTmp = DecodeValFraction(nPosExifStart + nIfdOffset + (nInd * 8));
-          bRet = DecodeValRational(nPosExifStart + nIfdOffset + (nInd * 8), fValReal);
+          strValTmp = DecodeValFraction(nPosExifStart + nIfdOffset + (nInd * 8), true);
+          bRet = DecodeValRational(nPosExifStart + nIfdOffset + (nInd * 8), fValReal, true);
           afValues[nInd] = fValReal;
           strValOut += strValTmp;
         }
@@ -3723,32 +3730,67 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
     }
     else if(strIfdTag == "UserComment")
     {
-      // Character code
-      uint32_t anCharCode[8];
+      // An 8-byte character code ("ASCII", "JIS", "UNICODE", or zeros for
+      // undefined), then the text. (With a count below 8, nIfdNumComps - 8
+      // wrapped and the text loop read whatever followed.)
+      const uint32_t nPosText = nPosExifStart + nIfdOffset + 8;
+      const uint32_t nTextLen = (nIfdNumComps > 8) ? (nIfdNumComps - 8) : 0;
+
+      QByteArray abCharCode;
 
       for(uint32_t vInd = 0; vInd < 8; vInd++)
       {
-        anCharCode[vInd] = Buf(nPosExifStart + nIfdOffset + 0 + vInd);
+        abCharCode.append(static_cast<char>(Buf(nPosExifStart + nIfdOffset + vInd)));
       }
 
-      // Actual string
       strValOut = "\"";
-      bool bDone = false;
 
-      uint8_t cTmp;
-
-      // The text follows the 8-byte character code. (With a count below 8,
-      // nIfdNumComps - 8 wrapped and the loop read whatever followed.)
-      for(uint32_t vInd = 0; (vInd + 8 < nIfdNumComps) && (!bDone); vInd++)
+      if(abCharCode == QByteArray("UNICODE\0", 8))
       {
-        cTmp = Buf(nPosExifStart + nIfdOffset + 8 + vInd);
+        // UCS-2 in the EXIF byte order, unless a byte order mark says
+        // otherwise. (This was read one byte at a time and stopped at the
+        // first zero byte, so it showed at most one character.)
+        bool bBigEndian = (m_nImgExifEndian == 1);
 
-        if(cTmp == 0)
+        uint32_t vInd = 0;
+
+        if(nTextLen >= 2)
         {
-          bDone = true;
+          const uint32_t nBom = (static_cast<uint32_t>(Buf(nPosText)) << 8) + Buf(nPosText + 1);
+
+          if((nBom == 0xFEFF) || (nBom == 0xFFFE))
+          {
+            bBigEndian = (nBom == 0xFEFF);
+            vInd = 2;
+          }
         }
-        else
+
+        for(; vInd + 1 < nTextLen; vInd += 2)
         {
+          const uint32_t nByte0 = Buf(nPosText + vInd);
+          const uint32_t nByte1 = Buf(nPosText + vInd + 1);
+          const uint32_t nUnit = bBigEndian ? ((nByte0 << 8) + nByte1) : ((nByte1 << 8) + nByte0);
+
+          if(nUnit == 0)
+          {
+            break;
+          }
+
+          strValOut += QChar(static_cast<char16_t>(nUnit));
+        }
+      }
+      else
+      {
+        // Single-byte text
+        for(uint32_t vInd = 0; vInd < nTextLen; vInd++)
+        {
+          const uint8_t cTmp = Buf(nPosText + vInd);
+
+          if(cTmp == 0)
+          {
+            break;
+          }
+
           strValOut += QChar(cTmp);
         }
       }

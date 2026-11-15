@@ -208,11 +208,11 @@ luminance found on the way. All are inherited from master.
   (undefined). It is now printed signed: `-1 deg 30' 0.000"` where the arm64 build printed
   `0 deg`.
 
-**Found, not fixed** (inherited, report output):
+**Found, fixed later** (inherited, report output; see R20–R22 below):
 - The histogram minimums and maximums start at 0 instead of at the first value, so a
-  minimum never shows above 0 or a maximum below 0. A white image shows `min=0`.
+  minimum never shows above 0 or a maximum below 0. A white image shows `min=0` (R20).
 - EXIF `RATIONAL` values are read as signed, but the EXIF standard makes them unsigned,
-  so a part at 2^31 or above prints negative (the GPS case above).
+  so a part at 2^31 or above prints negative (the GPS case above; R21).
 
 5 new cases cover these (79 in all).
 
@@ -277,9 +277,9 @@ luminance found on the way. All are inherited from master.
 - **Also:** `BufX`, `ReadBe4` and the buffer search shifted bytes of 0x80 and above into the
   sign bit of an `int` (undefined in C++17); they now shift unsigned values.
 
-**Found, not fixed** (inherited, from reading the code): a UserComment with the "UNICODE"
-character code is read one byte at a time and stops at the first zero byte, so it shows at
-most one character.
+**Found, fixed later** (inherited; R22 below): a UserComment with the "UNICODE" character
+code is read one byte at a time and stops at the first zero byte, so it shows at most one
+character.
 
 19 new cases cover these (98 in all). The test driver can print decoded pixel colours
 (`--pixels`), and `gen_cases.py` has a small encoder for files Pillow can't write.
@@ -295,8 +295,32 @@ most one character.
   clipping notes, and the ICC header lines. The notes themselves are the same. Pillow reads
   the same ICC values from the two corpus seeds with profiles.
 
-**Still open:** the findings not fixed above and under C7; Developer ID signing and
-notarization (M5); latent code.
+### R20–R22
+
+**Fixed:** R20–R22, the three report findings left from the C7 and R18 work (all inherited).
+- **R20 Histogram minimums and maximums:** each minimum now starts at the largest value
+  and each maximum at the smallest, so the first pixel sets both. A white image shows
+  pre-ranged Y `min= 1016 max= 1016` (was `min=0`), a black one `min=-1024 max=-1024`
+  (was `max=0`). If no pixel was counted, the line shows zeros rather than the starting
+  extremes and a NaN average.
+- **R21 RATIONAL:** RATIONAL parts are read as unsigned and SRATIONAL parts as signed, both
+  for the value and for the fraction shown. XResolution 3000000000/1 now shows as that,
+  and a GPS degree of 0xFFFFFFFF/1 as 4294967295. A GPS value stored as SRATIONAL can
+  still be negative; the C7 case now uses one, so that path stays tested.
+- **R22 Unicode UserComment:** text with the "UNICODE" character code is read as 16-bit
+  units in the EXIF byte order (a byte order mark, if present, decides instead), up to the
+  first zero unit. "Hello World" now shows in full in both byte orders.
+
+6 new cases cover these (104 in all).
+
+**Checks:**
+- **Tests catch the bugs:** run against the previous commit, all 6 new cases fail.
+- **All 104 pass** with and without ASan/UBSan.
+- **Expected changes only:** of the 64 reports of 32 valid files, only the 24 with
+  histograms change, and only in their min/max values; the averages are the same. None of
+  these files has a large RATIONAL or a Unicode comment.
+
+**Still open:** Developer ID signing and notarization (M5); latent code.
 
 ## How this was reviewed
 
@@ -476,6 +500,22 @@ inside the first-10 guard, include padding pixels, and accumulate across preview
 `JfifDecode.cpp:9548` (`"[%.2f]"`), `9707` (`"[1s]"`), `6491` (DAC index off by one),
 `7971-7985` (thumbnail hash lowercase), `3935-3944` (U+FFFD where an en dash was);
 `ImgDecode.cpp:3650` (`"%%"`); `DecodePs.cpp:862` (stray `s`).
+
+Found while fixing C7 and R18 (all inherited; line numbers as of commit `a624bd9`):
+
+**R20. Histogram minimums and maximums start at 0** — Inherited · reproduced
+`ImgDecode.cpp:3816` clears the statistics with `memset`, so a minimum never shows above 0
+and a maximum never below 0: a white image reports `min=0`, a black one `max=0`.
+
+**R21. EXIF RATIONAL values are read as signed** — Inherited · reproduced
+`JfifDecode.cpp:2314`, `2347`: RATIONAL is two unsigned 32-bit parts (SRATIONAL is the
+signed one), but both are read as `int`. XResolution 3000000000/1 prints as
+-1294967296/1, and a GPS degree of 0xFFFFFFFF/1 as -1.
+
+**R22. Unicode UserComment shows at most one character** — Inherited · reproduced
+`JfifDecode.cpp:3731`: the text after the "UNICODE" character code is read one byte at a
+time and stops at the first zero byte: "Hello World" shows as "H" in Intel-order EXIF and
+as nothing in Motorola order.
 
 ## 4. GUI and settings
 
