@@ -19,7 +19,13 @@
 // ---------------------------------------
 // Global functions
 // ---------------------------------------
+#include <QFile>
+#include <QFileInfo>
 #include <QString>
+
+#ifdef Q_OS_UNIX
+#include <sys/stat.h>
+#endif
 
 QString Dec2Bin(uint32_t nVal, uint32_t nLen, bool bSpace)
 {
@@ -333,3 +339,34 @@ extern const uint32_t glb_anStdQuantChr[64] = {
   99, 99, 99, 99, 99, 99, 99, 99,
   99, 99, 99, 99, 99, 99, 99, 99
 };
+
+// Are two paths the same existing file? Compares the files, not the names, so
+// it also sees through symbolic and hard links and, on the case-insensitive
+// disks macOS uses by default, a name typed in another case. (The exports
+// compared the names, so saving over "Photo.JPG" as "photo.jpg" truncated the
+// file they were reading.)
+bool SameFile(const QString &strPath1, const QString &strPath2)
+{
+#ifdef Q_OS_UNIX
+  struct stat sStat1;
+  struct stat sStat2;
+
+  if((stat(QFile::encodeName(strPath1).constData(), &sStat1) != 0) ||
+     (stat(QFile::encodeName(strPath2).constData(), &sStat2) != 0))
+  {
+    return false;
+  }
+
+  return (sStat1.st_dev == sStat2.st_dev) && (sStat1.st_ino == sStat2.st_ino);
+#else
+  const QFileInfo fi1(strPath1);
+  const QFileInfo fi2(strPath2);
+
+  if(!fi1.exists() || !fi2.exists())
+  {
+    return false;
+  }
+
+  return fi1.canonicalFilePath().compare(fi2.canonicalFilePath(), Qt::CaseInsensitive) == 0;
+#endif
+}

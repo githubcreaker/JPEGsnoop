@@ -1,12 +1,13 @@
 // Headless test driver for JPEGsnoopQt.
 //
-// decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y[/X,Y...]]
+// decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y[/X,Y...]] [--start N]
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
 //     histograms, and a line counting the pixels drawn in each histogram
 //     image; --unknown-exif: also report unknown EXIF tags; --pixels
-//     prints the decoded preview's colour at each point.
+//     prints the decoded preview's colour at each point; --start decodes
+//     from file offset N.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
 //     [--cycle-channels] [--repeat N] [--max-growth-mb N] [--zoom PCT]
@@ -39,11 +40,40 @@
 //     Exercise settings load/store, option toggles and the Configuration
 //     dialog against a throwaway settings store; prints "harness:" lines.
 //
+// export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
+//     [--dht-avi] [--out PATH] [--out-same] [--out-same-case]
+//     Open the file in the real MainWindow and run Tools > Export JPEG with
+//     these settings (--all: Extract All), to a temporary out.jpg unless
+//     --out says where. --out-same / --out-same-case export over the file
+//     itself, by the same name or by the name in another case. Prints the
+//     size and MD5 of each file written, as "harness: exported N md5s=...",
+//     whether the source is unchanged, and the report from the export on.
+//
+// export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]
+//     Open the file in the real MainWindow and run Tools > Export TIFF, then
+//     read the TIFF back and check its tags and every sample against a
+//     separate decode of the file ("harness: tiff ... check=ok").
+//     --out-same exports over the file itself.
+//
+// gui ... [--export-menus | --export-menus-cancel | --export-menus-all]
+//     [--old-numbered] [--replace]
+//     After each file, choose Tools > Export JPEG and Tools > Export TIFF,
+//     answering their dialogs (OK, or Cancel for the settings and format
+//     dialogs), and print each dialog's title and what was written.
+//     --export-menus-all ticks Extract All and prints the numbered files;
+//     --old-numbered leaves files named as the first of them and as the
+//     name chosen beforehand;
+//     --replace answers Replace when asked (otherwise Cancel).
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QCheckBox>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFileDialog>
 #include <QCoreApplication>
 #include <QDate>
 #include <QDialogButtonBox>
@@ -79,6 +109,8 @@
 
 #include "DbSigs.h"
 #include "DocLog.h"
+#include "FileTiff.h"
+#include "exportdialogs.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
@@ -91,17 +123,22 @@ static void usage()
 {
   fprintf(stderr,
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
-          "                         [--pixels X,Y[/X,Y...]]\n"
+          "                         [--pixels X,Y[/X,Y...]] [--start N]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
           "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
           "                         [--zoom PCT] [--max-zoom-mb N] [--check-preview] [--check-histo]\n"
           "                         [--dark] [--check-theme]\n"
+          "                         [--export-menus | --export-menus-cancel | --export-menus-all]\n"
+          "                         [--old-numbered] [--replace]\n"
           "       jpegsnoop-harness settings\n"
+          "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
+          "                         [--dht-avi] [--out PATH] [--out-same] [--out-same-case]\n"
+          "       jpegsnoop-harness export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]\n"
           "       any mode: [--scale F]\n");
 }
 
 static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strPixels,
-                     const QString &strDbDir)
+                     uint32_t nStart, const QString &strDbDir)
 {
   QPlainTextEdit edit;
   CDocLog log(&edit);
@@ -111,6 +148,7 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
   cfg.setDbPath(strDbDir + "/");
   cfg.setInteractive(false);            // no modal error dialogs
   cfg.setAutoReprocess(true);           // option slots would otherwise show a coach note
+  cfg.setStartPos(nStart);
   if(bAc)
     cfg.onScansegmentFullidct();
   if(bHisto)
@@ -603,6 +641,9 @@ struct GuiOptions
   bool bCheckHisto = false;       // --check-histo
   bool bDark = false;             // --dark
   bool bCheckTheme = false;       // --check-theme
+  int nExportMenus = 0;           // --export-menus (1), --export-menus-cancel (2) or --export-menus-all (3)
+  bool bOldNumbered = false;      // --old-numbered
+  bool bReplace = false;          // --replace
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -640,21 +681,168 @@ static void cycleChannels(MainWindow &window)
   }
 }
 
-static int runGui(const QStringList &files, const GuiOptions &opts, const QString &strSettingsDir)
+// Settings for a MainWindow: a fresh install (so "Decode Image" etc. take
+// their defaults), minus the coach tips, which are modal and can't be clicked
+// away here
+static void useGuiSettings(const QString &strSettingsDir, bool bHisto)
 {
-  // Otherwise a fresh install (so "Decode Image" etc. take their defaults),
-  // minus the coach tips, which are modal and can't be clicked away here
   useTestSettings(strSettingsDir);
+  QSettings settings;
+  settings.setValue("Coach\\ReprocessAuto", false);
+  settings.setValue("Coach\\DecodeIdct", false);
+  if(bHisto)
   {
-    QSettings settings;
-    settings.setValue("Coach\\ReprocessAuto", false);
-    settings.setValue("Coach\\DecodeIdct", false);
-    if(opts.bHisto)
+    settings.setValue("General\\DecScanHisto", true);
+    settings.setValue("General\\DumpHistoY", true);
+  }
+}
+
+// A message box (such as "Couldn't open file") waits for a click that never
+// comes here: print its text and close it. A question is cancelled, or with
+// bReplace, a "Replace" button is clicked.
+static void closeMessageBoxes(QTimer &timer, QTextStream &out, bool bReplace = false)
+{
+  QObject::connect(&timer, &QTimer::timeout, [&out, bReplace]() {
+    if(QMessageBox *pBox = qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
     {
-      settings.setValue("General\\DecScanHisto", true);
-      settings.setValue("General\\DumpHistoY", true);
+      out << "harness: message box: " << pBox->text();
+      if(!pBox->informativeText().isEmpty())
+        out << " " << pBox->informativeText();
+      const QList<QAbstractButton *> buttons = pBox->buttons();
+      for(QAbstractButton *pButton : buttons)
+      {
+        if(bReplace && (pButton->text() == "Replace"))
+        {
+          out << " [Replace]\n";
+          pButton->click();
+          return;
+        }
+      }
+      out << "\n";
+      pBox->done(QMessageBox::Ok);
+    }
+  });
+  timer.start(100);
+}
+
+static QString fileMd5(const QString &strPath)
+{
+  QFile file(strPath);
+  if(!file.open(QIODevice::ReadOnly))
+    return QStringLiteral("-");
+  QCryptographicHash hash(QCryptographicHash::Md5);
+  hash.addData(&file);
+  return QString::fromLatin1(hash.result().toHex());
+}
+
+// The report from the last "*** Exporting" header on
+static QString exportReport(MainWindow &window)
+{
+  const QString strLog = window.textEdit->toPlainText();
+  const qsizetype nInd = strLog.lastIndexOf("*** Exporting");
+  return (nInd < 0) ? QString("(no export in the report)") : strLog.mid(nInd);
+}
+
+static QAction *findAction(MainWindow &window, const QString &strText)
+{
+  const QList<QAction *> actions = window.findChildren<QAction *>();
+  for(QAction *pAction : actions)
+  {
+    if(pAction->text() == strText)
+      return pAction;
+  }
+  return nullptr;
+}
+
+// Tools > Export JPEG and Export TIFF as a user chooses them: answer each
+// dialog (OK, or with --export-menus-cancel, Cancel for the settings and
+// format dialogs, which come before and after the file dialog) and report
+// what was written to strBase.jpg and strBase.tif. With --export-menus-all,
+// tick Extract All, and report the numbered files strBase.000001.jpg, ...
+// (with --old-numbered, strBase.000001.jpg holds "old" beforehand).
+static void exportMenus(MainWindow &window, const GuiOptions &opts, const QString &strBase, QTextStream &out)
+{
+  const bool bCancel = (opts.nExportMenus == 2);
+  const bool bAll = (opts.nExportMenus == 3);
+  const QString strOld = strBase + ".000001.jpg";
+  if(opts.bOldNumbered)
+  {
+    // And the name chosen, which Extract All doesn't write, so shouldn't ask about
+    for(const QString &strPath : { strOld, strBase + ".jpg" })
+    {
+      QFile fileOld(strPath);
+      if(fileOld.open(QIODevice::WriteOnly))
+        fileOld.write("old");
     }
   }
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QWidget *pModal = QApplication::activeModalWidget();
+    if(QFileDialog *pFileDlg = qobject_cast<QFileDialog *>(pModal))
+    {
+      out << "harness: dialog: " << pFileDlg->windowTitle() << " default="
+          << QFileInfo(pFileDlg->selectedFiles().value(0)).fileName() << "\n";
+      // selectFile() leaves the name field alone while it has the focus
+      if(QLineEdit *pName = pFileDlg->findChild<QLineEdit *>("fileNameEdit"))
+        pName->setText(strBase + "." + pFileDlg->defaultSuffix());
+      static_cast<QDialog *>(pFileDlg)->accept();   // QFileDialog::accept() is protected
+    }
+    else if(ExportJpegDialog *pJpegDlg = qobject_cast<ExportJpegDialog *>(pModal))
+    {
+      const QLabel *pOffset = pJpegDlg->findChild<QLabel *>();
+      const QCheckBox *pDht = pJpegDlg->findChild<QCheckBox *>("cbDhtAvi");
+      out << "harness: dialog: " << pJpegDlg->windowTitle() << " (" << (pOffset ? pOffset->text() : QString("?"))
+          << ", MJPEG DHT " << ((pDht && pDht->isChecked()) ? "on" : "off") << ")\n";
+      if(QCheckBox *pAll = pJpegDlg->findChild<QCheckBox *>("cbExtractAll"))
+        pAll->setChecked(bAll);
+      bCancel ? pJpegDlg->reject() : pJpegDlg->accept();
+    }
+    else if(ExportTiffDialog *pTiffDlg = qobject_cast<ExportTiffDialog *>(pModal))
+    {
+      const QWidget *pYcc = pTiffDlg->findChild<QWidget *>("rbYcc8");
+      out << "harness: dialog: " << pTiffDlg->windowTitle() << " (YCC "
+          << ((pYcc && pYcc->isEnabled()) ? "available" : "unavailable") << ")\n";
+      bCancel ? pTiffDlg->reject() : pTiffDlg->accept();
+    }
+  });
+  timer.start(50);
+
+  for(const char *pszAction : { "Export JPEG...", "Export TIFF..." })
+  {
+    QAction *pAction = findAction(window, QLatin1String(pszAction));
+    if(!pAction || !pAction->isEnabled())
+    {
+      out << "harness: menu " << pszAction << " unavailable\n";
+      continue;
+    }
+    const bool bJpeg = (QLatin1String(pszAction) == QLatin1String("Export JPEG..."));
+    const QString strPath = strBase + (bJpeg ? ".jpg" : ".tif");
+    pAction->trigger();
+    QCoreApplication::processEvents();
+    if(bJpeg && bAll)
+    {
+      const QFileInfo fiBase(strBase + ".jpg");
+      const QDir dir(fiBase.path());
+      const QStringList astrNames =
+        dir.entryList(QStringList() << fiBase.completeBaseName() + ".*.jpg", QDir::Files, QDir::Name);
+      QStringList astrMd5;
+      for(const QString &strName : astrNames)
+        astrMd5 << fileMd5(dir.filePath(strName));
+      QFile fileOld(strOld);
+      const bool bOldKept = fileOld.open(QIODevice::ReadOnly) && (fileOld.readAll() == "old");
+      out << "harness: menu " << pszAction << " all files=" << astrNames.size() << " md5s=" << astrMd5.join(',')
+          << " old kept=" << (bOldKept ? 1 : 0) << "\n";
+      continue;
+    }
+    out << "harness: menu " << pszAction << " wrote=" << (QFileInfo::exists(strPath) ? 1 : 0)
+        << " size=" << QFileInfo(strPath).size() << "\n";
+  }
+}
+
+static int runGui(const QStringList &files, const GuiOptions &opts, const QString &strSettingsDir)
+{
+  useGuiSettings(strSettingsDir, opts.bHisto);
 
   if(opts.bDark)
     QApplication::setPalette(darkPalette());
@@ -665,17 +853,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 
   QTextStream out(stdout);
 
-  // A message box (such as "Couldn't open file") waits for a click that
-  // never comes here: print its text and close it
   QTimer timerMsgBox;
-  QObject::connect(&timerMsgBox, &QTimer::timeout, [&out]() {
-    if(QMessageBox *pBox = qobject_cast<QMessageBox *>(QApplication::activeModalWidget()))
-    {
-      out << "harness: message box: " << pBox->text() << "\n";
-      pBox->done(QMessageBox::Ok);
-    }
-  });
-  timerMsgBox.start(100);
+  closeMessageBoxes(timerMsgBox, out, opts.bReplace);
 
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
@@ -689,8 +868,10 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 
   for(int nRound = 0; nRound < opts.nRepeat; nRound++)
   {
+    int nFileInd = 0;
     for(const QString &strFile : files)
     {
+      nFileInd++;
       window.openFile(strFile);
       QCoreApplication::processEvents();
 
@@ -715,6 +896,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           checkHistograms(window, out);
         if(opts.bCheckTheme)
           checkTheme(window, out);
+        if(opts.nExportMenus != 0)
+          exportMenus(window, opts, strSettingsDir + "/menu-export-" + QString::number(nFileInd), out);
         out.flush();
       }
 
@@ -748,6 +931,292 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 #endif
   }
 
+  out << "harness: done\n";
+  return 0;
+}
+
+struct ExportOptions
+{
+  ExportJpegSettings sJpeg;       // --all, --force-soi, --force-eoi, --ignore-eoi, --dht-avi
+  QString strOut;                 // --out PATH
+  bool bOutSame = false;          // --out-same
+  bool bOutSameCase = false;      // --out-same-case
+};
+
+static int runExportJpeg(const QString &strFile, const ExportOptions &opts, const QString &strTmpDir)
+{
+  useGuiSettings(strTmpDir, false);
+
+  MainWindow window;
+  window.show();
+  QCoreApplication::processEvents();
+
+  QTextStream out(stdout);
+  QTimer timerMsgBox;
+  closeMessageBoxes(timerMsgBox, out);
+
+  const QString strSrcMd5 = fileMd5(strFile);
+  window.openFile(strFile);
+  QCoreApplication::processEvents();
+
+  QString strOut = opts.strOut;
+  if(opts.bOutSame)
+  {
+    strOut = strFile;
+  }
+  else if(opts.bOutSameCase)
+  {
+    const QFileInfo fiSrc(strFile);
+    QString strName = fiSrc.fileName();
+    for(QChar &ch : strName)
+      ch = ch.isUpper() ? ch.toLower() : ch.toUpper();
+    strOut = fiSrc.dir().filePath(strName);
+    if(!QFileInfo::exists(strOut))
+    {
+      out << "harness: case-sensitive disk, skipped\n";
+      return 0;
+    }
+  }
+  else if(strOut.isEmpty())
+  {
+    QDir().mkpath(strTmpDir + "/export");
+    strOut = strTmpDir + "/export/out.jpg";
+  }
+
+  const bool bOk = window.exportJpeg(strOut, opts.sJpeg);
+  QCoreApplication::processEvents();
+
+  // What was written: out.jpg, or with Extract All out.000001.jpg, ...
+  QStringList astrWritten;
+  const QFileInfo fiOut(strOut);
+  if(opts.sJpeg.bExtractAll)
+  {
+    const QDir dir(fiOut.path());
+    const QStringList astrNames =
+      dir.entryList(QStringList() << fiOut.completeBaseName() + ".*.jpg", QDir::Files, QDir::Name);
+    for(const QString &strName : astrNames)
+      astrWritten << dir.filePath(strName);
+  }
+  else if(fiOut.exists() && !opts.bOutSame && !opts.bOutSameCase)
+  {
+    astrWritten << strOut;
+  }
+
+  out << "harness: export ok=" << (bOk ? 1 : 0) << "\n";
+  QStringList astrMd5;
+  for(const QString &strPath : astrWritten)
+  {
+    astrMd5 << fileMd5(strPath);
+    out << "harness: wrote " << QFileInfo(strPath).fileName() << " size=" << QFileInfo(strPath).size()
+        << " md5=" << astrMd5.last() << "\n";
+  }
+  out << "harness: exported " << astrWritten.size() << " md5s=" << astrMd5.join(',') << "\n";
+  out << "harness: source unchanged=" << ((fileMd5(strFile) == strSrcMd5) ? 1 : 0) << "\n";
+  out << exportReport(window) << "\n";
+  out << "harness: done\n";
+  return 0;
+}
+
+// Read a TIFF that Export TIFF wrote and check its tags and every sample
+// against a separate decode of strSrc with the default settings (as the
+// MainWindow used). Returns the "harness: tiff" line.
+static QString checkTiff(const QString &strSrc, const QString &strTiff, FileTiff::teFormat eFormat,
+                         const QString &strDbDir)
+{
+  QFile fileTiff(strTiff);
+  if(!fileTiff.open(QIODevice::ReadOnly))
+    return "harness: tiff check=cannot read the file";
+  const QByteArray ab = fileTiff.readAll();
+  const qsizetype nSize = ab.size();
+
+  auto be16 = [&ab, nSize](quint64 nPos) -> quint32 {
+    return (nPos + 2 <= static_cast<quint64>(nSize))
+             ? (static_cast<quint32>(static_cast<uchar>(ab[static_cast<qsizetype>(nPos)])) << 8) |
+                 static_cast<uchar>(ab[static_cast<qsizetype>(nPos + 1)])
+             : 0xFFFFFFFFu;
+  };
+  auto be32 = [&be16](quint64 nPos) -> quint32 { return (be16(nPos) << 16) | (be16(nPos + 2) & 0xFFFF); };
+
+  if(!ab.startsWith(QByteArray("MM\0*", 4)) || (be32(4) != 8))
+    return "harness: tiff check=bad header";
+
+  // Tag -> values (a RATIONAL gives numerator, denominator)
+  QMap<quint32, QList<quint32>> mapTags;
+  QStringList errors;
+  const quint32 nEntries = be16(8);
+  quint32 nPrevTag = 0;
+  for(quint32 nInd = 0; nInd < nEntries; nInd++)
+  {
+    const quint64 nPos = 10 + 12ULL * nInd;
+    const quint32 nTag = be16(nPos);
+    const quint32 nType = be16(nPos + 2);
+    const quint32 nCount = be32(nPos + 4);
+    const quint32 nTypeSize = (nType == 3) ? 2 : (nType == 4) ? 4 : (nType == 5) ? 8 : 0;
+    if((nTypeSize == 0) || (nCount == 0) || (nCount > 64))
+    {
+      errors << QString("tag %1 has type %2 count %3").arg(nTag).arg(nType).arg(nCount);
+      continue;
+    }
+    if(nTag <= nPrevTag)
+      errors << QString("tag %1 out of order").arg(nTag);
+    nPrevTag = nTag;
+    const quint64 nValPos = (nTypeSize * nCount <= 4) ? nPos + 8 : be32(nPos + 8);
+    if(nValPos % 2)
+      errors << QString("tag %1 value at an odd offset").arg(nTag);
+    QList<quint32> anVals;
+    for(quint32 nVal = 0; nVal < nCount; nVal++)
+    {
+      if(nType == 3)
+        anVals << be16(nValPos + 2ULL * nVal);
+      else if(nType == 4)
+        anVals << be32(nValPos + 4ULL * nVal);
+      else
+        anVals << be32(nValPos + 8ULL * nVal) << be32(nValPos + 8ULL * nVal + 4);
+    }
+    mapTags[nTag] = anVals;
+  }
+  if(be32(10 + 12ULL * nEntries) != 0)
+    errors << "has a next directory";
+
+  // The separate decode
+  QPlainTextEdit edit;
+  CDocLog log(&edit);
+  log.Enable();
+  CSnoopConfig cfg;
+  cfg.setDbPath(strDbDir + "/");
+  cfg.setInteractive(false);
+  cfg.setAutoReprocess(true);
+  CDbSigs sigs(&log, &cfg);
+  CwindowBuf wbuf(&log);
+  CimgDecode img(&log, &wbuf, &cfg, nullptr);
+  CjfifDecode jfif(&log, &sigs, &wbuf, &img, &cfg, nullptr);
+  QFile fileSrc(strSrc);
+  if(!fileSrc.open(QIODevice::ReadOnly) || (fileSrc.size() == 0))
+    return "harness: tiff check=cannot decode the source";
+  wbuf.BufFileSet(&fileSrc);
+  wbuf.BufLoadWindow(0);
+  jfif.ProcessFile(&fileSrc);
+  wbuf.BufFileUnset();
+  if(!img.m_bDibTempReady || !img.m_pDibTemp)
+    return "harness: tiff check=the source has no decoded image";
+  const QImage imgRef = img.m_pDibTemp->convertToFormat(QImage::Format_RGB32);
+  uint32_t nW = static_cast<uint32_t>(imgRef.width());
+  uint32_t nH = static_cast<uint32_t>(imgRef.height());
+  uint32_t nFrameX = 0;
+  uint32_t nFrameY = 0;
+  if(img.GetFrameSize(nFrameX, nFrameY))
+  {
+    nW = qMin(nW, nFrameX);
+    nH = qMin(nH, nFrameY);
+  }
+
+  const bool bYcc = (eFormat == FileTiff::FMT_YCC8);
+  const quint32 nBits = (eFormat == FileTiff::FMT_RGB16) ? 16 : 8;
+  const quint32 nWhite = (nBits == 16) ? 65535 : 255;
+  const quint64 nDataSize = static_cast<quint64>(nW) * nH * 3 * (nBits / 8);
+  const QList<quint32> anRefBw = bYcc ? QList<quint32>{ 0, 1, 255, 1, 128, 1, 255, 1, 128, 1, 255, 1 }
+                                      : QList<quint32>{ 0, 1, nWhite, 1, 0, 1, nWhite, 1, 0, 1, nWhite, 1 };
+  const QList<QPair<quint32, QList<quint32>>> aWant = {
+    { 0x100, { nW } }, { 0x101, { nH } }, { 0x102, { nBits, nBits, nBits } }, { 0x103, { 1 } },
+    { 0x106, { bYcc ? 6u : 2u } }, { 0x115, { 3 } }, { 0x116, { nH } },
+    { 0x117, { static_cast<quint32>(nDataSize) } }, { 0x11C, { 1 } }, { 0x214, anRefBw },
+  };
+  for(const auto &want : aWant)
+  {
+    if(mapTags.value(want.first) != want.second)
+      errors << QString("tag %1 wrong").arg(want.first, 0, 16);
+  }
+  if(bYcc && (mapTags.value(0x212) != QList<quint32>{ 1, 1 }))
+    errors << "YCbCrSubSampling wrong";
+
+  const quint64 nData = mapTags.value(0x111).value(0, 0);
+  quint64 nBad = 0;
+  if(nData + nDataSize != static_cast<quint64>(nSize))
+  {
+    errors << QString("pixel data at %1 isn't the rest of the file").arg(nData);
+  }
+  else
+  {
+    const uchar *pData = reinterpret_cast<const uchar *>(ab.constData()) + nData;
+    for(uint32_t nY = 0; nY < nH; nY++)
+    {
+      for(uint32_t nX = 0; nX < nW; nX++)
+      {
+        int anWant[3];
+        if(bYcc)
+        {
+          int32_t anYcc[3] = { 0, 0, 0 };
+          img.GetPixelYcc(nX, nY, anYcc[0], anYcc[1], anYcc[2]);
+          for(int nC = 0; nC < 3; nC++)
+            anWant[nC] = (qBound(-1024, anYcc[nC], 1023) + 1024) / 8;
+        }
+        else
+        {
+          const QRgb rgb = imgRef.pixel(static_cast<int>(nX), static_cast<int>(nY));
+          anWant[0] = qRed(rgb);
+          anWant[1] = qGreen(rgb);
+          anWant[2] = qBlue(rgb);
+        }
+        for(int nC = 0; nC < 3; nC++)
+        {
+          const int nGot = (nBits == 16) ? ((pData[0] << 8) | pData[1]) : pData[0];
+          pData += nBits / 8;
+          if(nGot != ((nBits == 16) ? anWant[nC] * 257 : anWant[nC]))
+            nBad++;
+        }
+      }
+    }
+    if(nBad > 0)
+      errors << QString("%1 of %2 samples differ").arg(nBad).arg(3ULL * nW * nH);
+  }
+
+  return QString("harness: tiff %1x%2 bits=%3 photometric=%4 size=%5 md5=%6 check=%7")
+    .arg(mapTags.value(0x100).value(0)).arg(mapTags.value(0x101).value(0)).arg(mapTags.value(0x102).value(0))
+    .arg(mapTags.value(0x106).value(0)).arg(nSize).arg(fileMd5(strTiff))
+    .arg(errors.isEmpty() ? QString("ok") : errors.join("; "));
+}
+
+static int runExportTiff(const QString &strFile, const QString &strFormat, const ExportOptions &opts,
+                         const QString &strTmpDir)
+{
+  FileTiff::teFormat eFormat;
+  if(strFormat == "rgb8")
+    eFormat = FileTiff::FMT_RGB8;
+  else if(strFormat == "rgb16")
+    eFormat = FileTiff::FMT_RGB16;
+  else if(strFormat == "ycc8")
+    eFormat = FileTiff::FMT_YCC8;
+  else
+  {
+    usage();
+    return 2;
+  }
+
+  useGuiSettings(strTmpDir, false);
+
+  MainWindow window;
+  window.show();
+  QCoreApplication::processEvents();
+
+  QTextStream out(stdout);
+  QTimer timerMsgBox;
+  closeMessageBoxes(timerMsgBox, out);
+
+  const QString strSrcMd5 = fileMd5(strFile);
+  window.openFile(strFile);
+  QCoreApplication::processEvents();
+
+  const QString strOut = opts.bOutSame ? strFile : opts.strOut.isEmpty() ? strTmpDir + "/out.tif" : opts.strOut;
+  QString strError;
+  const bool bOk = window.exportTiff(strOut, eFormat, strError);
+  out << "harness: tiff export ok=" << (bOk ? 1 : 0);
+  if(!bOk)
+    out << " error=" << strError;
+  out << "\n";
+  if(bOk)
+    out << checkTiff(strFile, strOut, eFormat, strTmpDir) << "\n";
+  out << "harness: source unchanged=" << ((fileMd5(strFile) == strSrcMd5) ? 1 : 0) << "\n";
+  out << exportReport(window) << "\n";
   out << "harness: done\n";
   return 0;
 }
@@ -789,10 +1258,27 @@ int main(int argc, char **argv)
   guiOpts.bCheckHisto = args.removeAll("--check-histo") > 0;
   guiOpts.bDark = args.removeAll("--dark") > 0;
   guiOpts.bCheckTheme = args.removeAll("--check-theme") > 0;
+  if(args.removeAll("--export-menus") > 0)
+    guiOpts.nExportMenus = 1;
+  if(args.removeAll("--export-menus-cancel") > 0)
+    guiOpts.nExportMenus = 2;
+  if(args.removeAll("--export-menus-all") > 0)
+    guiOpts.nExportMenus = 3;
+  guiOpts.bOldNumbered = args.removeAll("--old-numbered") > 0;
+  guiOpts.bReplace = args.removeAll("--replace") > 0;
+  ExportOptions exportOpts;
+  exportOpts.sJpeg.bExtractAll = args.removeAll("--all") > 0;
+  exportOpts.sJpeg.bForceSoi = args.removeAll("--force-soi") > 0;
+  exportOpts.sJpeg.bForceEoi = args.removeAll("--force-eoi") > 0;
+  exportOpts.sJpeg.bIgnoreEoi = args.removeAll("--ignore-eoi") > 0;
+  exportOpts.sJpeg.bDhtAviInsert = args.removeAll("--dht-avi") > 0;
+  exportOpts.bOutSame = args.removeAll("--out-same") > 0;
+  exportOpts.bOutSameCase = args.removeAll("--out-same-case") > 0;
 
   // Options with a text value (--scale was applied above)
   QString strPixels;
-  for(const char *pszOpt : { "--scale", "--zoom", "--pixels" })
+  QString strFormat;
+  for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -806,11 +1292,16 @@ int main(int argc, char **argv)
       guiOpts.strZoom = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--pixels"))
       strPixels = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--out"))
+      exportOpts.strOut = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--format"))
+      strFormat = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
   // Options with a numeric value
-  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb" })
+  uint32_t nStart = 0;
+  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -827,6 +1318,8 @@ int main(int argc, char **argv)
       guiOpts.nRepeat = qMax(1, nVal);
     else if(QLatin1String(pszOpt) == QLatin1String("--max-growth-mb"))
       guiOpts.nMaxGrowthMb = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--start"))
+      nStart = static_cast<uint32_t>(nVal);
     else
       guiOpts.nMaxZoomMb = nVal;
   }
@@ -839,11 +1332,15 @@ int main(int argc, char **argv)
   }
 
   if(strMode == "decode" && args.size() == 1)
-    return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, tmpDir.path());
+    return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, nStart, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
     return runGui(args, guiOpts, tmpDir.path());
   if(strMode == "settings" && args.isEmpty())
     return runSettings(tmpDir.path());
+  if(strMode == "export-jpeg" && args.size() == 1)
+    return runExportJpeg(args.first(), exportOpts, tmpDir.path());
+  if(strMode == "export-tiff" && args.size() == 1)
+    return runExportTiff(args.first(), strFormat, exportOpts, tmpDir.path());
 
   usage();
   return 2;

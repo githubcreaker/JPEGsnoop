@@ -68,6 +68,7 @@ SOURCES += \
     $$PWD/source/DbSigs.cpp \
     $$PWD/source/DecodePs.cpp \
     $$PWD/source/DocLog.cpp \
+    $$PWD/source/FileTiff.cpp \
     $$PWD/source/General.cpp \
     $$PWD/source/ImgDecode.cpp \
     $$PWD/source/JfifDecode.cpp \
@@ -75,6 +76,7 @@ SOURCES += \
     $$PWD/source/SnoopConfig.cpp \
     $$PWD/source/WindowBuf.cpp \
     $$PWD/source/mainwindow.cpp \
+    $$PWD/source/exportdialogs.cpp \
     $$PWD/source/q_decodedetaildlg.cpp \
     $$PWD/source/snoopconfigdialog.cpp \
     $$PWD/source/Viewer.cpp
@@ -87,12 +89,14 @@ HEADERS += \
     $$PWD/source/DecodeDicom.h \
     $$PWD/source/DecodePs.h \
     $$PWD/source/DocLog.h \
+    $$PWD/source/FileTiff.h \
     $$PWD/source/General.h \
     $$PWD/source/ImgDecode.h \
     $$PWD/source/JfifDecode.h \
     $$PWD/source/Md5.h \
     $$PWD/source/SnoopConfig.h \
     $$PWD/source/WindowBuf.h \
+    $$PWD/source/exportdialogs.h \
     $$PWD/source/q_decodedetaildlg.h \
     $$PWD/source/snoop.h \
     $$PWD/source/snoopconfigdialog.h \

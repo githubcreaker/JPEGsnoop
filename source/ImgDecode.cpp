@@ -19,6 +19,7 @@
 #include <math.h>
 
 #include <cmath>
+#include <algorithm>
 #include <limits>
 
 #include <QtDebug>
@@ -6112,6 +6113,70 @@ void CimgDecode::GetImageSize(uint32_t &nX, uint32_t &nY)
 {
   nX = m_nImgSizeX;
   nY = m_nImgSizeY;
+}
+
+// The decoded JPEG image's own size (from the SOF), without the padding to
+// whole MCUs that the preview and pixel maps have
+//
+// RETURN:
+// - False if no JPEG scan has been decoded
+//
+bool CimgDecode::GetFrameSize(uint32_t &nX, uint32_t &nY)
+{
+  if(!m_bImgDecoded || !m_bPreviewIsJpeg || (m_nDimX <= 0) || (m_nDimY <= 0))
+  {
+    nX = 0;
+    nY = 0;
+    return false;
+  }
+
+  nX = static_cast<uint32_t>(std::min(m_nDimX, m_nImgSizeX));
+  nY = static_cast<uint32_t>(std::min(m_nDimY, m_nImgSizeY));
+  return true;
+}
+
+// A decoded pixel's Y, Cb and Cr as the pixel maps hold them: (level - 128)
+// * 8, nominally -1024..1023. A greyscale image has Cb = Cr = 0; for a JPEG
+// whose components are R, G and B they are converted, as the preview's
+// statistics do.
+//
+// RETURN:
+// - False if no JPEG scan has been decoded, or the pixel is outside it
+//
+bool CimgDecode::GetPixelYcc(uint32_t nPixX, uint32_t nPixY, int32_t &nValY, int32_t &nValCb, int32_t &nValCr)
+{
+  if(!m_bImgDecoded || !m_bPreviewIsJpeg || !m_pPixValY || (m_nBlkXMax <= 0) || (m_nBlkYMax <= 0))
+  {
+    return false;
+  }
+
+  const uint32_t nPixMapW = static_cast<uint32_t>(m_nBlkXMax) * BLK_SZ_X;
+  const uint32_t nPixMapH = static_cast<uint32_t>(m_nBlkYMax) * BLK_SZ_Y;
+
+  if((nPixX >= nPixMapW) || (nPixY >= nPixMapH))
+  {
+    return false;
+  }
+
+  const size_t nInd = static_cast<size_t>(nPixY) * nPixMapW + nPixX;
+  const bool bColour = (m_nNumSosComps == NUM_CHAN_YCC) && m_pPixValCb && m_pPixValCr;
+
+  nValY = m_pPixValY[nInd];
+  nValCb = bColour ? m_pPixValCb[nInd] : 0;
+  nValCr = bColour ? m_pPixValCr[nInd] : 0;
+
+  if(bColour && m_bRgbComps)
+  {
+    const double fR = nValY;
+    const double fG = nValCb;
+    const double fB = nValCr;
+
+    nValY = static_cast<int32_t>(std::lround(0.299 * fR + 0.587 * fG + 0.114 * fB));
+    nValCb = static_cast<int32_t>(std::lround(-0.168736 * fR - 0.331264 * fG + 0.5 * fB));
+    nValCr = static_cast<int32_t>(std::lround(0.5 * fR - 0.418688 * fG - 0.081312 * fB));
+  }
+
+  return true;
 }
 
 // Get the bitmap pointer

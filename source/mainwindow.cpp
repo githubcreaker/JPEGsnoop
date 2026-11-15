@@ -16,6 +16,9 @@
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
+#include <algorithm>
+#include <new>
+
 #include <QtWidgets>
 #include <QtPrintSupport/qtprintsupportglobal.h>
 #include <QPrintDialog>
@@ -23,6 +26,7 @@
 #include <QPrintPreviewDialog>
 
 #include "DbSigs.h"
+#include "General.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
@@ -429,9 +433,11 @@ void MainWindow::createActions(void)
 
   exportJpegAct = new QAction(tr("Export JPEG..."), this);
   exportJpegAct->setEnabled(false);
+  connect(exportJpegAct, &QAction::triggered, this, &MainWindow::onExportJpeg);
 
   exportTiffAct = new QAction(tr("Export TIFF..."), this);
   exportTiffAct->setEnabled(false);
+  connect(exportTiffAct, &QAction::triggered, this, &MainWindow::onExportTiff);
 
   addToDbAct = new QAction(tr("Add Camera/SW to DB..."), this);
   addToDbAct->setShortcut(tr("Alt+S"));
@@ -694,6 +700,30 @@ void MainWindow::AnalyzeFile()
 {
   clearImageViews();
 
+  // Nothing is analyzed until this file is (a failed open left the previous
+  // file's flag set)
+  m_bFileAnalyzed = false;
+
+  if(AnalyzeOpen())
+  {
+    enableMenus();
+    AnalyzeFileDo();
+    AnalyzeClose();
+  }
+}
+
+//-----------------------------------------------------------------------------
+// Open m_currentFile and point the file buffer at it
+//
+// RETURN:
+// - False, with the reason in the report, if the file can't be opened or is
+//   empty
+//
+// POST:
+// - m_pFile, m_lFileSize, m_bFileOpened
+//
+bool MainWindow::AnalyzeOpen()
+{
   // One QFile per analysis; free the previous one (this used to leak per open)
   delete m_pFile;
   m_pFile = new QFile(m_currentFile);
@@ -716,34 +746,29 @@ void MainWindow::AnalyzeFile()
 
     delete m_pFile;
     m_pFile = nullptr;
+    return false;
   }
-  else
+
+  // Set the file size variable
+  m_lFileSize = m_pFile->size();
+
+  // Don't attempt to load buffer with zero length file!
+  if(m_lFileSize <= 0)
   {
-    // Set the file size variable
-    m_lFileSize = m_pFile->size();
-
-    // Don't attempt to load buffer with zero length file!
-    if(m_lFileSize > 0)
-    {
-      // Open up the buffer
-      m_pWBuf->BufFileSet(m_pFile);
-      m_pWBuf->BufLoadWindow(0);
-
-      // Mark file as opened
-      m_bFileOpened = true;
-
-      enableMenus();
-      AnalyzeFileDo();
-      AnalyzeClose();
-    }
-    else
-    {
-      // Say so, as master did, rather than leaving the previous file's report
-      m_pDocLog->Clear();
-      m_pDocLog->AddLineErr(QString("ERROR: File length is zero, no decoding done. [%1]").arg(m_currentFile));
-      m_pFile->close();
-    }
+    // Say so, as master did, rather than leaving the previous file's report
+    m_pDocLog->Clear();
+    m_pDocLog->AddLineErr(QString("ERROR: File length is zero, no decoding done. [%1]").arg(m_currentFile));
+    m_pFile->close();
+    return false;
   }
+
+  // Open up the buffer
+  m_pWBuf->BufFileSet(m_pFile);
+  m_pWBuf->BufLoadWindow(0);
+
+  // Mark file as opened
+  m_bFileOpened = true;
+  return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -984,6 +1009,463 @@ void MainWindow::filePrintPreview()
 void MainWindow::printPreview(QPrinter *printer)
 {
   textEdit->print(printer);
+}
+
+//-----------------------------------------------------------------------------
+// Tools > Export JPEG: copy the JPEG at the start offset to its own file, or
+// with Extract All, every JPEG in the file (master's DoGuiExtractEmbeddedJPEG)
+
+// Extract All's names: the name chosen, without its extension, then the
+// JPEG's number (from 1, in 6 digits as master: a 60 fps video's frames for
+// over 4.5 hours), then ".jpg"
+static QString numberedExportName(const QString &strOut, uint32_t nNum)
+{
+  const QFileInfo fiOut(strOut);
+  return QDir(fiOut.path()).filePath(QString("%1.%2.jpg").arg(fiOut.completeBaseName()).arg(nNum, 6, 10, QChar('0')));
+}
+
+// The files already named as Extract All would name its exports. (Without
+// the case: macOS disks usually ignore it, so "x.000001.JPG" would be
+// replaced too.)
+static QStringList existingNumberedExports(const QString &strOut)
+{
+  const QFileInfo fiOut(strOut);
+  const QRegularExpression reNumbered(QString("^%1\\.[0-9]{6,}\\.jpg$").arg(QRegularExpression::escape(fiOut.completeBaseName())),
+                                      QRegularExpression::CaseInsensitiveOption);
+  QStringList astrExisting;
+  const QStringList astrNames = QDir(fiOut.path()).entryList(QDir::Files | QDir::Hidden, QDir::Name);
+
+  for(const QString &strName : astrNames)
+  {
+    if(reNumbered.match(strName).hasMatch())
+      astrExisting << strName;
+  }
+
+  return astrExisting;
+}
+
+void MainWindow::onExportJpeg()
+{
+  if(m_currentFile.isEmpty())
+  {
+    return;
+  }
+
+  // The menu stays enabled after a file that couldn't be opened
+  if(!m_bFileAnalyzed)
+  {
+    QMessageBox::warning(this, "JPEGsnoop", tr("The file shown couldn't be analyzed, so there is nothing to export."));
+    return;
+  }
+
+  // Motion JPEG frames usually leave out their Huffman tables, so add the
+  // standard ones for them (only those a frame lacks)
+  bool bIsAvi = false;
+  bool bIsMjpeg = false;
+  m_pJfifDec->GetAviMode(bIsAvi, bIsMjpeg);
+
+  ExportJpegSettings sInit;
+  sInit.bDhtAviInsert = bIsMjpeg;
+
+  // Master passed an empty string here, so the dialog showed no offset
+  ExportJpegDialog dlgSettings(m_pAppConfig->startPos(), sInit, this);
+
+  if(dlgSettings.exec() != QDialog::Accepted)
+  {
+    return;
+  }
+
+  const ExportJpegSettings sSettings = dlgSettings.settings();
+
+  QFileDialog dialog(this, sSettings.bExtractAll ? tr("Save Exported JPEG files as") : tr("Save Exported JPEG file as"));
+  dialog.setAcceptMode(QFileDialog::AcceptSave);
+  dialog.setNameFilters(QStringList() << tr("JPEG Image (*.jpg)") << tr("All Files (*)"));
+  dialog.setDefaultSuffix("jpg");
+  dialog.selectFile(QFileInfo(m_currentFile).absoluteFilePath() + ".export.jpg");
+
+  // Extract All doesn't write the name chosen, only numbered names made from
+  // it, so asking about that one would be asking about the wrong file. The
+  // numbered names are checked below instead.
+  if(sSettings.bExtractAll)
+  {
+    dialog.setOption(QFileDialog::DontConfirmOverwrite);
+  }
+
+  if((dialog.exec() != QDialog::Accepted) || dialog.selectedFiles().isEmpty())
+  {
+    return;
+  }
+
+  const QString strOut = dialog.selectedFiles().first();
+
+  // They were replaced without asking, even when the name chosen was new
+  if(sSettings.bExtractAll)
+  {
+    const QStringList astrExisting = existingNumberedExports(strOut);
+
+    if(!astrExisting.isEmpty())
+    {
+      const QString strFound =
+        (astrExisting.size() == 1)
+          ? tr("A file with a name Extract All uses already exists: \"%1\".").arg(astrExisting.first())
+          : tr("%1 files with names Extract All uses already exist, such as \"%2\".")
+              .arg(astrExisting.size()).arg(astrExisting.first());
+      QMessageBox msgReplace(QMessageBox::Warning, "JPEGsnoop",
+                             strFound + " " + tr("Each one whose number it uses is replaced, and the others are left "
+                                                 "as they are."),
+                             QMessageBox::Cancel, this);
+      msgReplace.setInformativeText(tr("Replace them?"));
+      QPushButton *pReplace = msgReplace.addButton(tr("Replace"), QMessageBox::DestructiveRole);
+      msgReplace.setDefaultButton(QMessageBox::Cancel);
+      msgReplace.exec();
+
+      if(msgReplace.clickedButton() != pReplace)
+      {
+        return;
+      }
+    }
+  }
+
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  exportJpeg(strOut, sSettings);
+  QApplication::restoreOverrideCursor();
+}
+
+//-----------------------------------------------------------------------------
+// Export the JPEG at the start offset (or with bExtractAll, every JPEG) to
+// strOut. The report then shows the file, analyzed again, and the export.
+//
+// RETURN:
+// - True if a file was written
+//
+bool MainWindow::exportJpeg(const QString &strOut, const ExportJpegSettings &sSettings)
+{
+  if(m_currentFile.isEmpty() || !m_bFileAnalyzed)
+  {
+    return false;
+  }
+
+  // Analyze the file again first, as master did: the export copies the
+  // marker positions this finds, and the file may have changed since it was
+  // opened. (AnalyzeFileDo() clears the preview, so the image is decoded
+  // again too, as for Reprocess.)
+  emit ImgSrcChanged();
+  clearImageViews();
+  m_bFileAnalyzed = false;
+
+  if(!AnalyzeOpen())
+  {
+    return false;
+  }
+
+  bool bOk = false;
+
+  if(sSettings.bExtractAll)
+  {
+    bOk = exportAllJpegs(strOut, sSettings);
+  }
+  else
+  {
+    AnalyzeFileDo();
+
+    bOk = m_bFileAnalyzed &&
+          m_pJfifDec->ExportJpegPrepare(m_currentFile, sSettings.bForceSoi, sSettings.bForceEoi, sSettings.bIgnoreEoi) &&
+          m_pJfifDec->ExportJpegDo(m_currentFile, strOut, static_cast<uint32_t>(m_lFileSize), sSettings.bOverlayEn,
+                                   sSettings.bDhtAviInsert, sSettings.bForceSoi, sSettings.bForceEoi);
+  }
+
+  AnalyzeClose();
+  return bOk;
+}
+
+//-----------------------------------------------------------------------------
+// Extract All: export the JPEG at each SOI (FF D8 FF) in the file, from its
+// start, to <strOut without extension>.000001.jpg, .000002.jpg, ...,
+// replacing any files of those names (onExportJpeg() asks first). Then
+// show the file's report, from the start offset as before, followed by a
+// list of what was exported.
+//
+// Master left the report of the last place it looked and moved the start
+// offset there. Each place is analyzed with the report and message boxes
+// off, as a video can have thousands of frames.
+//
+// PRE:
+// - AnalyzeOpen()
+//
+bool MainWindow::exportAllJpegs(const QString &strOut, const ExportJpegSettings &sSettings)
+{
+  const uint32_t nStartSaved = m_pAppConfig->startPos();
+  const bool bInteractiveSaved = m_pAppConfig->interactive();
+
+  QStringList astrResults;
+  QList<bool> abResultOk;
+  uint32_t nPos = 0;
+  uint32_t nExported = 0;
+  bool bWriteOk = true;
+  QString strWriteError;
+
+  m_pDocLog->Disable();
+  m_pAppConfig->setInteractive(false);
+
+  for(bool bMore = true; bMore;)
+  {
+    m_StatusBar->showMessage(tr("Exporting all JPEGs: %1 exported...").arg(nExported));
+
+    // Reload the buffer as AnalyzeOpen() does: reading past the end of the
+    // file (as the last analysis or search may have) leaves it marked bad,
+    // and the next scan then stops at once ("Ran out of buffer")
+    m_pWBuf->BufLoadWindow(nPos);
+    m_pAppConfig->setStartPos(nPos);
+    emit ImgSrcChanged();
+    m_pJfifDec->ProcessFile(m_pFile);
+
+    const QString strPos = QString("0x%1").arg(nPos, 8, 16, QChar('0'));
+
+    if(!m_pJfifDec->ExportJpegPrepare(m_currentFile, sSettings.bForceSoi, sSettings.bForceEoi, sSettings.bIgnoreEoi))
+    {
+      astrResults << QString("  [%1] Not exported: %2").arg(strPos, m_pJfifDec->GetExportError());
+      abResultOk << false;
+    }
+    else
+    {
+      const QString strName = numberedExportName(strOut, nExported + 1);
+
+      if(!m_pJfifDec->ExportJpegDo(m_currentFile, strName, static_cast<uint32_t>(m_lFileSize), sSettings.bOverlayEn,
+                                   sSettings.bDhtAviInsert, sSettings.bForceSoi, sSettings.bForceEoi))
+      {
+        // The next would fail the same way
+        strWriteError = m_pJfifDec->GetExportError();
+        astrResults << QString("  [%1] %2").arg(strPos, strWriteError);
+        abResultOk << false;
+        bWriteOk = false;
+        break;
+      }
+
+      nExported++;
+      astrResults << QString("  [%1] Exported to [%2]").arg(strPos, strName);
+      abResultOk << true;
+    }
+
+    // The next SOI after this one (the search starts after nPos)
+    bMore = m_pWBuf->BufSearch(nPos, 0xFFD8FF, 3, true, nPos);
+  }
+
+  m_pAppConfig->setInteractive(bInteractiveSaved);
+  m_pAppConfig->setStartPos(nStartSaved);
+  m_pDocLog->Enable();
+
+  // The file as it was shown before, then what was exported
+  m_pWBuf->BufLoadWindow(0);
+  emit ImgSrcChanged();
+  AnalyzeFileDo();
+
+  m_pDocLog->AddLine("");
+  m_pDocLog->AddLineHdr("*** Exporting All JPEGs ***");
+  m_pDocLog->AddLine(QString("  Exporting from: [%1]").arg(m_currentFile));
+
+  for(qsizetype nInd = 0; nInd < astrResults.size(); nInd++)
+  {
+    if(abResultOk.at(nInd))
+      m_pDocLog->AddLine(astrResults.at(nInd));
+    else
+      m_pDocLog->AddLineWarn(astrResults.at(nInd));
+  }
+
+  m_pDocLog->AddLine(QString("  Exported %1 JPEG%2").arg(nExported).arg((nExported == 1) ? "" : "s"));
+
+  if(!bWriteOk && bInteractiveSaved)
+  {
+    QMessageBox::warning(this, "JPEGsnoop", strWriteError);
+  }
+
+  m_StatusBar->showMessage(tr("Exported %1 JPEG%2").arg(nExported).arg((nExported == 1) ? "" : "s"));
+  return bWriteOk && (nExported > 0);
+}
+
+//-----------------------------------------------------------------------------
+// Tools > Export TIFF: save the decoded image as a TIFF file
+
+// Is there a decoded image (a JPEG scan or a Photoshop file's) to export?
+bool MainWindow::canExportTiff()
+{
+  return m_pImgDec->m_bDibTempReady && m_pImgDec->m_pDibTemp && !m_pImgDec->m_pDibTemp->isNull();
+}
+
+// Are there decoded Y, Cb and Cr values (a JPEG scan's) to export?
+bool MainWindow::canExportYcc()
+{
+  uint32_t nSizeX = 0;
+  uint32_t nSizeY = 0;
+  return canExportTiff() && m_pImgDec->GetFrameSize(nSizeX, nSizeY);
+}
+
+void MainWindow::onExportTiff()
+{
+  // Master exported whatever its bitmap pointer held: nothing, or the
+  // previous file's image
+  if(!canExportTiff())
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("There is no decoded image to export. (Images are decoded when Options > Scan Segment > "
+                            "Decode Image is on.)"));
+    return;
+  }
+
+  QFileDialog dialog(this, tr("Output TIFF Filename"));
+  dialog.setAcceptMode(QFileDialog::AcceptSave);
+  dialog.setNameFilters(QStringList() << tr("TIFF (*.tif)") << tr("All Files (*)"));
+  dialog.setDefaultSuffix("tif");
+  dialog.selectFile(QFileInfo(m_currentFile).absoluteFilePath() + ".tif");
+
+  if((dialog.exec() != QDialog::Accepted) || dialog.selectedFiles().isEmpty())
+  {
+    return;
+  }
+
+  const QString strOut = dialog.selectedFiles().first();
+
+  // Master wrote the file even if this dialog was cancelled
+  ExportTiffDialog dlgFormat(strOut, canExportYcc(), this);
+
+  if(dlgFormat.exec() != QDialog::Accepted)
+  {
+    return;
+  }
+
+  QString strError;
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  const bool bOk = exportTiff(strOut, dlgFormat.format(), strError);
+  QApplication::restoreOverrideCursor();
+
+  if(!bOk)
+  {
+    QMessageBox::warning(this, "JPEGsnoop", QString("ERROR: %1").arg(strError));
+  }
+}
+
+//-----------------------------------------------------------------------------
+// Write the decoded image to strOut as a TIFF file, and say so in the report.
+//
+// RGB is the image as the preview shows it (so with the View > Image Chan
+// choice, as in master); YCC is the decoded Y, Cb and Cr. A JPEG's image is
+// its own size: the preview is padded to whole MCUs, and master exported the
+// padding too. 16-bit RGB scales each value by 257, so white is 65535 (master
+// shifted by 8, giving 65280).
+//
+// RETURN:
+// - False, with the reason in strError, if nothing was written
+//
+bool MainWindow::exportTiff(const QString &strOut, FileTiff::teFormat eFormat, QString &strError)
+{
+  if(!canExportTiff())
+  {
+    strError = "There is no decoded image to export.";
+    return false;
+  }
+
+  if((eFormat == FileTiff::FMT_YCC8) && !canExportYcc())
+  {
+    strError = "Only a decoded JPEG image can be exported as YCC.";
+    return false;
+  }
+
+  if(SameFile(m_currentFile, strOut))
+  {
+    strError = "Can't overwrite source file.";
+    return false;
+  }
+
+  const QImage img = m_pImgDec->m_pDibTemp->convertToFormat(QImage::Format_RGB32);
+  uint32_t nSizeX = static_cast<uint32_t>(img.width());
+  uint32_t nSizeY = static_cast<uint32_t>(img.height());
+  uint32_t nFrameX = 0;
+  uint32_t nFrameY = 0;
+
+  if(m_pImgDec->GetFrameSize(nFrameX, nFrameY))
+  {
+    nSizeX = std::min(nSizeX, nFrameX);
+    nSizeY = std::min(nSizeY, nFrameY);
+  }
+
+  const quint64 nDataSize = FileTiff::DataSize(nSizeX, nSizeY, eFormat);
+
+  if(nDataSize == 0)
+  {
+    strError = QString("An image of %1 x %2 pixels is too large for a TIFF file.").arg(nSizeX).arg(nSizeY);
+    return false;
+  }
+
+  QByteArray abSamples;
+
+  try
+  {
+    abSamples.resize(static_cast<qsizetype>(nDataSize));
+  }
+  catch(const std::bad_alloc &)
+  {
+    strError = "Not enough memory for the export.";
+    return false;
+  }
+
+  char *pOut = abSamples.data();
+
+  for(uint32_t nY = 0; nY < nSizeY; nY++)
+  {
+    const QRgb *pLine = reinterpret_cast<const QRgb *>(img.constScanLine(static_cast<int>(nY)));
+
+    for(uint32_t nX = 0; nX < nSizeX; nX++)
+    {
+      if(eFormat == FileTiff::FMT_YCC8)
+      {
+        int32_t anVal[3] = { 0, 0, 0 };
+        m_pImgDec->GetPixelYcc(nX, nY, anVal[0], anVal[1], anVal[2]);
+
+        // -1024..1023 (level - 128, times 8) to 0..255, as master did
+        for(int32_t nVal : anVal)
+        {
+          *pOut++ = static_cast<char>((std::clamp(nVal, -1024, 1023) + 1024) >> 3);
+        }
+      }
+      else
+      {
+        const int anVal[3] = { qRed(pLine[nX]), qGreen(pLine[nX]), qBlue(pLine[nX]) };
+
+        for(int nVal : anVal)
+        {
+          if(eFormat == FileTiff::FMT_RGB16)
+          {
+            // Big-endian, as the file is
+            const int nVal16 = nVal * 257;
+            *pOut++ = static_cast<char>(nVal16 >> 8);
+            *pOut++ = static_cast<char>(nVal16 & 0xFF);
+          }
+          else
+          {
+            *pOut++ = static_cast<char>(nVal);
+          }
+        }
+      }
+    }
+  }
+
+  Q_ASSERT(pOut == abSamples.data() + abSamples.size());
+
+  m_pDocLog->AddLine("");
+  m_pDocLog->AddLineHdr("*** Exporting TIFF ***");
+  m_pDocLog->AddLine(QString("  Exporting to:   [%1]").arg(strOut));
+
+  if(!FileTiff::WriteFile(strOut, eFormat, abSamples, nSizeX, nSizeY, strError))
+  {
+    m_pDocLog->AddLineErr(QString("  ERROR: %1").arg(strError));
+    return false;
+  }
+
+  const char *pszFormat = (eFormat == FileTiff::FMT_RGB16) ? "RGB (16 bit)" :
+                          (eFormat == FileTiff::FMT_YCC8) ? "YCC (8 bit)" : "RGB (8 bit)";
+  m_pDocLog->AddLine(QString("  Format:         %1, %2 x %3 pixels").arg(pszFormat).arg(nSizeX).arg(nSizeY));
+  m_pDocLog->AddLine("  Export done");
+  m_StatusBar->showMessage(tr("Exported TIFF"), 5000);
+  return true;
 }
 
 //-----------------------------------------------------------------------------

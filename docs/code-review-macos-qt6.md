@@ -539,6 +539,133 @@ the header limits stop such a composite first.
 unfinished port features (Select All, Find, Export JPEG/TIFF, Detailed Decode, About and
 Batch Process).
 
+### Export JPEG and Export TIFF
+
+Tools > Export JPEG and Tools > Export TIFF were in the menu but did nothing. Both now
+work as on Windows. Export JPEG copies the JPEG at the start offset to a file of its
+own, or with Extract All, every JPEG in the file. Export TIFF saves the decoded image as
+8-bit RGB, 16-bit RGB or 8-bit YCC. The JPEG copy code had been ported but was never
+called; the TIFF writer and both settings dialogs were missing. Export JPEG analyzes
+the file again first, as on Windows, and adds what it did to the report.
+
+**Fixed while porting** (inherited unless marked):
+- **Dropped byte:** the copy loops ran `while (pos < last)` over an inclusive range, so a
+  range one byte past a whole number of 128 KB blocks lost its last byte: the byte
+  before SOS, or the EOI's 0xD9.
+- **Overwriting the source:** the exports refused only an output name spelled exactly
+  like the source's. Saving `photo.jpg` over `Photo.JPG`, the same file on macOS's usual
+  case-insensitive disks, or through a link, truncated the file being read. They now
+  compare the files themselves. Output goes through `QSaveFile`, and every write is
+  checked, so a failed export leaves no partial file.
+- **Motion JPEG DHT** (port, section 7): the option logged "Inserting standard AVI DHT
+  huffman table" but wrote nothing.
+- **Force EOI** added a second EOI to an image that had one.
+- **Nothing exported:** a file with no JPEG at all was told to force an EOI. The missing
+  image data is now reported first, and a failed export says why in a message box, not
+  only at the end of the report.
+- **Extract All:**
+  - **Report and start offset:** it left the report of the last place it looked and
+    moved the start offset there. It now keeps the offset, shows the file's report as
+    before, and lists each JPEG it exported or why it couldn't.
+  - **Thumbnails** (port): reading past the end of the file marks the file buffer bad
+    until it is reloaded. Windows reopened the file for each JPEG; the port didn't, so
+    an EXIF thumbnail after the main image "ran out of buffer" and wasn't exported. The
+    buffer is now reloaded each time.
+  - **Message boxes:** each JPEG is analyzed without the report or message boxes, as a
+    video can have thousands of frames. A write error stops it, with one message box.
+- **Export TIFF:**
+  - **Cancel:** cancelling the format dialog still wrote the file.
+  - **No image:** it exported whatever its bitmap pointer held. It now says there is no
+    decoded image. YCC needs a decoded JPEG scan, so a PSD's image is RGB only.
+  - **Size:** a JPEG's image is exported at its own size. Windows included the padding to
+    whole MCUs, so a 9×8 image came out 16×8.
+  - **ReferenceBlackWhite:** written as 0 to 255 for every sample, but Cb and Cr are
+    centred on 128. libtiff then converts a YCC export's colours about 80 levels off on
+    average. With 0, 255, 128, 255, 128, 255, the TIFF default for YCbCr, they match
+    the RGB export within 1.
+  - **16-bit:** values were shifted left by 8, so white was 65280; they are now multiplied
+    by 257, so it is 65535. Width, height and the strip fields are LONGs, not SHORTs.
+- **Dialogs:** the settings dialog's start offset was always blank: it was given an empty
+  string. Force EOI and Ignore EOI now exclude each other. Overlays is disabled, as
+  nothing can add an overlay until File Overlay is ported. After a file that couldn't
+  be opened, the menus stay enabled, so Export JPEG now says there is nothing to
+  export instead of going through both dialogs to do nothing.
+
+**Tests:** 38 new `E` cases (190 in all). The harness has new `export-jpeg` and
+`export-tiff` modes, which run the real `MainWindow`, and `gui --export-menus`, which
+goes through the menus and dialogs.
+- **Export JPEG:** each case checks the written file's MD5 against the bytes the
+  generator expects. Covered: whole files, trailing data, the block edge, missing SOI
+  and EOI with each option, the Motion JPEG DHT, and the same file by another case.
+  Extract All is tested with two JPEGs among other data, Motion JPEG frames without
+  DHTs, and an EXIF thumbnail.
+- **Export TIFF:** each case reads the file back and checks its tags and every sample
+  against a separate decode.
+
+**Checks:**
+- **All 190 pass** with and without ASan/UBSan.
+- **No change for other files:** the reports of 40 valid files and PSDs are the same as
+  for `642da2d`.
+- **Other readers:** Pillow, tifffile, libtiff (`tiffinfo`, no warnings) and macOS's
+  ImageIO (`sips`) read every TIFF at the right size and depth, and agree on the
+  samples. The files came from a 1024×768 JPEG, 4:2:0, greyscale, an RGB JPEG and a
+  PSD. 16-bit samples are exactly the 8-bit ones times 257.
+- **YCC colours:** libtiff's conversion of each YCC export matches its RGB export
+  within 1 level.
+- **ImageIO swaps red and blue** in uncompressed YCbCr TIFFs, Pillow's as well as these,
+  so Preview shows a YCC export in the wrong colours. The samples are right, as libtiff
+  shows.
+- **Exported JPEGs:** frames exported with the Motion JPEG DHT decode in Pillow to the
+  same pixels as the JPEG they came from.
+- **Block edge:** a simulation of the old copy loop on the block-edge test file drops
+  the byte at 131,072, the last before SOS.
+- **Not checked:** a real Motion JPEG AVI. The tests use frames among other data, and the
+  DHT option's default, which comes from the AVI check, is untested.
+
+**Second check:** a reviewer found two more problems. Both are now fixed:
+- **Numbered files replaced without asking:** Extract All asks for a name, then writes
+  numbered names made from it. Files that already had those names were replaced
+  silently, while the file dialog asked about the name chosen, which isn't written. The
+  file dialog no longer asks about that name. Instead, if numbered files exist, a
+  message says how many, names one, and asks before replacing them; Cancel exports
+  nothing. Numbers the export doesn't reach are left as they are, and the message says
+  so.
+- **A frame's own Huffman tables replaced** (inherited): the Motion JPEG option inserted
+  all four standard tables before SOS, replacing any the frame defines. A frame with
+  optimized tables then decoded wrongly, though the export reported success. Only the
+  tables the image doesn't define before its scan are now inserted, and the report says
+  which, or that it defines them all. If the segments before SOS can't all be read,
+  none are inserted, and the report says so.
+
+9 new cases (199 in all):
+- **Motion JPEG AVI:** a test AVI is exported through the menus with Extract All. The
+  option is on by default, a frame with optimized tables comes out unchanged, and a
+  frame without tables gets all four.
+- **Tables:** a JPEG with all its tables comes out unchanged, and one without its chroma
+  tables gets DC 1 and AC 1, byte for byte.
+- **Replacing:** through the menus, Extract All asks before replacing a numbered file,
+  keeps it on Cancel and replaces it on Replace, and doesn't ask about the name chosen.
+
+**Checks:**
+- **All 199 pass** with and without ASan/UBSan.
+- **Not checked:** an AVI from a camera; the test AVI is made by the test generator.
+
+**Third check:** the same reviewer found one more case. A marker may have fill bytes
+(0xFF) before it, but a fill byte right before SOS left one byte, which failed the check
+for a full marker. The check then stopped, so a frame without tables got none, though
+the same frame without the fill byte got all four. The last byte before SOS is now
+taken as a fill byte. 3 new cases (202 in all): a frame with one and with three fill
+bytes before SOS, and one in an AVI exported through the menus. All three fail with the
+old check.
+
+**Checks:**
+- **All 202 pass** with and without ASan/UBSan.
+- **The reviewer's AVI:** its frame is exported with all four tables and decodes in
+  Pillow to the same pixels as the JPEG it was made from.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; Select All,
+Find, File Overlay, Detailed Decode, About and Batch Process.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:
@@ -804,7 +931,7 @@ These can't be reached in this build, but will matter when the features are fini
 
 - **PSD files are never parsed** (`JfifDecode.cpp:9859`: `DecodePsd` call commented out, `bDecPsdOk = false`). Inside that code: heap overflow from `nNumChans*nHeight` wrap (`DecodePs.cpp:2412`, `2426`, ASan-confirmed), a 0xFFFFFFF4 length loop (`2638`, loops at `1687`, `1983`, `2684`), a 16 GB allocation from an inverted layer rect (`1911`, `2146`), leaked channel arrays (`1866`), `char` vs `signed char` RLE (`2243`, breaks on Linux arm64), and an unchecked RLE writer (`2283-2340`). The `#else` branch at `9880` doesn't compile.
 - **User signature DB:** `DbSigs.cpp:756` writes with `strlen` over an uninitialised buffer; `589-600` has no `DBEX_ENTRIES_MAX` check (overflows `m_sSigListExtra[300]`); `185` reads 1 byte instead of 4; `689` uses `"[%s]"`.
-- **Export JPEG:** `JfifDecode.cpp:10321` skips writing the MJPEG DHT but logs that it did; `10232`, `10429` leak the `QFile` on failure.
+- **Export JPEG:** `JfifDecode.cpp:10321` skips writing the MJPEG DHT but logs that it did; `10232`, `10429` leak the `QFile` on failure. (Fixed: see "Export JPEG and Export TIFF".)
 - **Signature submit:** `strFormData` is never built (`8846` commented out).
 - `General.cpp:107-111` (`Uint2DotByte`): operator precedence makes every field the low byte; `93-98` (`Uint2Chars`): chained `.arg()` substitutes `%` in file bytes.
 - `WindowBuf.cpp:584`, `196`, `347`: printf formats passed to `.arg()`; `716`: `OverlayGet` has no bounds check.

@@ -10,6 +10,7 @@
 # where expect/forbid are extended regexes matched against the driver's
 # stdout ("-" for none).
 
+import hashlib
 import io
 import random
 import struct
@@ -1073,6 +1074,216 @@ case("PSD_empty_rows", "PSD", "decode", write("psd_empty_rows.psd", psd(pw, ph, 
 # zoom picked, and mouse moves and channel changes keep it. It has no MCUs.
 case("PSD_gui_preview", "PSD", "gui", ["ok_444.jpg", psd_rle], "--zoom 800 --check-preview --mouse --cycle-channels",
      timeout=60, expect="harness: preview after channels zoom=8 .* image=37x23 .*: ok$", forbid="missing|differ|gave")
+
+# --- E: Tools > Export JPEG and Export TIFF -----------------------------------
+def md5(data):
+    return hashlib.md5(data).hexdigest()
+
+
+def exported(*datas):
+    """The export-jpeg line for these exported files, in order."""
+    return "harness: exported %d md5s=%s$" % (len(datas), ",".join(md5(d) for d in datas))
+
+
+def com_padding(n):
+    """COM segments totalling exactly n bytes (n >= 4)."""
+    out = b""
+    while n > 0:
+        size = min(n, 4 + 65533)
+        if 0 < n - size < 4:
+            size -= 4
+        out += seg(0xFE, b"\x00" * (size - 4))
+        n -= size
+    return out
+
+
+def sos_pos(data):
+    return marker_pos(data, 0xDA)
+
+
+case("E_jpeg_whole", "E", "export-jpeg", "ok_444.jpg", expect=exported(c444), forbid="source unchanged=0")
+case("E_jpeg_trailing", "E", "export-jpeg", write("e_trailing.jpg", c444 + b"TRAILING" * 100), expect=exported(c444))
+# [SOI, SOS) one byte over a whole number of 128 KB copy blocks: the copy
+# loop dropped its last byte
+block_edge = insert_after_app0(c444, com_padding(131073 - sos_pos(c444)))
+assert sos_pos(block_edge) == 131073
+case("E_jpeg_block_edge", "E", "export-jpeg", write("e_block_edge.jpg", block_edge), expect=exported(block_edge))
+no_eoi = write("e_no_eoi.jpg", c444[:-2])
+case("E_jpeg_no_eoi", "E", "export-jpeg", no_eoi, expect="harness: exported 0 md5s=$")
+case("E_jpeg_no_eoi_message", "E", "export-jpeg", no_eoi,
+     expect="message box: Nothing was exported\\. The image has no end-of-image marker")
+case("E_jpeg_force_eoi", "E", "export-jpeg", no_eoi, "--force-eoi", expect=exported(c444))
+case("E_jpeg_ignore_eoi", "E", "export-jpeg", no_eoi, "--ignore-eoi", expect=exported(c444[:-2]))
+# An image that has its EOI got a second one
+case("E_jpeg_force_eoi_has_eoi", "E", "export-jpeg", "ok_444.jpg", "--force-eoi", expect=exported(c444))
+case("E_jpeg_force_soi", "E", "export-jpeg", write("e_no_soi.jpg", c444[2:]), "--force-soi", expect=exported(c444))
+# Motion JPEG DHT: the standard tables (the option wrote nothing) go in before
+# SOS, but only those the image doesn't define: replacing a frame's own
+# (optimized) tables made its scan decode wrongly. Pillow's tables are the
+# standard ones, so its segments give the expected bytes.
+def dht_tables(data):
+    """{Tc/Th: table bytes} from the DHT segments before SOS."""
+    tables, i = {}, 2
+    while data[i + 1] != 0xDA:
+        n = struct.unpack(">H", data[i + 2:i + 4])[0]
+        if data[i + 1] == 0xC4:
+            j = i + 4
+            while j < i + 2 + n:
+                size = 17 + sum(data[j + 1:j + 17])
+                tables[data[j]] = data[j:j + size]
+                j += size
+        i += 2 + n
+    return tables
+
+
+STD_DHT = dht_tables(c444)
+assert sorted(STD_DHT) == [0x00, 0x01, 0x10, 0x11]
+
+
+def with_std_dht(frame, ids):
+    """frame with the standard tables ids (in the standard segment's order) inserted before SOS."""
+    body = b"".join(STD_DHT[t] for t in (0x00, 0x01, 0x10, 0x11) if t in ids)
+    p = sos_pos(frame)
+    return frame[:p] + b"\xff\xc4" + struct.pack(">H", len(body) + 2) + body + frame[p:]
+
+
+def without_dht(data, ids=(0x00, 0x01, 0x10, 0x11)):
+    """data without the DHT segments of these tables (one table a segment, as Pillow writes)."""
+    out, i = data[:2], 2
+    while True:
+        m, n = data[i + 1], struct.unpack(">H", data[i + 2:i + 4])[0]
+        if m == 0xDA:
+            return out + data[i:]
+        if not (m == 0xC4 and data[i + 4] in ids):
+            out += data[i:i + 2 + n]
+        i += 2 + n
+
+
+case("E_jpeg_dht_has_tables", "E", "export-jpeg", "ok_444.jpg", "--dht-avi", expect=exported(c444))
+case("E_jpeg_dht_has_tables_report", "E", "export-jpeg", "ok_444.jpg", "--dht-avi",
+     expect="Not inserting the standard AVI DHT huffman table: the image defines its own tables")
+optimized = jpeg(color, quality=90, subsampling=0, optimize=True)
+assert dht_tables(optimized) != STD_DHT
+case("E_jpeg_dht_optimized", "E", "export-jpeg", write("e_optimized.jpg", optimized), "--dht-avi",
+     expect=exported(optimized))
+no_chroma = without_dht(c444, (0x01, 0x11))
+case("E_jpeg_dht_missing_chroma", "E", "export-jpeg", write("e_no_chroma_dht.jpg", no_chroma), "--dht-avi",
+     expect=exported(with_std_dht(no_chroma, (0x01, 0x11))))
+case("E_jpeg_dht_missing_chroma_report", "E", "export-jpeg", "e_no_chroma_dht.jpg", "--dht-avi",
+     expect="Inserting standard AVI DHT huffman table \\(DC 1, AC 1\\)$")
+case("E_jpeg_same_file", "E", "export-jpeg", "ok_444.jpg", "--out-same",
+     expect="ERROR: Can't overwrite source file", forbid="source unchanged=0")
+# The same file by a name in another case (macOS disks are usually
+# case-insensitive): the names differed, so it was truncated while being read
+case("E_jpeg_same_file_case", "E", "export-jpeg", write("e_case.jpg", c444), "--out-same-case",
+     expect="ERROR: Can't overwrite source file|case-sensitive disk, skipped", forbid="source unchanged=0")
+case("E_jpeg_unwritable", "E", "export-jpeg", "ok_444.jpg", "--out /nonexistent-jpegsnoop-dir/out.jpg",
+     expect="message box: ERROR: Couldn't open file for write")
+case("E_jpeg_psd", "E", "export-jpeg", psd_rle,
+     expect="message box: Nothing was exported\\. No JPEG image data \\(SOS marker\\) was found")
+
+# Extract All: each JPEG after junk, then the file's own report from offset 0
+junk = bytes(range(100))
+two = write("e_two.jpg", junk + c444 + junk + c420 + junk)
+case("E_jpeg_all", "E", "export-jpeg", two, "--all", expect=exported(c444, c420))
+case("E_jpeg_all_list", "E", "export-jpeg", two, "--all",
+     expect="\\[0x%08x\\] Exported to \\[.*out\\.000002\\.jpg\\]" % (len(junk) * 2 + len(c444)))
+case("E_jpeg_all_count", "E", "export-jpeg", two, "--all", expect="^  Exported 2 JPEGs$")
+case("E_jpeg_all_unwritable", "E", "export-jpeg", two, "--all --out /nonexistent-jpegsnoop-dir/out.jpg",
+     expect="message box: ERROR: Couldn't open file for write")
+# Motion JPEG frames leave out the DHT: Extract All with the standard one
+# inserted before each SOS (all four tables, 420 bytes)
+mjpeg_frame = without_dht(c444)
+mjpeg_std = with_std_dht(mjpeg_frame, (0x00, 0x01, 0x10, 0x11))
+assert len(mjpeg_std) == len(mjpeg_frame) + 420
+mjpeg = write("e_mjpeg_frames.bin", junk + mjpeg_frame + junk + mjpeg_frame + junk)
+case("E_jpeg_all_mjpeg", "E", "export-jpeg", mjpeg, "--all --dht-avi", expect=exported(mjpeg_std, mjpeg_std))
+# Fill bytes (0xFF) may come before any marker, SOS included. The last one,
+# right before SOS, stopped the check for the frame's tables, so none were
+# inserted.
+STD_DHT_SEG = b"\xff\xc4" + struct.pack(">H", 2 + sum(len(v) for v in STD_DHT.values())) + b"".join(
+    STD_DHT[t] for t in (0x00, 0x01, 0x10, 0x11))
+for n_fill in (1, 3):
+    p_sos = sos_pos(mjpeg_frame) + n_fill
+    padded = mjpeg_frame[:p_sos - n_fill] + b"\xff" * n_fill + mjpeg_frame[p_sos - n_fill:]
+    case("E_jpeg_dht_fill_%d" % n_fill, "E", "export-jpeg", write("e_fill_%d.jpg" % n_fill, padded), "--dht-avi",
+         expect=exported(padded[:p_sos] + STD_DHT_SEG + padded[p_sos:]))
+# An EXIF thumbnail is a JPEG of its own
+SUB = 0x100
+thumb_at = 0x200
+ifd0 = tiff_ifd("<", 8, [entry(0x010F, ascii_("TestMake"))], next_off=SUB)
+ifd1 = tiff_ifd("<", SUB, [entry(0x0201, longs("<", thumb_at)), entry(0x0202, longs("<", len(small)))])
+with_thumb = insert_after_app0(c444, app1_exif(tiff("<", {8: ifd0, SUB: ifd1, thumb_at: small})))
+case("E_jpeg_all_thumbnail", "E", "export-jpeg", write("e_thumb.jpg", with_thumb), "--all",
+     expect=exported(with_thumb, small))
+
+# TIFF: tags and every sample checked against a separate decode
+TIFF_OK = "check=ok$"
+case("E_tiff_rgb8", "E", "export-tiff", "ok_444.jpg", "--format rgb8", expect="tiff 64x48 bits=8 photometric=2 .*" + TIFF_OK)
+case("E_tiff_rgb16", "E", "export-tiff", "ok_420.jpg", "--format rgb16", expect="bits=16 photometric=2 .*" + TIFF_OK)
+case("E_tiff_ycc8", "E", "export-tiff", "ok_420.jpg", "--format ycc8", expect="bits=8 photometric=6 .*" + TIFF_OK)
+case("E_tiff_ycc8_gray", "E", "export-tiff", "ok_gray.jpg", "--format ycc8", expect=TIFF_OK)
+case("E_tiff_ycc8_rgb_jpeg", "E", "export-tiff", "f3_rgb_adobe.jpg", "--format ycc8", expect=TIFF_OK)
+# The image's own size: the preview is padded to 16x8
+case("E_tiff_frame_size", "E", "export-tiff", "f6_9x8.jpg", "--format rgb8", expect="tiff 9x8 .*" + TIFF_OK)
+case("E_tiff_psd", "E", "export-tiff", psd_rle, "--format rgb16", expect="tiff 37x23 .*" + TIFF_OK)
+case("E_tiff_psd_ycc", "E", "export-tiff", psd_rle, "--format ycc8",
+     expect="error=Only a decoded JPEG image can be exported as YCC")
+case("E_tiff_no_image", "E", "export-tiff", "ok_progressive.jpg", "--format rgb8",
+     expect="error=There is no decoded image to export")
+case("E_tiff_same_file", "E", "export-tiff", "ok_444.jpg", "--format rgb8 --out-same",
+     expect="error=Can't overwrite source file", forbid="source unchanged=0")
+
+# The menus, with their dialogs
+case("E_menus_jpeg", "E", "gui", ["ok_444.jpg"], "--export-menus", timeout=30,
+     expect="menu Export JPEG\\.\\.\\. wrote=1 size=%d$" % len(c444))
+case("E_menus_tiff", "E", "gui", ["ok_444.jpg"], "--export-menus", timeout=30,
+     expect="menu Export TIFF\\.\\.\\. wrote=1 size=[1-9]")
+case("E_menus_names", "E", "gui", ["ok_444.jpg"], "--export-menus", timeout=30,
+     expect="default=ok_444\\.jpg\\.export\\.jpg$")
+case("E_menus_offset", "E", "gui", ["ok_444.jpg"], "--export-menus", timeout=30,
+     expect="Export JPEG Settings \\(Source file start offset: 0x00000000, MJPEG DHT off\\)")
+# Cancel in the settings or format dialog writes nothing (Export TIFF wrote
+# the file anyway)
+case("E_menus_cancel", "E", "gui", ["ok_444.jpg"], "--export-menus-cancel", timeout=30,
+     expect="menu Export TIFF\\.\\.\\. wrote=0", forbid="wrote=1")
+case("E_menus_psd", "E", "gui", [psd_rle], "--export-menus", timeout=30,
+     expect="Export as TIFF \\(YCC unavailable\\)")
+case("E_menus_no_image", "E", "gui", ["ok_progressive.jpg"], "--export-menus", timeout=30,
+     expect="message box: There is no decoded image to export")
+# A Motion JPEG AVI through the menus, with Extract All: the DHT option is on,
+# a frame with its own (optimized) tables keeps them, and one without gets
+# the standard tables
+movi = b"movi" + chunk(b"00dc", optimized) + chunk(b"00dc", mjpeg_frame)
+avi_mjpeg = (b"AVI " + chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56))) + chunk(b"LIST", strl)
+             + chunk(b"LIST", movi))
+avi_mjpeg = write("e_mjpeg.avi", b"RIFF" + struct.pack("<I", len(avi_mjpeg)) + avi_mjpeg)
+case("E_menus_mjpeg_dht_default", "E", "gui", [avi_mjpeg], "--export-menus-all", timeout=30,
+     expect="Export JPEG Settings \\(.*, MJPEG DHT on\\)")
+case("E_menus_mjpeg_frames", "E", "gui", [avi_mjpeg], "--export-menus-all", timeout=30,
+     expect="all files=2 md5s=%s,%s " % (md5(optimized), md5(mjpeg_std)))
+# As reported: a frame with a fill byte before SOS, in an AVI
+p_sos = sos_pos(mjpeg_frame)
+padded = mjpeg_frame[:p_sos] + b"\xff" + mjpeg_frame[p_sos:]
+movi = b"movi" + chunk(b"00dc", padded)
+avi_fill = (b"AVI " + chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56))) + chunk(b"LIST", strl)
+            + chunk(b"LIST", movi))
+avi_fill = write("e_mjpeg_fill.avi", b"RIFF" + struct.pack("<I", len(avi_fill)) + avi_fill)
+case("E_menus_mjpeg_fill", "E", "gui", [avi_fill], "--export-menus-all", timeout=30,
+     expect="all files=1 md5s=%s " % md5(padded[:p_sos + 1] + STD_DHT_SEG + padded[p_sos + 1:]))
+# Extract All asks before replacing numbered files that exist (they were
+# replaced without asking, even when the name chosen was new), and doesn't ask
+# about the name chosen, which it doesn't write
+case("E_menus_all_asks", "E", "gui", ["ok_444.jpg"], "--export-menus-all --old-numbered", timeout=30,
+     expect="message box: A file with a name Extract All uses already exists: \"menu-export-1\\.000001\\.jpg\"",
+     forbid="replace it\\?")
+case("E_menus_all_cancel_keeps", "E", "gui", ["ok_444.jpg"], "--export-menus-all --old-numbered", timeout=30,
+     expect="all files=1 md5s=%s old kept=1$" % md5(b"old"))
+case("E_menus_all_replace", "E", "gui", ["ok_444.jpg"], "--export-menus-all --old-numbered --replace", timeout=30,
+     expect="all files=1 md5s=%s old kept=0$" % md5(c444), forbid="replace it\\?")
+# The menus stay enabled after a file that can't be opened
+case("E_menus_after_failed_open", "E", "gui", ["ok_444.jpg", "e_no_such_file.jpg"], "--export-menus", timeout=30,
+     expect="message box: The file shown couldn't be analyzed, so there is nothing to export")
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

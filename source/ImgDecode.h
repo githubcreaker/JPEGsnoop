@@ -380,6 +380,10 @@ public:
   uint32_t McuXyToLinear(QPoint ptMcu);
   void GetImageSize(uint32_t & nX, uint32_t & nY);
 
+  // Tools > Export TIFF
+  bool GetFrameSize(uint32_t & nX, uint32_t & nY);
+  bool GetPixelYcc(uint32_t nPixX, uint32_t nPixY, int32_t & nValY, int32_t & nValCb, int32_t & nValCr);
+
   // View helper routines
   void ViewOnDraw(QPainter * pDC, QRect rectClient, QPoint ptScrolledPos, QFont * pFont, QSize & szNewScrollSize);
   void ViewMcuOverlay(QPainter * pDC);

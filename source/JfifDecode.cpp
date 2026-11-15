@@ -18,9 +18,12 @@
 
 #include <string.h>
 
+#include <algorithm>
+
 #include <QCoreApplication>
 #include <QtDebug>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QtGlobal>
 #include <QCryptographicHash>
 #include <QByteArray>
@@ -10314,7 +10317,7 @@ void CjfifDecode::ProcessFile(QFile *inFile)
 // - m_nPosFileEnd
 //
 // RETURN:
-// - True if image is ready for extraction
+// - True if image is ready for extraction (otherwise GetExportError() says why)
 //
 bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bForceEoi, bool bIgnoreEoi)
 {
@@ -10323,6 +10326,8 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
   // If state is valid (i.e. file opened)
 
   QString strTmp = "";
+
+  m_strExportError.clear();
 
   m_pLog->AddLine("");
   m_pLog->AddLineHdr("*** Exporting JPEG ***");
@@ -10335,6 +10340,17 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
 
   QString strMissing = "";
 
+  // First, as nothing else matters without it (master checked the EOI first,
+  // so a file with no JPEG at all suggested forcing an EOI)
+  if(!m_bStateSos)
+  {
+    strTmp = QString("  ERROR: Missing marker: %1").arg("SOS");
+    m_pLog->AddLineErr(strTmp);
+    m_pLog->AddLineErr("         Aborting export");
+    ExportPrepareFail("Missing marker: SOS", "No JPEG image data (SOS marker) was found.");
+    return false;
+  }
+
   if(!m_bStateEoi)
   {
     if(!bForceEoi && !bIgnoreEoi)
@@ -10342,18 +10358,14 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
       strTmp = QString("  ERROR: Missing marker: %1").arg("EOI");
       m_pLog->AddLineErr(strTmp);
       m_pLog->AddLineErr("         Aborting export. Consider enabling [Force EOI] or [Ignore Missing EOI] option");
+      ExportPrepareFail("Missing marker: EOI", "The image has no end-of-image marker. To export it anyway, choose "
+                        "Missing EOI: Force EOI or Missing EOI: Ignore.");
       return false;
-    }
-    else if(bIgnoreEoi)
-    {
-      // Ignore the EOI, so mark the end of file, but don't
-      // set the flag where we force one.
-      m_nPosEmbedEnd = m_nPosFileEnd;
     }
     else
     {
-      // We're missing the EOI but the user has requested
-      // that we force an EOI, so let's fix things up
+      // Missing the EOI, so the image runs to the end of the file. ExportJpegDo()
+      // adds an EOI there if asked to force one.
       m_nPosEmbedEnd = m_nPosFileEnd;
     }
   }
@@ -10362,6 +10374,7 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
   {
     strTmp = QString("  No frame found at this position in file. Consider using [Img Search]");
     m_pLog->AddLineErr(strTmp);
+    ExportPrepareFail("No frame found at this position in file", "No JPEG image was found at this position.");
     return false;
   }
 
@@ -10372,6 +10385,8 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
       strTmp = QString("  ERROR: Missing marker: %1").arg("SOI");
       m_pLog->AddLineErr(strTmp);
       m_pLog->AddLineErr("         Aborting export. Consider enabling [Force SOI] option");
+      ExportPrepareFail("Missing marker: SOI", "The image has no start-of-image marker. To export it anyway, choose "
+                        "Missing SOI: Force SOI.");
       return false;
     }
     else
@@ -10379,14 +10394,6 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
       // We're missing the SOI but the user has requested
       // that we force an SOI, so let's fix things up
     }
-  }
-
-  if(!m_bStateSos)
-  {
-    strTmp = QString("  ERROR: Missing marker: %1").arg("SOS");
-    m_pLog->AddLineErr(strTmp);
-    m_pLog->AddLineErr("         Aborting export");
-    return false;
   }
 
   if(!m_bStateDqt)
@@ -10414,8 +10421,12 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
     m_pLog->AddLineWarn("        Exported JPEG may not be valid");
   }
 
-  if(m_nPosEmbedEnd < m_nPosEmbedStart)
+  // The image is copied as [start, SOS) and [SOS, end), so SOS must lie
+  // between them (and end can't be past the end of the file)
+  if((m_nPosEmbedEnd < m_nPosEmbedStart) || (m_nPosSos < m_nPosEmbedStart) || (m_nPosSos > m_nPosEmbedEnd) ||
+     (m_nPosEmbedEnd > m_nPosFileEnd))
   {
+    m_strExportError = "Invalid SOI-EOI order";
     strTmp = QString("ERROR: Invalid SOI-EOI order. Export aborted.");
     m_pLog->AddLineErr(strTmp);
     if(m_pAppConfig->interactive())
@@ -10431,89 +10442,287 @@ bool CjfifDecode::ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bFor
 #define EXPORT_BUF_SIZE 131072
 
 //-----------------------------------------------------------------------------
+// ExportJpegPrepare() found the image can't be exported: keep the reason for
+// GetExportError() and, in interactive mode, say so (master only added it to
+// the end of the report)
+void CjfifDecode::ExportPrepareFail(const QString &strReason, const QString &strExplain)
+{
+  m_strExportError = strReason;
+
+  if(m_pAppConfig->interactive())
+  {
+    QMessageBox::warning(nullptr, "JPEGsnoop", QString("Nothing was exported. %1").arg(strExplain));
+  }
+}
+
+//-----------------------------------------------------------------------------
+// Log an export error, keep it for GetExportError() and show it in
+// interactive mode
+void CjfifDecode::ExportError(const QString &strError)
+{
+  m_strExportError = strError;
+  m_pLog->AddLineErr(strError);
+
+  if(m_pAppConfig->interactive())
+  {
+    QMessageBox::warning(nullptr, "JPEGsnoop", strError);
+  }
+}
+
+//-----------------------------------------------------------------------------
+// Open an export's output file. Refuses the file being read: the copy reads
+// it while writing, so writing over it would destroy both.
+//
+// The output is a QSaveFile: it is written to a temporary file and only
+// replaces strFileOut when complete, so a failed export leaves no partial
+// file behind (or the previous file, if there was one).
+bool CjfifDecode::ExportOpen(const QString &strFileIn, const QString &strFileOut, QSaveFile &fileOut)
+{
+  if(strFileIn.isEmpty())
+  {
+    ExportError("ERROR: Export but source filename empty");
+    return false;
+  }
+
+  if(SameFile(strFileIn, strFileOut))
+  {
+    ExportError("ERROR: Can't overwrite source file. Aborting export.");
+    return false;
+  }
+
+  fileOut.setFileName(strFileOut);
+
+  if(!fileOut.open(QIODevice::WriteOnly))
+  {
+    ExportError(QString("ERROR: Couldn't open file for write [%1]: [%2]").arg(strFileOut).arg(fileOut.errorString()));
+    return false;
+  }
+
+  return true;
+}
+
+//-----------------------------------------------------------------------------
+// Write a block to an export's output file
+bool CjfifDecode::ExportWrite(QSaveFile &fileOut, const char *pData, qint64 nLen)
+{
+  if(fileOut.write(pData, nLen) != nLen)
+  {
+    ExportError(QString("ERROR: Couldn't write file [%1]: [%2]").arg(fileOut.fileName()).arg(fileOut.errorString()));
+    fileOut.cancelWriting();
+    return false;
+  }
+
+  return true;
+}
+
+//-----------------------------------------------------------------------------
+// Copy the file's bytes [nStart, nEnd) to an export's output file, with the
+// file overlays unless bClean, showing progress through the file (nFileLen
+// bytes).
+//
+// The copy loops this replaces ran "while (pos < last)" over an inclusive
+// range, so they dropped the last byte whenever the range was one byte past
+// a whole number of 128 KB blocks (such as the EOI's 0xD9).
+bool CjfifDecode::ExportCopy(QSaveFile &fileOut, uint32_t nStart, uint32_t nEnd, bool bClean, uint32_t nFileLen)
+{
+  QByteArray abBuf(EXPORT_BUF_SIZE, '\0');
+  char *pBuf = abBuf.data();
+
+  for(uint32_t nPos = nStart; nPos < nEnd;)
+  {
+    const uint32_t nCopyLen = std::min<uint32_t>(nEnd - nPos, EXPORT_BUF_SIZE);
+
+    for(uint32_t nInd = 0; nInd < nCopyLen; nInd++)
+    {
+      pBuf[nInd] = static_cast<char>(Buf(nPos + nInd, bClean));
+    }
+
+    if(!ExportWrite(fileOut, pBuf, nCopyLen))
+    {
+      return false;
+    }
+
+    nPos += nCopyLen;
+
+    // 64-bit: nPos * 100 wrapped for files over 42 MB
+    if(nFileLen > 0)
+    {
+      SetStatusText(QString("Exporting %1%...").arg(static_cast<quint64>(nPos) * 100 / nFileLen, 3));
+    }
+  }
+
+  return true;
+}
+
+//-----------------------------------------------------------------------------
+// The standard Motion JPEG DHT segment (m_abMJPGDHTSeg) cut down to the
+// tables (DC 0 and 1, AC 0 and 1) that the file's marker segments in
+// [nStart, nEnd) don't define. Empty if they define them all.
+//
+// OUTPUT:
+// - strInserted                = The tables kept, such as "DC 1, AC 1"
+// - bChecked                   = False if the segments couldn't all be read (then
+//                                nothing is returned: inserting a table the image
+//                                defines would replace its own)
+//
+QByteArray CjfifDecode::ExportMissingDht(uint32_t nStart, uint32_t nEnd, bool bClean, QString &strInserted,
+                                         bool &bChecked)
+{
+  bool abDefined[2][4] = { { false, false, false, false }, { false, false, false, false } };
+
+  strInserted.clear();
+  bChecked = false;
+
+  // Walk the marker segments up to SOS
+  quint64 nPos = nStart;
+
+  while(nPos < nEnd)
+  {
+    if(Buf(static_cast<uint32_t>(nPos), bClean) != 0xFF)
+    {
+      return QByteArray();
+    }
+
+    // A 0xFF that is the last byte before SOS, or followed by another, is a
+    // fill byte (a marker may have any number before it). The last one used
+    // to fail the two-byte check below, so nothing was inserted.
+    if((nPos + 1 == nEnd) || (Buf(static_cast<uint32_t>(nPos + 1), bClean) == 0xFF))
+    {
+      nPos += 1;
+      continue;
+    }
+
+    const uint32_t nMarker = Buf(static_cast<uint32_t>(nPos + 1), bClean);
+
+    if((nMarker == JFIF_SOI) || (nMarker == JFIF_TEM) || ((nMarker >= JFIF_RST0) && (nMarker <= JFIF_RST7)))
+    {
+      nPos += 2;                // No length
+      continue;
+    }
+
+    if(nPos + 4 > nEnd)
+    {
+      return QByteArray();
+    }
+
+    const quint64 nLen = (static_cast<quint64>(Buf(static_cast<uint32_t>(nPos + 2), bClean)) << 8) |
+                         Buf(static_cast<uint32_t>(nPos + 3), bClean);
+    const quint64 nSegEnd = nPos + 2 + nLen;
+
+    if((nLen < 2) || (nSegEnd > nEnd))
+    {
+      return QByteArray();
+    }
+
+    if(nMarker == JFIF_DHT)
+    {
+      // Tc/Th, then 16 code counts and the values
+      for(quint64 nTbl = nPos + 4; nTbl + 17 <= nSegEnd;)
+      {
+        const uint32_t nTcTh = Buf(static_cast<uint32_t>(nTbl), bClean);
+        quint64 nValues = 0;
+
+        for(uint32_t nInd = 1; nInd <= 16; nInd++)
+        {
+          nValues += Buf(static_cast<uint32_t>(nTbl + nInd), bClean);
+        }
+
+        if(((nTcTh >> 4) < 2) && ((nTcTh & 0x0F) < 4))
+        {
+          abDefined[nTcTh >> 4][nTcTh & 0x0F] = true;
+        }
+
+        nTbl += 17 + nValues;
+      }
+    }
+
+    nPos = nSegEnd;
+  }
+
+  bChecked = true;
+
+  // The standard segment's tables (after FF C4 and its length), keeping the
+  // ones the image lacks
+  QByteArray abTables;
+  QStringList astrInserted;
+
+  for(uint32_t nTbl = 4; nTbl + 17 <= JFIF_DHT_FAKE_SZ;)
+  {
+    const uint32_t nTcTh = m_abMJPGDHTSeg[nTbl];
+    uint32_t nValues = 0;
+
+    for(uint32_t nInd = 1; nInd <= 16; nInd++)
+    {
+      nValues += m_abMJPGDHTSeg[nTbl + nInd];
+    }
+
+    const uint32_t nTblLen = 17 + nValues;
+
+    if(!abDefined[nTcTh >> 4][nTcTh & 0x0F])
+    {
+      abTables.append(reinterpret_cast<const char *>(&m_abMJPGDHTSeg[nTbl]), nTblLen);
+      astrInserted << QString("%1 %2").arg(((nTcTh >> 4) == 0) ? "DC" : "AC").arg(nTcTh & 0x0F);
+    }
+
+    nTbl += nTblLen;
+  }
+
+  if(abTables.isEmpty())
+  {
+    return QByteArray();
+  }
+
+  strInserted = astrInserted.join(", ");
+
+  QByteArray abSeg;
+  abSeg.append(static_cast<char>(0xFF));
+  abSeg.append(static_cast<char>(JFIF_DHT));
+  abSeg.append(static_cast<char>((abTables.size() + 2) >> 8));
+  abSeg.append(static_cast<char>((abTables.size() + 2) & 0xFF));
+  abSeg.append(abTables);
+  return abSeg;
+}
+
+//-----------------------------------------------------------------------------
+// Finish an export's output file
+bool CjfifDecode::ExportCommit(QSaveFile &fileOut)
+{
+  if(!fileOut.commit())
+  {
+    ExportError(QString("ERROR: Couldn't write file [%1]: [%2]").arg(fileOut.fileName()).arg(fileOut.errorString()));
+    return false;
+  }
+
+  return true;
+}
+
+//-----------------------------------------------------------------------------
 // Export the embedded JPEG image at the current position in the file (with overlays)
 // (may be the primary image or even an embedded thumbnail).
+//
+// RETURN:
+// - True if the file was written (otherwise GetExportError() says why)
 bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
                                uint32_t nFileLen, bool bOverlayEn, bool bDhtAviInsert, bool bForceSoi, bool bForceEoi)
 {
-  QFile *pFileOutput;
-
   QString strTmp = "";
+
+  m_strExportError.clear();
 
   strTmp = QString("  Exporting to:   [%1]").arg(strFileOut);
   m_pLog->AddLine(strTmp);
 
-  if(strFileIn == strFileOut)
-  {
-    strTmp = QString("ERROR: Can't overwrite source file. Aborting export.");
-    m_pLog->AddLineErr(strTmp);
-
-    if(m_pAppConfig->interactive())
-    {
-      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
-    }
-
-    return false;
-  }
-
-  Q_ASSERT(strFileIn != "");
-
-  if(strFileIn == "")
-  {
-    strTmp = QString("ERROR: Export but source filename empty");
-    m_pLog->AddLineErr(strTmp);
-
-    if(m_pAppConfig->interactive())
-    {
-      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
-    }
-
-    return false;
-  }
-
-    // Open specified file
-    // Added in shareDenyNone as this apparently helps resolve some people's troubles
-    // with an error showing: Couldn't open file "Sharing Violation"
-//              pFileOutput = new CFile(strFileOut, CFile::modeCreate| CFile::modeWrite | CFile::typeBinary | CFile::shareDenyNone);
-  pFileOutput = new QFile(strFileOut);
-
-  if((pFileOutput->open(QIODevice::WriteOnly)) == false)
-  {
-    QString strError;
-
-    strError = QString("ERROR: Couldn't open file for write [%1]: [%2]").arg(strFileOut).arg(pFileOutput->errorString());
-    m_pLog->AddLineErr(strError);
-
-    if(m_pAppConfig->interactive())
-    {
-      msgBox.setText(strError);
-      msgBox.exec();
-    }
-
-    delete pFileOutput;         // (was leaked)
-    pFileOutput = nullptr;
-
-    return false;
-  }
-
   // Don't attempt to load buffer with zero length file!
   if(nFileLen == 0)
   {
-    strTmp = QString("ERROR: Source file length error. Please Reprocess first.");
-    m_pLog->AddLineErr(strTmp);
+    ExportError("ERROR: Source file length error. Please Reprocess first.");
+    return false;
+  }
 
-    if(m_pAppConfig->interactive())
-    {
-      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
-    }
+  QSaveFile fileOut;
 
-    if(pFileOutput)
-    {
-      delete pFileOutput;
-
-      pFileOutput = nullptr;
-    }
-
+  if(!ExportOpen(strFileIn, strFileOut, fileOut))
+  {
     return false;
   }
 
@@ -10522,117 +10731,77 @@ bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
   // Step 1: Copy from SOI -> SOS (not incl)
   // Step 2: Insert Fake DHT
   // Step 3: Copy from SOS -> EOI
-  uint32_t nCopyStart;
-  uint32_t nCopyEnd;
-  uint32_t nCopyLeft;
-  uint32_t ind;
-  uint8_t *pBuf;
-
-  pBuf = new uint8_t[EXPORT_BUF_SIZE + 10];
-
-  if(!pBuf)
-  {
-    if(pFileOutput)
-    {
-      delete pFileOutput;
-      pFileOutput = nullptr;
-    }
-
-    return false;
-  }
-
-  // Step 1
 
   // If we need to force an SOI, do it now
   if(!m_bStateSoi && bForceSoi)
   {
     m_pLog->AddLine("    Forcing SOI Marker");
-    uint8_t anBufSoi[2] = { 0xFF, JFIF_SOI };
-    pFileOutput->write(reinterpret_cast<char *>(&anBufSoi), 2);
+    const char acSoi[2] = { static_cast<char>(0xFF), static_cast<char>(JFIF_SOI) };
+
+    if(!ExportWrite(fileOut, acSoi, 2))
+    {
+      return false;
+    }
   }
 
-  nCopyStart = m_nPosEmbedStart;
-  nCopyEnd = (m_nPosSos - 1);
-  ind = nCopyStart;
-
-  while(ind < nCopyEnd)
+  // Step 1
+  if(!ExportCopy(fileOut, m_nPosEmbedStart, m_nPosSos, !bOverlayEn, nFileLen))
   {
-    nCopyLeft = nCopyEnd - ind + 1;
-
-    if(nCopyLeft > EXPORT_BUF_SIZE)
-    {
-      nCopyLeft = EXPORT_BUF_SIZE;
-    }
-
-    for(uint32_t ind1 = 0; ind1 < nCopyLeft; ind1++)
-    {
-      pBuf[ind1] = Buf(ind + ind1, !bOverlayEn);
-    }
-
-    pFileOutput->write(reinterpret_cast<char *>(pBuf), nCopyLeft);
-    ind += nCopyLeft;
-    // NOTE: We ensure nFileLen != 0 earlier
-    Q_ASSERT(nFileLen > 0);
-    strTmp = QString("Exporting %1%...").arg(ind * 100 / nFileLen, 3);
-    SetStatusText(strTmp);
+    return false;
   }
 
   if(bDhtAviInsert)
   {
-    // Step 2. The following struct includes the JFIF marker too
-    strTmp = "  Inserting standard AVI DHT huffman table";
-    m_pLog->AddLine(strTmp);
-//!!    pFileOutput->write(reinterpret_cast<char *>(&m_abMJPGDHTSeg), JFIF_DHT_FAKE_SZ);
+    // Step 2: the standard tables the image doesn't define itself. (This was
+    // commented out in the port, so the option wrote nothing. Master wrote
+    // all four tables, which replaced a frame's own, such as optimized ones,
+    // so its scan decoded wrongly.)
+    QString strInserted;
+    bool bChecked = false;
+    const QByteArray abDht = ExportMissingDht(m_nPosEmbedStart, m_nPosSos, !bOverlayEn, strInserted, bChecked);
+
+    if(!bChecked)
+    {
+      m_pLog->AddLineWarn("  NOTE: Not inserting the standard AVI DHT huffman table: couldn't read which tables the "
+                          "image defines");
+    }
+    else if(abDht.isEmpty())
+    {
+      m_pLog->AddLine("  Not inserting the standard AVI DHT huffman table: the image defines its own tables");
+    }
+    else
+    {
+      m_pLog->AddLine(QString("  Inserting standard AVI DHT huffman table (%1)").arg(strInserted));
+
+      if(!ExportWrite(fileOut, abDht.constData(), abDht.size()))
+      {
+        return false;
+      }
+    }
   }
 
   // Step 3
-  nCopyStart = m_nPosSos;
-  nCopyEnd = m_nPosEmbedEnd - 1;
-  ind = nCopyStart;
-
-  while(ind < nCopyEnd)
+  if(!ExportCopy(fileOut, m_nPosSos, m_nPosEmbedEnd, !bOverlayEn, nFileLen))
   {
-    nCopyLeft = nCopyEnd - ind + 1;
-
-    if(nCopyLeft > EXPORT_BUF_SIZE)
-    {
-      nCopyLeft = EXPORT_BUF_SIZE;
-    }
-
-    for(uint32_t ind1 = 0; ind1 < nCopyLeft; ind1++)
-    {
-      pBuf[ind1] = Buf(ind + ind1, !bOverlayEn);
-    }
-
-    pFileOutput->write(reinterpret_cast<char *>(pBuf), nCopyLeft);
-    ind += nCopyLeft;
-    // NOTE: We ensure nFileLen != 0 earlier
-    Q_ASSERT(nFileLen > 0);
-    strTmp = QString("Exporting %1%...").arg(ind * 100 / nFileLen, 3);
-    SetStatusText(strTmp);
+    return false;
   }
 
-  // Now optionally insert the EOI Marker
-  if(bForceEoi)
+  // Now optionally insert the EOI Marker: only when the image has none (an
+  // image that has one used to get a second)
+  if(!m_bStateEoi && bForceEoi)
   {
     m_pLog->AddLine("    Forcing EOI Marker");
-    uint8_t anBufEoi[2] = { 0xFF, JFIF_EOI };
-    pFileOutput->write(reinterpret_cast<char *>(&anBufEoi), 2);
+    const char acEoi[2] = { static_cast<char>(0xFF), static_cast<char>(JFIF_EOI) };
+
+    if(!ExportWrite(fileOut, acEoi, 2))
+    {
+      return false;
+    }
   }
 
-  // Free up space
-  pFileOutput->close();
-
-  if(pBuf)
+  if(!ExportCommit(fileOut))
   {
-    delete[]pBuf;
-    pBuf = nullptr;
-  }
-
-  if(pFileOutput)
-  {
-    delete pFileOutput;
-    pFileOutput = nullptr;
+    return false;
   }
 
   SetStatusText("");
@@ -10646,118 +10815,29 @@ bool CjfifDecode::ExportJpegDo(QString strFileIn, QString strFileOut,
 // Export a subset of the file with no overlays or mods
 bool CjfifDecode::ExportJpegDoRange(QString strFileIn, QString strFileOut, uint32_t nStart, uint32_t nEnd)
 {
-  QFile *pFileOutput;
-
   QString strTmp = "";
+
+  m_strExportError.clear();
 
   strTmp = QString("  Exporting range to:   [%1]").arg(strFileOut);
   m_pLog->AddLine(strTmp);
 
-  if(strFileIn == strFileOut)
-  {
-    strTmp = "ERROR: Can't overwrite source file. Aborting export.";
-    m_pLog->AddLineErr(strTmp);
-    if(m_pAppConfig->interactive())
-    {
-      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
-    }
+  QSaveFile fileOut;
 
+  if(!ExportOpen(strFileIn, strFileOut, fileOut))
+  {
     return false;
   }
 
-  Q_ASSERT(strFileIn != "");
-
-  if(strFileIn == "")
+  // [nStart, nEnd], as before. (Unused, like master's.)
+  if((nEnd >= nStart) && !ExportCopy(fileOut, nStart, nEnd + 1, true, m_nPosFileEnd))
   {
-    strTmp = QString("ERROR: Export but source filename empty");
-    m_pLog->AddLineErr(strTmp);
-    if(m_pAppConfig->interactive())
-    {
-      QMessageBox::warning(nullptr, "JPEGsnoop", strTmp);
-    }
-
     return false;
   }
 
-  pFileOutput = new QFile(strFileOut);
-
-  if((pFileOutput->open(QIODevice::WriteOnly)) == false)
+  if(!ExportCommit(fileOut))
   {
-    QString strError;
-
-    strError = QString("ERROR: Couldn't open file for write [%1]: [%2]").arg(strFileOut).arg(pFileOutput->errorString());
-    m_pLog->AddLineErr(strError);
-
-    if(m_pAppConfig->interactive())
-    {
-      msgBox.setText(strError);
-      msgBox.exec();
-    }
-
-    delete pFileOutput;         // (was leaked)
-    pFileOutput = nullptr;
-
     return false;
-  }
-
-  uint32_t nCopyStart;
-  uint32_t nCopyEnd;
-  uint32_t nCopyLeft;
-  uint32_t ind;
-
-  uint8_t *pBuf;
-
-  pBuf = new uint8_t [EXPORT_BUF_SIZE + 10];
-
-  if(!pBuf)
-  {
-    if(pFileOutput)
-    {
-      delete pFileOutput;
-      pFileOutput = nullptr;
-    }
-
-    return false;
-  }
-
-  // Step 1
-  nCopyStart = nStart;
-  nCopyEnd = nEnd;
-  ind = nCopyStart;
-
-  while(ind < nCopyEnd)
-  {
-    nCopyLeft = nCopyEnd - ind + 1;
-
-    if(nCopyLeft > EXPORT_BUF_SIZE)
-    {
-      nCopyLeft = EXPORT_BUF_SIZE;
-    }
-
-    for(uint32_t ind1 = 0; ind1 < nCopyLeft; ind1++)
-    {
-      pBuf[ind1] = Buf(ind + ind1, false);
-    }
-
-    pFileOutput->write(reinterpret_cast<char *>(pBuf), nCopyLeft);
-    ind += nCopyLeft;
-    strTmp = QString("Exporting %1%...").arg(ind * 100 / (nCopyEnd - nCopyStart), 3);
-    SetStatusText(strTmp);
-  }
-
-  // Free up space
-  pFileOutput->close();
-
-  if(pBuf)
-  {
-    delete[]pBuf;
-    pBuf = nullptr;
-  }
-
-  if(pFileOutput)
-  {
-    delete pFileOutput;
-    pFileOutput = nullptr;
   }
 
   SetStatusText("");

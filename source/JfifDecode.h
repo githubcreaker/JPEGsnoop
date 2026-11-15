@@ -40,6 +40,7 @@
 class CDocLog;
 class CSnoopConfig;
 class CDbSigs;
+class QSaveFile;
 
 // Disable DICOM support until fully tested
 //#define SUPPORT_DICOM
@@ -161,9 +162,10 @@ public:
   bool GetDecodeStatus();
 
   //      void                    ExportRangeSet(uint32_t nStart, uint32_t nEnd);
-    bool ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bForceEoi, bool bIgnoreEoi);
+  bool ExportJpegPrepare(QString strFileIn, bool bForceSoi, bool bForceEoi, bool bIgnoreEoi);
   bool ExportJpegDo(QString strFileIn, QString strFileOut, uint32_t nFileLen,
                     bool bOverlayEn, bool bDhtAviInsert, bool bForceSoi, bool bForceEoi);
+  QString GetExportError() const { return m_strExportError; }   // Why the last export failed
 
   void ProcessFile(QFile * inFile);
 
@@ -216,6 +218,13 @@ private:
   uint32_t ReadBe2(uint32_t nPos);
 
   bool ExportJpegDoRange(QString strFileIn, QString strFileOut, uint32_t nStart, uint32_t nEnd);
+  void ExportError(const QString &strError);
+  void ExportPrepareFail(const QString &strReason, const QString &strExplain);
+  bool ExportOpen(const QString &strFileIn, const QString &strFileOut, QSaveFile &fileOut);
+  bool ExportWrite(QSaveFile &fileOut, const char *pData, qint64 nLen);
+  bool ExportCopy(QSaveFile &fileOut, uint32_t nStart, uint32_t nEnd, bool bClean, uint32_t nFileLen);
+  bool ExportCommit(QSaveFile &fileOut);
+  QByteArray ExportMissingDht(uint32_t nStart, uint32_t nEnd, bool bClean, QString &strInserted, bool &bChecked);
 
   uint32_t DecodeMarker();
   bool ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen);
@@ -285,6 +294,8 @@ private:
   bool m_bPsd;                  // Is it a Photoshop file?
 
   bool m_pImgSrcDirty;          // Do we need to recalculate the scan decode?
+
+  QString m_strExportError;     // Why the last export failed
 
   // File position records
   uint32_t m_nPos;         // Current file/buffer position

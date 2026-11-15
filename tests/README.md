@@ -17,11 +17,12 @@ when it is installed, so Pillow needn't be installed separately).
 
 - `harness/` builds `jpegsnoop-harness` from the app's sources (shared through
   `JPEGsnoopQt.pri`) plus a small driver:
-  - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]`
-    decodes one file in non-interactive mode and prints the report
+  - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]
+    [--start N]` decodes one file in non-interactive mode and prints the report
     (`--unknown-exif` also reports unknown EXIF tags, which the app hides by
     default; `--pixels` prints the decoded colour at each point; with
-    `--histo` it also counts the pixels drawn in each histogram image);
+    `--histo` it also counts the pixels drawn in each histogram image;
+    `--start` decodes from file offset N);
   - `gui <file>... [--mouse] [--log] [--reprocess-first] [--histo]
     [--cycle-channels] [--repeat N] [--max-growth-mb N]` opens the files in the
     real `MainWindow` like a fresh install. `--mouse` moves and clicks over the
@@ -42,8 +43,27 @@ when it is installed, so Pillow needn't be installed separately).
       background, then switches between light and dark palettes and reports it again
       (`--dark` starts with a dark palette, as macOS Dark Mode does).
 
+    - `--export-menus` chooses Tools > Export JPEG and Tools > Export TIFF,
+      answering each dialog with OK and printing its title (`--export-menus-cancel`
+      cancels the settings and format dialogs instead). `--export-menus-all` ticks
+      Extract All and prints the numbered files written; `--old-numbered` leaves
+      files named as the first of them and as the name chosen beforehand, and
+      `--replace` answers Replace when asked (otherwise questions are cancelled).
+
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
+  - `export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
+    [--dht-avi] [--out PATH] [--out-same] [--out-same-case]` opens the file in
+    the real `MainWindow` and runs Export JPEG with those settings (`--all` is
+    Extract All), to a temporary `out.jpg` unless `--out` gives a path.
+    `--out-same` and `--out-same-case` export over the file itself, by its name
+    or by its name in the other case. It prints the size and MD5 of each file
+    written, a `harness: exported N md5s=...` line, whether the source is
+    unchanged, and the report from the export on;
+  - `export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]`
+    runs Export TIFF the same way, then reads the TIFF back and checks its tags
+    and every sample against a separate decode of the file
+    (`harness: tiff ... check=ok`);
   - `settings` exercises settings load/store, option toggles and the
     Configuration dialog;
   - `--scale F`, in any mode, runs as if on a screen with F device pixels per
@@ -67,7 +87,8 @@ Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
 (`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
 GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F10`
-are in its "Follow-up review" section, and `PSD` in its "PSD decoding" section);
+are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, and `E`
+in its "Export JPEG and Export TIFF" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

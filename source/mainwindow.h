@@ -26,6 +26,8 @@
 #include <QPlainTextEdit>
 #include <QPainter>
 
+#include "exportdialogs.h"
+
 class QPrinter;
 
 class SnoopConfigDialog;
@@ -47,6 +49,14 @@ public:
 
   QPlainTextEdit *textEdit;
 
+  // Tools > Export JPEG and Export TIFF without their dialogs (as the test
+  // driver uses them). Both act on the file shown; Export JPEG analyzes it
+  // again first, and adds what it did to the report.
+  bool exportJpeg(const QString &strOut, const ExportJpegSettings &sSettings);
+  bool exportTiff(const QString &strOut, FileTiff::teFormat eFormat, QString &strError);
+  bool canExportTiff();
+  bool canExportYcc();
+
 protected:
   void closeEvent(QCloseEvent *e) override;
   bool eventFilter(QObject *pObj, QEvent *pEvent) override;
@@ -66,6 +76,8 @@ private slots:
   void filePrint();
   void filePrintPreview();
   void printPreview(QPrinter *);
+  void onExportJpeg();
+  void onExportTiff();
 
 private:
   MainWindow &operator = (const MainWindow&);
@@ -76,8 +88,10 @@ private:
   void enableMenus();
   void clearImageViews();
   void AnalyzeFile();
+  bool AnalyzeOpen();
   void AnalyzeFileDo();
   void AnalyzeClose();
+  bool exportAllJpegs(const QString &strOut, const ExportJpegSettings &sSettings);
 
   CDocLog *m_pDocLog;
   CDbSigs *m_pDbSigs;
@@ -197,10 +211,10 @@ private:
 
   // Input JPEG file
   QFile *m_pFile;
-  qint64 m_lFileSize;
+  qint64 m_lFileSize = 0;
 
-  bool m_bFileAnalyzed;         // Have we opened and analyzed a file?
-  bool m_bFileOpened;           // Is a file currently opened?
+  bool m_bFileAnalyzed = false; // Have we opened and analyzed a file? (These three were never initialised)
+  bool m_bFileOpened = false;   // Is a file currently opened?
 
   QLabel *rgbHisto;
   QLabel *yHisto;
