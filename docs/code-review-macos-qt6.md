@@ -481,12 +481,12 @@ row leaves no image, which holds trivially when nothing is decoded.
 - **GUI:** PSD previews at 12.5%, 100% and 800% match the decoded image, with mouse moves
   and channel changes. Going from a JPEG to a PSD and back shows each image, and a bad
   PSD after a good one shows none.
-- **Fuzzing, partial:** an ASan/UBSan run over 47,146 damaged copies of 19 PSDs (every
+- **Fuzzing, partial:** an ASan/UBSan run over 47,146 damaged copies of 17 PSDs (every
   cut in the first 1,200 bytes, 4- and 2-byte fields set to extreme values at every
   offset in the first 600 bytes, and random changes) was stopped after 24 minutes,
-  about 3,000 files, because the whole set would take five to six hours. It used the
-  build before the empty-row check. None of the files it reached crashed or gave a
-  sanitizer report, and none was slow without the sanitizers.
+  about 3,000 files. It used the build before the empty-row check. None of the files it
+  reached crashed or gave a sanitizer report, and none was slow without the sanitizers.
+  The whole set ran later, on the build after the second check below.
 - **No change for other files:** the 64 reports of the 32 valid files are the same as
   for `6ad33ef`.
 - **Not checked at run time: leaks.** macOS's ASan has no leak checker.
@@ -527,6 +527,11 @@ the header limits stop such a composite first.
   or hangs (cut at every byte up to 700, 4- and 2-byte fields set to extreme values at
   every offset up to 450, and random changes). Under ASan/UBSan, 1,500 of them, picked at
   random, gave no reports.
+- **Full fuzz run:** all 58,709 damaged files, these and the 47,146 above, then ran
+  under ASan/UBSan on the `642da2d` build, 8 at a time, in 3 hours 10 minutes. None
+  crashed, hung or gave a sanitizer report. 66 took over 5 seconds while sharing the
+  machine, but one at a time each takes under 0.9 seconds with the sanitizers and under
+  0.5 without.
 - **Still no change for other files:** the 64 reports of the 32 valid files are the same
   as for `6ad33ef`.
 
