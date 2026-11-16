@@ -1492,6 +1492,67 @@ case("A_about_icon_retina", "A", "gui", "ok_444.jpg", "--about --scale 2", timeo
      expect="harness: about icon=96x96 dpr=2 " + ICON_COLOURS)
 case("A_about_closes", "A", "gui", "ok_444.jpg", "--about", timeout=30, expect="harness: about closed=1$")
 
+# --- T: Edit > Select All and Copy (the report) ----------------------------------
+# Neither item had a handler, and the report could be typed into; on Windows it
+# is read-only. gui --edit runs steps on the report and prints, after each, how
+# much is selected, the Edit items enabled, the undo history, where the focus is,
+# whether the report changed and what the clipboard holds (first a marker).
+def edit_case(cid, steps, expect, names=("ok_444.jpg",), extra="", forbid="-"):
+    case(cid, "T", "gui", list(names), ("--edit " + steps + " " + extra).strip(), timeout=30,
+         expect=expect, forbid=forbid)
+
+
+edit_case("T_selectall_menu", "selectall",
+          "harness: edit selectall: selected=all chars=[1-9][0-9]* copy=1 selectall=1 ")
+edit_case("T_selectall_focuses", "unfocus,selectall", "harness: edit selectall: selected=all .* focus=report ")
+edit_case("T_selectall_off_before_file", "state",
+          "harness: edit state: selected=none chars=[0-9]+ copy=0 selectall=0 ", extra="--edit-before")
+edit_case("T_copy_menu", "selectall,copy", "harness: edit copy: selected=all .* clipboard=report$")
+# Select All is on while the report has any text, as on Windows: also when the
+# first file is empty or can't be opened and the report only holds the error
+# (it came on only once a file opened)
+for cid, name in (("T_selectall_empty_file", "s_empty.jpg"), ("T_selectall_failed_open", "f4_no_such_file.jpg")):
+    edit_case(cid, "state,selectall,copy",
+              "harness: edit copy: selected=all chars=[1-9][0-9]* copy=1 selectall=1 .* clipboard=report$",
+              names=(name,))
+edit_case("T_copy_off_without_selection", "state", "harness: edit state: selected=none chars=[0-9]+ copy=0 selectall=1 ")
+# Shift+Up after Select All leaves all but the last line selected: keyboard
+# selection still works in the read-only report, and Copy takes only that
+edit_case("T_copy_part", "selectall,key:shift-up,copy",
+          "harness: edit copy: selected=part chars=[0-9]+ copy=1 .* clipboard=selection$")
+edit_case("T_click_deselects", "selectall,click", "harness: edit click: selected=none chars=[0-9]+ copy=0 ")
+# Cmd+A and Cmd+C with the focus outside the report reach the menu items
+edit_case("T_key_selectall_unfocused", "unfocus,key:selectall",
+          "harness: edit key:selectall: selected=all .* focus=report ")
+edit_case("T_key_copy_unfocused", "selectall,unfocus,key:copy",
+          "harness: edit key:copy: selected=all .* focus=none .* clipboard=report$")
+edit_case("T_key_copy_focused", "key:selectall,key:copy", "harness: edit key:copy: selected=all .* clipboard=report$")
+# The report can't be changed: typing after Select All replaced all of it
+edit_case("T_type_after_selectall", "selectall,type:x", "harness: edit type:x: selected=all .* report=same ",
+          forbid="report=changed")
+edit_case("T_paste_ignored", "key:paste", "harness: edit key:paste: .* report=same ", forbid="report=changed")
+edit_case("T_cut_ignored", "key:selectall,key:cut", "harness: edit key:cut: .* report=same ", forbid="report=changed")
+edit_case("T_backspace_ignored", "key:selectall,key:backspace", "harness: edit key:backspace: .* report=same ",
+          forbid="report=changed")
+edit_case("T_undo_ignored", "key:undo", "harness: edit key:undo: selected=none .* undo=0 .* report=same ",
+          forbid="report=changed")
+# No undo history is kept for the decoder's lines (one step per line before)
+edit_case("T_no_undo_history", "state", "harness: edit state: .* undo-steps=0 readonly=1 ")
+# The clipboard has plain text and HTML. The HTML keeps the report's font, and
+# its coloured lines have their light-background colours even in Dark Mode
+# (the dark ones are pale on a white page); the report keeps its own colours.
+LIGHT_COLOURS = "#0101ff,#2020ff,#800101"
+edit_case("T_copy_html_light", "selectall,copy",
+          f"harness: edit clipboard formats=text/plain,text/html html colours={LIGHT_COLOURS} fonts=Courier "
+          f"report colours={LIGHT_COLOURS}$")
+edit_case("T_copy_html_dark", "selectall,copy",
+          f"harness: edit clipboard formats=text/plain,text/html html colours={LIGHT_COLOURS} fonts=Courier "
+          "report colours=#6ca0ff,#8ab4ff,#ff8a80$", extra="--dark")
+# A selection doesn't outlive the report: the next file starts with none
+edit_case("T_next_file_clears", "state,selectall",
+          "harness: edit state: selected=none chars=[0-9]+ copy=0 ", names=("ok_444.jpg", "ok_420.jpg"),
+          forbid="harness: edit state: selected=(all|part)|harness: edit state: selected=none chars=[0-9]+ copy=1")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

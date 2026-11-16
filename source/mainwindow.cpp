@@ -36,6 +36,7 @@
 #include "WindowBuf.h"
 #include "note.h"
 #include "q_decodedetaildlg.h"
+#include "reportview.h"
 #include "snoop.h"
 #include "snoopconfigdialog.h"
 
@@ -62,7 +63,7 @@ const QString rsrcPath = ":/images/win";
 
 //-----------------------------------------------------------------------------
 
-MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new QPlainTextEdit)
+MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new CReportView)
 {
   if(DEBUG_EN)
     qDebug() << "MainWindow::MainWindow() Begin";
@@ -264,13 +265,22 @@ void MainWindow::createActions(void)
   undoAct->setShortcuts(QKeySequence::Undo);
   undoAct->setEnabled(false);
 
+  // Edit > Copy and Select All act on the report, as on Windows. Copy is
+  // enabled while part of the report is selected, and Select All while the
+  // report has any text: also when it only holds the error for a file that
+  // couldn't be opened or was empty. (isEmpty() takes constant time.)
   copyAct = new QAction(tr("&Copy"), this);
   copyAct->setShortcuts(QKeySequence::Copy);
   copyAct->setEnabled(false);
+  connect(copyAct, &QAction::triggered, textEdit, &QPlainTextEdit::copy);
+  connect(textEdit, &QPlainTextEdit::copyAvailable, copyAct, &QAction::setEnabled);
 
   selectAllAct = new QAction(tr("Select All"), this);
   selectAllAct->setShortcuts(QKeySequence::SelectAll);
   selectAllAct->setEnabled(false);
+  connect(selectAllAct, &QAction::triggered, this, &MainWindow::onSelectAll);
+  connect(textEdit, &QPlainTextEdit::textChanged, this,
+          [this]() { selectAllAct->setEnabled(!textEdit->document()->isEmpty()); });
 
   findAct = new QAction(tr("Find..."), this);
   findAct->setShortcuts(QKeySequence::Find);
@@ -917,7 +927,6 @@ void MainWindow::enableMenus()
 {
   saveLogAct->setEnabled(true);
   reprocessAct->setEnabled(true);
-  selectAllAct->setEnabled(true);
   findAct->setEnabled(true);
   imgSearchFwdAct->setEnabled(true);
   imgSearchRevAct->setEnabled(true);
@@ -928,6 +937,16 @@ void MainWindow::enableMenus()
   exportTiffAct->setEnabled(true);
   addToDbAct->setEnabled(true);
   manageLocalDbAct->setEnabled(true);
+}
+
+//-----------------------------------------------------------------------------
+
+void MainWindow::onSelectAll()
+{
+  // The report, wherever the focus was, and focused so the selection shows
+  // as active and the keyboard can extend it
+  textEdit->setFocus(Qt::OtherFocusReason);
+  textEdit->selectAll();
 }
 
 //-----------------------------------------------------------------------------

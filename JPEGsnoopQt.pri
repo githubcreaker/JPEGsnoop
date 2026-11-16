@@ -79,6 +79,7 @@ SOURCES += \
     $$PWD/source/exportdialogs.cpp \
     $$PWD/source/aboutdialog.cpp \
     $$PWD/source/q_decodedetaildlg.cpp \
+    $$PWD/source/reportview.cpp \
     $$PWD/source/snoopconfigdialog.cpp \
     $$PWD/source/Viewer.cpp
 
@@ -100,6 +101,7 @@ HEADERS += \
     $$PWD/source/exportdialogs.h \
     $$PWD/source/aboutdialog.h \
     $$PWD/source/q_decodedetaildlg.h \
+    $$PWD/source/reportview.h \
     $$PWD/source/snoop.h \
     $$PWD/source/snoopconfigdialog.h \
     $$PWD/source/Viewer.h

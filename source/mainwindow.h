@@ -72,6 +72,7 @@ public slots:
 private slots:
   void open();
   void saveLog();
+  void onSelectAll();
   void onConfig();
   void filePrint();
   void filePrintPreview();

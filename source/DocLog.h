@@ -52,6 +52,10 @@ public:
   // Re-colour the report after a light/dark appearance change
   void RecolorForPalette();
 
+  // Give the coloured lines of a report document their colours for a dark or
+  // light background (also used for a copy of the report on the clipboard)
+  static void RecolorDocument(QTextDocument *pDoc, bool bDark);
+
 private:
   CDocLog &operator = (const CDocLog&);
   CDocLog(CDocLog&);

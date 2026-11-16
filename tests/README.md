@@ -68,6 +68,19 @@ when it is installed, so Pillow needn't be installed separately).
     - `--about` chooses Help > About JPEGsnoop after the first file and prints
       the item's menu role, the dialog's texts and links, and its icon's size,
       pixel ratio and number of colours, then clicks OK.
+    - `--edit STEPS` runs STEPS on the report after each file (and, with
+      `--edit-before`, once before the first): a comma-separated list of
+      `state`, `selectall` and `copy` (choose Edit > Select All or Copy),
+      `key:NAME` (press `selectall`, `copy`, `cut`, `paste`, `undo`,
+      `backspace` or `shift-up`, as Cmd+A and so on, in the focused widget),
+      `type:TEXT`, `click` (click in the report) and `unfocus`. The keys and
+      clicks go through Qt's shortcut handling, as a user's do (QtTest). After
+      each step it prints how much of the report is selected (`all`, `part` or
+      `none`), which Edit items are enabled, its undo history, where the focus
+      is, whether the report changed, and what the clipboard holds (it starts
+      with a marker; the offscreen platform's clipboard is the driver's own).
+      After a copy it also prints the clipboard's formats, the colours and
+      fonts in its HTML, and the report's own colours.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -108,7 +121,8 @@ Case ids start with the finding they cover in
 GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F10`
 are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
 in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
-section, and `A` in its "About" section);
+section, `A` in its "About" section, and `T` in its "Select All and Copy"
+section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

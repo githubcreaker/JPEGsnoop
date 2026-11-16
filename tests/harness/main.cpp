@@ -91,12 +91,26 @@
 //     role, what the dialog shows (texts, links, the icon's size, pixel ratio
 //     and number of colours), then click OK.
 //
+// gui ... --edit STEPS [--edit-before]
+//     After each file (and with --edit-before, also once before the first),
+//     run STEPS on the report, a comma-separated list of: state (nothing),
+//     selectall and copy (choose Edit > Select All or Copy), key:NAME (press
+//     selectall, copy, cut, paste, undo, backspace or shift-up, as Cmd+A and
+//     so on, in the focused widget), type:TEXT (type it), click (click at the
+//     report's top left) and unfocus (take the focus from the report). The
+//     clipboard first holds a marker. After each step print how much of the
+//     report is selected, which Edit items are enabled, where the focus is,
+//     whether the report has changed and what the clipboard holds; after a
+//     copy, also the clipboard's formats, the colours and fonts in its HTML,
+//     and the report's own colours.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
 #include <QAbstractButton>
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFileDialog>
@@ -108,6 +122,7 @@
 #include <QLineEdit>
 #include <QLabel>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPalette>
 #include <QPixmap>
@@ -119,8 +134,10 @@
 #include <QSettings>
 #include <QStyle>
 #include <QTemporaryDir>
+#include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTextDocumentFragment>
 #include <QTextStream>
 #include <QTimer>
 #include <QtMath>
@@ -161,6 +178,7 @@ static void usage()
           "                         [--old-numbered] [--replace]\n"
           "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
           "                          [--auto-reprocess] [--no-decode-image]] [--about]\n"
+          "                         [--edit STEPS [--edit-before]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--out PATH] [--out-same] [--out-same-case]\n"
@@ -848,6 +866,8 @@ struct GuiOptions
   bool bAutoReprocess = false;    // --auto-reprocess
   bool bNoDecodeImage = false;    // --no-decode-image
   bool bAbout = false;            // --about
+  QString strEdit;                // --edit STEPS
+  bool bEditBefore = false;       // --edit-before
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -1251,6 +1271,172 @@ static void aboutMenu(MainWindow &window, QTextStream &out)
   out << "harness: about closed=" << (bOpen ? 0 : 1) << "\n";
 }
 
+// What the clipboard holds before gui --edit's steps
+static const QString kClipboardMarker = QStringLiteral("(harness clipboard marker)");
+
+// The report as gui --edit prints it after each step: how much is selected
+// (all, part or none) and its length, the Edit items enabled, the report's
+// undo history, where the focus is, whether the report differs from
+// strBefore and what the clipboard holds
+static QString editState(MainWindow &window, const QString &strBefore)
+{
+  const QPlainTextEdit *pReport = window.textEdit;
+  const QString strText = pReport->toPlainText();
+  const QString strSel = pReport->textCursor().selection().toPlainText();
+  const QString strSelWhat = strSel.isEmpty() ? QStringLiteral("none")
+                                              : ((strSel == strText) ? QStringLiteral("all") : QStringLiteral("part"));
+
+  auto enabled = [&window](const char *pszText) {
+    const QAction *pAction = findAction(window, QLatin1String(pszText));
+    return pAction ? QString::number(pAction->isEnabled() ? 1 : 0) : QStringLiteral("?");
+  };
+
+  const QWidget *pFocus = QApplication::focusWidget();
+  QString strFocus = !pFocus ? QStringLiteral("none") : ((pFocus == pReport) ? QStringLiteral("report") : QStringLiteral("other"));
+  if(QApplication::activeWindow() != &window)
+    strFocus += QStringLiteral("(inactive)");
+
+  const QString strClip = QGuiApplication::clipboard()->text();
+  QString strClipWhat;
+  if(strClip == kClipboardMarker)
+    strClipWhat = QStringLiteral("unchanged");
+  else if(!strText.isEmpty() && (strClip == strText))
+    strClipWhat = QStringLiteral("report");
+  else if(!strSel.isEmpty() && (strClip == strSel))
+    strClipWhat = QStringLiteral("selection");
+  else
+    strClipWhat = QString("other(%1)").arg(strClip.size());
+
+  return QString("selected=%1 chars=%2 copy=%3 selectall=%4 undo=%5 undo-steps=%6 readonly=%7 focus=%8 report=%9 clipboard=%10")
+           .arg(strSelWhat)
+           .arg(strText.size())
+           .arg(enabled("&Copy"), enabled("Select All"), enabled("Undo"))
+           .arg(pReport->document()->availableUndoSteps())
+           .arg(pReport->isReadOnly() ? 1 : 0)
+           .arg(strFocus, (strText == strBefore) ? QStringLiteral("same") : QStringLiteral("changed"), strClipWhat);
+}
+
+// gui --edit STEPS (see above)
+static void editSteps(MainWindow &window, const QString &strSteps, QTextStream &out)
+{
+  QPlainTextEdit *pReport = window.textEdit;
+  const QString strBefore = pReport->toPlainText();
+  QGuiApplication::clipboard()->setText(kClipboardMarker);
+
+  // Window shortcuts (Cmd+A, Cmd+C) only reach the active window, and the
+  // image window a decode shows takes that. (qWaitForWindowActive doesn't
+  // wait for it: it counts the main window as active while its child window
+  // is.)
+  window.activateWindow();
+  if(!QTest::qWaitFor([&window]() { return QApplication::activeWindow() == &window; }, 2000))
+    out << "harness: edit: main window not active\n";
+
+  // The keys as the platform maps them (Cmd+A and so on on macOS)
+  auto standardKey = [](QKeySequence::StandardKey eKey) {
+    const QList<QKeySequence> aKeys = QKeySequence::keyBindings(eKey);
+    return aKeys.isEmpty() ? QKeyCombination() : aKeys.first()[0];
+  };
+
+  for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
+  {
+    QWidget *pTarget = QApplication::focusWidget() ? QApplication::focusWidget() : static_cast<QWidget *>(&window);
+
+    if(strStep == "state")
+    {
+    }
+    else if((strStep == "selectall") || (strStep == "copy"))
+    {
+      QAction *pAction = findAction(window, (strStep == "copy") ? QStringLiteral("&Copy") : QStringLiteral("Select All"));
+      if(pAction)
+        pAction->trigger();    // does nothing while disabled, as the menu
+    }
+    else if(strStep.startsWith("key:"))
+    {
+      const QString strKey = strStep.mid(4);
+      QKeyCombination key;
+      if(strKey == "selectall")
+        key = standardKey(QKeySequence::SelectAll);
+      else if(strKey == "copy")
+        key = standardKey(QKeySequence::Copy);
+      else if(strKey == "cut")
+        key = standardKey(QKeySequence::Cut);
+      else if(strKey == "paste")
+        key = standardKey(QKeySequence::Paste);
+      else if(strKey == "undo")
+        key = standardKey(QKeySequence::Undo);
+      else if(strKey == "backspace")
+        key = QKeyCombination(Qt::Key_Backspace);
+      else if(strKey == "shift-up")
+        key = QKeyCombination(Qt::ShiftModifier, Qt::Key_Up);
+      else
+      {
+        out << "harness: edit: unknown key " << strKey << "\n";
+        continue;
+      }
+      QTest::keyClick(pTarget, key.key(), key.keyboardModifiers());
+    }
+    else if(strStep.startsWith("type:"))
+    {
+      QTest::keyClicks(pTarget, strStep.mid(5));
+    }
+    else if(strStep == "click")
+    {
+      QTest::mouseClick(pReport->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(4, 4));
+    }
+    else if(strStep == "unfocus")
+    {
+      if(QApplication::focusWidget())
+        QApplication::focusWidget()->clearFocus();
+    }
+    else
+    {
+      out << "harness: edit: unknown step " << strStep << "\n";
+      continue;
+    }
+    QCoreApplication::processEvents();
+    out << "harness: edit " << strStep << ": " << editState(window, strBefore) << "\n";
+
+    // What a copy put on the clipboard: its formats, and the text colours and
+    // fonts in its HTML (what a rich-text app pastes); and the colours of the
+    // report itself, which a copy mustn't change
+    if(strStep.endsWith("copy"))
+    {
+      const QMimeData *pData = QGuiApplication::clipboard()->mimeData();
+      const QString strHtml = pData ? pData->html() : QString();
+      auto distinct = [&strHtml](const QString &strPattern) {
+        QStringList astrFound;
+        QRegularExpressionMatchIterator it = QRegularExpression(strPattern).globalMatch(strHtml);
+        while(it.hasNext())
+        {
+          const QString strValue = it.next().captured(1);
+          if(!astrFound.contains(strValue))
+            astrFound << strValue;
+        }
+        astrFound.sort();
+        return astrFound.isEmpty() ? QStringLiteral("none") : astrFound.join(',');
+      };
+
+      QStringList astrReport;
+      for(QTextBlock block = pReport->document()->begin(); block.isValid(); block = block.next())
+      {
+        for(QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it)
+        {
+          const QBrush brush = it.fragment().charFormat().foreground();
+          if((brush.style() != Qt::NoBrush) && !astrReport.contains(brush.color().name()))
+            astrReport << brush.color().name();
+        }
+      }
+      astrReport.sort();
+
+      out << "harness: edit clipboard formats=" << (pData ? pData->formats().join(',') : QString())
+          << " html colours=" << distinct(QStringLiteral("[^-]color:(#[0-9a-f]{6})"))
+          << " fonts=" << distinct(QStringLiteral("font-family:'([^']*)'"))
+          << " report colours=" << (astrReport.isEmpty() ? QStringLiteral("none") : astrReport.join(',')) << "\n";
+    }
+  }
+  out.flush();
+}
+
 static int runGui(const QStringList &files, const GuiOptions &opts, const QString &strSettingsDir)
 {
   useGuiSettings(strSettingsDir, opts);
@@ -1266,6 +1452,12 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 
   QTimer timerMsgBox;
   closeMessageBoxes(timerMsgBox, out, opts.bReplace);
+
+  if(!opts.strEdit.isEmpty() && opts.bEditBefore)
+  {
+    out << "harness: edit before any file\n";
+    editSteps(window, opts.strEdit, out);
+  }
 
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
@@ -1311,6 +1503,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           exportMenus(window, opts, strSettingsDir + "/menu-export-" + QString::number(nFileInd), out);
         if(opts.bAbout && (nFileInd == 1))
           aboutMenu(window, out);
+        if(!opts.strEdit.isEmpty())
+          editSteps(window, opts.strEdit, out);
         if(!opts.strDetailDlg.isEmpty())
         {
           if(!opts.strMarks.isEmpty())
@@ -1693,6 +1887,7 @@ int main(int argc, char **argv)
   guiOpts.bAutoReprocess = args.removeAll("--auto-reprocess") > 0;
   guiOpts.bNoDecodeImage = args.removeAll("--no-decode-image") > 0;
   guiOpts.bAbout = args.removeAll("--about") > 0;
+  guiOpts.bEditBefore = args.removeAll("--edit-before") > 0;
   ExportOptions exportOpts;
   exportOpts.sJpeg.bExtractAll = args.removeAll("--all") > 0;
   exportOpts.sJpeg.bForceSoi = args.removeAll("--force-soi") > 0;
@@ -1706,7 +1901,8 @@ int main(int argc, char **argv)
   QString strPixels;
   QString strFormat;
   QString strDetail;
-  for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark" })
+  for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
+                             "--edit" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -1730,6 +1926,8 @@ int main(int argc, char **argv)
       guiOpts.strDetailDlg = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--mark"))
       guiOpts.strMarks = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--edit"))
+      guiOpts.strEdit = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 

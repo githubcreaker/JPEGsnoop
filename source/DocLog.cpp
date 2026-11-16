@@ -107,14 +107,16 @@ void CDocLog::appendToLog(QString strTxt, teLineKind eKind)
 // new appearance. Normal text has no colour of its own and follows by itself.
 void CDocLog::RecolorForPalette()
 {
-  if(!m_pDoc)
+  if(m_pDoc)
   {
-    return;
+    RecolorDocument(m_pDoc->document(), isDark());
   }
+}
 
-  const bool bDark = isDark();
-  QTextDocument *pDoc = m_pDoc->document();
-
+// Give each coloured line of pDoc its colour for a dark (bDark) or light
+// background
+void CDocLog::RecolorDocument(QTextDocument *pDoc, bool bDark)
+{
   // Find the runs first: changing a format can merge fragments, which would
   // upset an iteration over them
   struct sRecolor

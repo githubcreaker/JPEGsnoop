@@ -826,6 +826,79 @@ On the old code all six fail: the item had no handler.
 Find, File Overlay and Batch Process. The new icon has not been seen in the Finder or
 Dock, only as the images in the `.icns`.
 
+### Select All and Copy
+
+Edit > Select All and Edit > Copy had no handlers: Select All was enabled after the
+first file but did nothing, and Copy was never enabled. On Windows both come with the
+report view. Now, as there:
+- **Select All** selects the whole report. It also puts the focus in the report, so the
+  selection shows as active and Shift with the arrow keys can change it.
+- **Copy** copies what is selected in the report, and is enabled only while something
+  is.
+- **Shortcuts:** Cmd+A and Cmd+C work wherever the focus is in the main window.
+- **When Select All is on:** whenever the report has any text, as on Windows. Before
+  any file the report is empty, so it is off.
+
+The report is now a small class of its own, `CReportView` (`source/reportview.cpp`).
+
+**Found and fixed: the report could be changed.** It was editable; on Windows it is
+read-only.
+- **Typing:** after Cmd+A, one key replaced the whole report (typing "x" left a
+  one-character report). Cmd+V pasted into it, and Delete removed text.
+- **Undo:** the report kept an undo step for each line the decoder added (1,010 for a
+  16 KB report), so Cmd+Z removed the end of the report.
+- **Saving:** Save Log and Print wrote the changed text.
+
+It is now read-only and keeps no undo history. The caret and keyboard selection stay.
+
+**Found and fixed: copying in Dark Mode.** Copy puts the selection on the clipboard as
+plain text and as HTML, for apps that paste formatted text.
+- **Colours:** the HTML had the colours on screen. In Dark Mode those are pale, made
+  for a dark background: against a white page they give 1.8–3.0:1 (headers 2.6:1,
+  warnings 2.3:1, OK lines 1.8:1). The HTML now always has the colours for a light
+  background, the ones Windows uses (8.6:1 for headers). The report on screen keeps
+  its own colours.
+- **Font:** Qt's HTML named no font, so pasted text took the app's own, usually
+  proportional, and the report's columns no longer lined up. It now names the report's
+  font (Courier), as the RTF Windows copies does.
+- **Formats:** Qt also offered Markdown and OpenDocument versions; the copy now has
+  only plain text and HTML.
+
+**Second check:** a further review found one case missed. Select All came on only once
+a file opened, so when the first file was empty or couldn't be opened, the report held
+the error but Select All stayed off, and Select All then Copy did nothing. It now
+follows the report's text, as above. Two cases cover it: an empty first file and a
+missing one.
+
+**Tests:** 21 new `T` cases (279 in all). `gui --edit STEPS` chooses the Edit items,
+presses keys, types and clicks in the report through Qt's shortcut handling (QtTest),
+and prints after each step:
+- how much of the report is selected, and which Edit items are enabled;
+- its undo history, and where the focus is;
+- whether the report changed, and what the clipboard holds;
+- after a copy, the clipboard's formats and the colours and fonts in its HTML.
+
+On the old code 16 fail. The other five check behaviour that already worked: both items
+off before a file, Copy off with nothing selected, a click clearing the selection, Cmd+A
+and Cmd+C typed in the focused report, and the next file starting with nothing selected.
+Before the second check's fix, only its two new cases fail.
+
+**Checks:**
+- **All 279 pass** with and without ASan/UBSan.
+- **Same as Qt's copy:** for a report with every kind of line, the text is the same as
+  Qt's own copy, and the HTML differs only by the font.
+- **Your clipboard is safe:** the tests' clipboard is the offscreen platform's own,
+  inside the test process (the platform has no macOS pasteboard code), so running them
+  never touches the Mac's clipboard.
+- **Not checked:**
+  - with the macOS platform: the Edit menu, Cmd+A and Cmd+C through the menu bar, and
+    pasting into other apps;
+  - Cmd+A and Cmd+C while the image window is in front. Offscreen, the main window's
+    shortcuts don't reach that window.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; Find, File
+Overlay and Batch Process.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

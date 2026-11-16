@@ -8,4 +8,8 @@ CONFIG -= app_bundle
 
 include(../../JPEGsnoopQt.pri)
 
+# QTest's key and mouse clicks go through Qt's shortcut handling, as a
+# user's do (gui --edit)
+QT += testlib
+
 SOURCES += main.cpp
