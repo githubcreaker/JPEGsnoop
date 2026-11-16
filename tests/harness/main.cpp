@@ -1,13 +1,19 @@
 // Headless test driver for JPEGsnoopQt.
 //
 // decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y[/X,Y...]] [--start N]
+//     [--detail X,Y,LEN] [--preview-md5]
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
 //     histograms, and a line counting the pixels drawn in each histogram
 //     image; --unknown-exif: also report unknown EXIF tags; --pixels
 //     prints the decoded preview's colour at each point; --start decodes
-//     from file offset N.
+//     from file offset N; --detail turns on the detailed scan decode
+//     (Options > Scan Segment > Detailed Decode) for LEN MCUs from MCU X,Y,
+//     prints a "harness: detail" summary of what it reported, and decodes
+//     the file again without it to check that only the report's detail
+//     lines differ ("harness: detail changes report=0 image=0");
+//     --preview-md5 prints an MD5 of the decoded preview's pixels.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
 //     [--cycle-channels] [--repeat N] [--max-growth-mb N] [--zoom PCT]
@@ -65,6 +71,21 @@
 //     name chosen beforehand;
 //     --replace answers Replace when asked (otherwise Cancel).
 //
+// gui ... --detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]
+//     [--auto-reprocess] [--no-decode-image]
+//     After each file, click the image at each --mark pixel. After the first
+//     file (or file N), choose
+//     Options > Scan Segment > Detailed Decode and answer its dialog with
+//     STEPS, a comma-separated list of: load (click Load Coords), x=N, y=N,
+//     len=N, on, off (the Enable box), ok and cancel ("+" chooses the menu
+//     item again, for the steps after it). Each time the dialog
+//     shows, its fields are printed; if OK is refused (a message box), the
+//     steps after it carry on. Then print the settings chosen and a summary
+//     of the report's detailed decode, as it is and after File > Reprocess
+//     (and after --cycle-channels). For the other files, print the summary.
+//     --auto-reprocess turns on Automatic Reprocessing; --no-decode-image
+//     turns off Options > Scan Segment > Decode Image.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -87,6 +108,7 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QPlainTextEdit>
+#include <QRegularExpression>
 #include <QPointingDevice>
 #include <QSet>
 #include <QSettings>
@@ -117,19 +139,22 @@
 #include "Viewer.h"
 #include "WindowBuf.h"
 #include "mainwindow.h"
+#include "q_decodedetaildlg.h"
 #include "snoopconfigdialog.h"
 
 static void usage()
 {
   fprintf(stderr,
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
-          "                         [--pixels X,Y[/X,Y...]] [--start N]\n"
+          "                         [--pixels X,Y[/X,Y...]] [--start N] [--detail X,Y,LEN] [--preview-md5]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
           "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
           "                         [--zoom PCT] [--max-zoom-mb N] [--check-preview] [--check-histo]\n"
           "                         [--dark] [--check-theme]\n"
           "                         [--export-menus | --export-menus-cancel | --export-menus-all]\n"
           "                         [--old-numbered] [--replace]\n"
+          "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
+          "                          [--auto-reprocess] [--no-decode-image]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--out PATH] [--out-same] [--out-same-case]\n"
@@ -137,8 +162,142 @@ static void usage()
           "       any mode: [--scale F]\n");
 }
 
+// What the report's detailed scan decode shows: how many blocks (one
+// "Lum (Tbl #0), MCU=[x,y]" line each), the first and last MCU, the block
+// labels in order of appearance, how many RGB dumps and rows, the header, and
+// the DC of the first 8 blocks' matrices
+static QString detailSummary(const QString &strLog)
+{
+  static const QRegularExpression reBlock(QStringLiteral("^    (\\S+) \\(Tbl #\\d+\\), MCU=\\[(\\d+),(\\d+)\\]$"),
+                                          QRegularExpression::MultilineOption);
+  static const QRegularExpression reRow(QStringLiteral("^      \\[ x"), QRegularExpression::MultilineOption);
+  static const QRegularExpression reHeader(QStringLiteral("^  (Detailed Decode: .*|NOTE: Detailed Decode .*)$"),
+                                           QRegularExpression::MultilineOption);
+
+  int nBlocks = 0;
+  QString strFirst = QStringLiteral("-");
+  QString strLast = QStringLiteral("-");
+  QStringList astrLabels;
+  QRegularExpressionMatchIterator it = reBlock.globalMatch(strLog);
+  while(it.hasNext())
+  {
+    const QRegularExpressionMatch match = it.next();
+    const QString strMcu = match.captured(2) + "," + match.captured(3);
+    if(nBlocks == 0)
+      strFirst = strMcu;
+    strLast = strMcu;
+    if(!astrLabels.contains(match.captured(1)))
+      astrLabels << match.captured(1);
+    nBlocks++;
+  }
+
+  int nRows = 0;
+  QRegularExpressionMatchIterator itRow = reRow.globalMatch(strLog);
+  while(itRow.hasNext())
+  {
+    itRow.next();
+    nRows++;
+  }
+
+  static const QRegularExpression reDc(QStringLiteral("DCT Matrix=\\[ *(-?\\d+)"));
+  QStringList astrDc;
+  QRegularExpressionMatchIterator itDc = reDc.globalMatch(strLog);
+  while(itDc.hasNext() && (astrDc.size() < 8))
+    astrDc << itDc.next().captured(1);
+
+  const QRegularExpressionMatch matchHeader = reHeader.match(strLog);
+  return QString("blocks=%1 first=%2 last=%3 labels=%4 rgb dumps=%5 rows=%6 header=%7 dc=%8")
+    .arg(nBlocks)
+    .arg(strFirst, strLast)
+    .arg(astrLabels.isEmpty() ? QStringLiteral("-") : astrLabels.join('/'))
+    .arg(strLog.count(QStringLiteral("Detailed IDCT Dump (RGB):")))
+    .arg(nRows)
+    .arg(matchHeader.hasMatch() ? matchHeader.captured(1) : QStringLiteral("-"))
+    .arg(astrDc.isEmpty() ? QStringLiteral("-") : astrDc.join('/'));
+}
+
+// The report without the detailed decode's lines (and blank lines)
+static QString withoutDetail(const QString &strLog)
+{
+  static const QRegularExpression reDetail(
+    QStringLiteral("^(    \\S+ \\(Tbl #\\d+\\), MCU=\\[.*|      \\[0x.*|.*DCT Matrix=.*| {20,}\\[.*"
+                   "|  Detailed IDCT Dump \\(RGB\\):|    MCU \\[.*|      \\[ x.*|    \\(No IDCT mode: .*"
+                   "|  Detailed Decode: .*|  NOTE: Detailed Decode .*|\\s*)$"));
+  QStringList astrKept;
+  const QStringList astrLines = strLog.split('\n');
+  for(const QString &strLine : astrLines)
+  {
+    if(!reDetail.match(strLine).hasMatch())
+      astrKept << strLine;
+  }
+  return astrKept.join('\n');
+}
+
+static QString previewMd5(CimgDecode &img)
+{
+  QCryptographicHash hash(QCryptographicHash::Md5);
+  if(img.m_bDibTempReady && img.m_pDibTemp)
+  {
+    const QImage imgRgb = img.m_pDibTemp->convertToFormat(QImage::Format_RGB32);
+    for(int nY = 0; nY < imgRgb.height(); nY++)
+      hash.addData(QByteArrayView(reinterpret_cast<const char *>(imgRgb.constScanLine(nY)), imgRgb.width() * 4));
+  }
+  return QString::fromLatin1(hash.result().toHex());
+}
+
+// Decode strFile in non-interactive mode with the detailed decode as given
+// (an empty strDetail: off), returning the report and the preview's MD5
+static bool decodeForDetail(const QString &strFile, bool bAc, uint32_t nStart, const QString &strDetail,
+                            const QString &strDbDir, QString &strLog, QString &strMd5)
+{
+  QPlainTextEdit edit;
+  CDocLog log(&edit);
+  log.Enable();
+
+  CSnoopConfig cfg;
+  cfg.setDbPath(strDbDir + "/");
+  cfg.setInteractive(false);
+  cfg.setAutoReprocess(true);
+  cfg.setStartPos(nStart);
+  if(bAc)
+    cfg.onScansegmentFullidct();
+
+  CDbSigs sigs(&log, &cfg);
+  CwindowBuf wbuf(&log);
+  CimgDecode img(&log, &wbuf, &cfg, nullptr);
+  CjfifDecode jfif(&log, &sigs, &wbuf, &img, &cfg, nullptr);
+
+  if(!strDetail.isEmpty())
+  {
+    const QStringList astrDetail = strDetail.split(',');
+    bool abOk[3] = { false, false, false };
+    uint32_t anDetail[3] = { 0, 0, 0 };
+    for(int nInd = 0; (nInd < 3) && (astrDetail.size() == 3); nInd++)
+      anDetail[nInd] = astrDetail.at(nInd).toUInt(&abOk[nInd]);
+    if(!abOk[0] || !abOk[1] || !abOk[2])
+      return false;
+    img.SetDetailVlc(true, anDetail[0], anDetail[1], anDetail[2]);
+  }
+
+  QFile file(strFile);
+  if(!file.open(QIODevice::ReadOnly))
+    return false;
+  if(file.size() > 0)
+  {
+    wbuf.BufFileSet(&file);
+    wbuf.BufLoadWindow(0);
+    jfif.ProcessFile(&file);
+    wbuf.BufFileUnset();
+  }
+  file.close();
+
+  strLog = edit.toPlainText();
+  strMd5 = previewMd5(img);
+  return true;
+}
+
 static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strPixels,
-                     uint32_t nStart, const QString &strDbDir)
+                     uint32_t nStart, const QString &strDetail, bool bPreviewMd5, const QString &strDbDir)
 {
   QPlainTextEdit edit;
   CDocLog log(&edit);
@@ -160,6 +319,21 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
   CwindowBuf wbuf(&log);
   CimgDecode img(&log, &wbuf, &cfg, nullptr);
   CjfifDecode jfif(&log, &sigs, &wbuf, &img, &cfg, nullptr);
+
+  if(!strDetail.isEmpty())
+  {
+    const QStringList astrDetail = strDetail.split(',');
+    bool abOk[3] = { false, false, false };
+    uint32_t anDetail[3] = { 0, 0, 0 };
+    for(int nInd = 0; (nInd < 3) && (astrDetail.size() == 3); nInd++)
+      anDetail[nInd] = astrDetail.at(nInd).toUInt(&abOk[nInd]);
+    if(!abOk[0] || !abOk[1] || !abOk[2])
+    {
+      fprintf(stderr, "--detail needs X,Y,LEN\n");
+      return 2;
+    }
+    img.SetDetailVlc(true, anDetail[0], anDetail[1], anDetail[2]);
+  }
 
   // Count status-bar messages (MainWindow shows these in its status bar)
   int nStatusMsgs = 0;
@@ -192,6 +366,24 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
            .arg(img.m_bDibTempReady && img.m_pDibTemp ? img.m_pDibTemp->width() : 0)
            .arg(img.m_bDibTempReady && img.m_pDibTemp ? img.m_pDibTemp->height() : 0)
            .arg(nStatusMsgs);
+
+  if(bPreviewMd5)
+    out << QString("harness: preview md5=%1\n").arg(previewMd5(img));
+
+  // The detailed decode adds lines to the report and changes nothing else
+  if(!strDetail.isEmpty())
+  {
+    const QString strLog = edit.toPlainText();
+    out << "harness: detail " << detailSummary(strLog) << "\n";
+    QString strRefLog;
+    QString strRefMd5;
+    if(decodeForDetail(strFile, bAc, nStart, QString(), strDbDir, strRefLog, strRefMd5))
+    {
+      out << QString("harness: detail changes report=%1 image=%2\n")
+               .arg((withoutDetail(strLog) != withoutDetail(strRefLog)) ? 1 : 0)
+               .arg((previewMd5(img) != strRefMd5) ? 1 : 0);
+    }
+  }
 
   // Histogram images: how many pixels differ from the background (the top-left
   // pixel; bars grow up from the bottom). -1 if there is no image.
@@ -644,6 +836,11 @@ struct GuiOptions
   int nExportMenus = 0;           // --export-menus (1), --export-menus-cancel (2) or --export-menus-all (3)
   bool bOldNumbered = false;      // --old-numbered
   bool bReplace = false;          // --replace
+  QString strDetailDlg;           // --detail-dlg STEPS
+  QString strMarks;               // --mark X,Y[/X,Y...]
+  int nDetailDlgAt = 1;           // --detail-dlg-at N
+  bool bAutoReprocess = false;    // --auto-reprocess
+  bool bNoDecodeImage = false;    // --no-decode-image
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -684,17 +881,21 @@ static void cycleChannels(MainWindow &window)
 // Settings for a MainWindow: a fresh install (so "Decode Image" etc. take
 // their defaults), minus the coach tips, which are modal and can't be clicked
 // away here
-static void useGuiSettings(const QString &strSettingsDir, bool bHisto)
+static void useGuiSettings(const QString &strSettingsDir, const GuiOptions &opts)
 {
   useTestSettings(strSettingsDir);
   QSettings settings;
   settings.setValue("Coach\\ReprocessAuto", false);
   settings.setValue("Coach\\DecodeIdct", false);
-  if(bHisto)
+  if(opts.bHisto)
   {
     settings.setValue("General\\DecScanHisto", true);
     settings.setValue("General\\DumpHistoY", true);
   }
+  if(opts.bAutoReprocess)
+    settings.setValue("General\\ReprocessAuto", true);
+  if(opts.bNoDecodeImage)
+    settings.setValue("General\\DecScanImg", false);
 }
 
 // A message box (such as "Couldn't open file") waits for a click that never
@@ -840,9 +1041,147 @@ static void exportMenus(MainWindow &window, const GuiOptions &opts, const QStrin
   }
 }
 
+// Click the preview at each image pixel "x,y/x,y" (marking positions, as for
+// Detailed Decode's Load Coords)
+static void markPositions(const QString &strMarks, QTextStream &out)
+{
+  Q_Viewer *pViewer = findViewer();
+  PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+  if(!pCanvas || pCanvas->image().isNull())
+  {
+    out << "harness: no image to mark\n";
+    return;
+  }
+
+  const double dScale = static_cast<double>(pCanvas->width()) / pCanvas->image().width();
+  int nMarked = 0;
+  const QStringList astrPoints = strMarks.split('/', Qt::SkipEmptyParts);
+  for(const QString &strPoint : astrPoints)
+  {
+    const QStringList astrXy = strPoint.split(',');
+    if(astrXy.size() != 2)
+      continue;
+    const QPointF pt((astrXy.at(0).toInt() + 0.5) * dScale, (astrXy.at(1).toInt() + 0.5) * dScale);
+    sendMouse(pCanvas, QEvent::MouseMove, pt);
+    sendMouse(pCanvas, QEvent::MouseButtonPress, pt);
+    sendMouse(pCanvas, QEvent::MouseButtonRelease, pt);
+    nMarked++;
+  }
+  out << "harness: clicked " << nMarked << " positions\n";
+}
+
+static CimgDecode *imgDecoder(MainWindow &window)
+{
+  return window.findChild<CimgDecode *>();
+}
+
+static QString detailSetting(MainWindow &window)
+{
+  bool bEn = false;
+  uint32_t nX = 0;
+  uint32_t nY = 0;
+  uint32_t nLen = 0;
+  if(CimgDecode *pImg = imgDecoder(window))
+    pImg->GetDetailVlc(bEn, nX, nY, nLen);
+  return QString("en=%1 x=%2 y=%3 len=%4").arg(bEn ? 1 : 0).arg(nX).arg(nY).arg(nLen);
+}
+
+// Options > Scan Segment > Detailed Decode as a user would choose it (see
+// --detail-dlg above)
+static void detailedDecodeMenu(MainWindow &window, const GuiOptions &opts, QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("Detailed Decode..."));
+  if(!pAction || !pAction->isEnabled())
+  {
+    out << "harness: menu Detailed Decode unavailable\n";
+    return;
+  }
+
+  // "+" separates the steps for each time the menu item is chosen
+  const QStringList astrOpenings = opts.strDetailDlg.split('+');
+  QStringList astrSteps;
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    Q_DecodeDetailDlg *pDlg = qobject_cast<Q_DecodeDetailDlg *>(QApplication::activeModalWidget());
+    if(!pDlg)
+      return;
+    QLineEdit *pX = pDlg->findChild<QLineEdit *>("leMcuX");
+    QLineEdit *pY = pDlg->findChild<QLineEdit *>("leMcuY");
+    QLineEdit *pLen = pDlg->findChild<QLineEdit *>("leNumMcus");
+    QCheckBox *pEn = pDlg->findChild<QCheckBox *>("cbEnableDec");
+    QPushButton *pLoad = pDlg->findChild<QPushButton *>("pbLoadCoords");
+    QLabel *pNote = pDlg->findChild<QLabel *>("lblNote");
+    QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+    if(!pX || !pY || !pLen || !pEn || !pLoad || !pNote || !pButtons)
+    {
+      out << "harness: detail dialog widgets not found\n";
+      static_cast<QDialog *>(pDlg)->reject();
+      return;
+    }
+
+    auto fields = [&]() {
+      return QString("X=%1 Y=%2 len=%3 enabled=%4").arg(pX->text(), pY->text(), pLen->text()).arg(pEn->isChecked() ? 1 : 0);
+    };
+    out << "harness: detail dialog: " << pDlg->windowTitle() << " (" << fields()
+        << " load=" << (pLoad->isEnabled() ? "on" : "off")
+        << " note=" << (pNote->isVisibleTo(pDlg) ? pNote->text() : QString("-")) << ")\n";
+
+    while(!astrSteps.isEmpty())
+    {
+      const QString strStep = astrSteps.takeFirst();
+      if(strStep == "load")
+        pLoad->click();               // does nothing while it's unavailable
+      else if(strStep.startsWith("x="))
+        pX->setText(strStep.mid(2));
+      else if(strStep.startsWith("y="))
+        pY->setText(strStep.mid(2));
+      else if(strStep.startsWith("len="))
+        pLen->setText(strStep.mid(4));
+      else if((strStep == "on") || (strStep == "off"))
+        pEn->setChecked(strStep == "on");
+      else if((strStep == "ok") || (strStep == "cancel"))
+      {
+        out << "harness: detail dialog " << strStep << " (" << fields() << ")\n";
+        out.flush();
+        // A refused OK shows a message box: the steps left carry on after it
+        pButtons->button((strStep == "ok") ? QDialogButtonBox::Ok : QDialogButtonBox::Cancel)->click();
+        return;
+      }
+      else
+        out << "harness: unknown detail step " << strStep << "\n";
+    }
+
+    out << "harness: detail dialog still open: cancelled\n";
+    static_cast<QDialog *>(pDlg)->reject();
+  });
+  timer.start(50);
+
+  for(const QString &strOpening : astrOpenings)
+  {
+    astrSteps = strOpening.split(',', Qt::SkipEmptyParts);
+    pAction->trigger();
+    QCoreApplication::processEvents();
+  }
+  timer.stop();
+
+  out << "harness: detail set " << detailSetting(window) << "\n";
+  out << "harness: detail report now " << detailSummary(window.textEdit->toPlainText()) << " marks="
+      << window.textEdit->toPlainText().count(QStringLiteral("Position Marked @")) << "\n";
+  window.reprocess();
+  QCoreApplication::processEvents();
+  out << "harness: detail report after reprocess " << detailSummary(window.textEdit->toPlainText()) << "\n";
+  if(opts.bCycleChannels)
+  {
+    cycleChannels(window);
+    out << "harness: detail report after channels " << detailSummary(window.textEdit->toPlainText()) << "\n";
+  }
+  out.flush();
+}
+
 static int runGui(const QStringList &files, const GuiOptions &opts, const QString &strSettingsDir)
 {
-  useGuiSettings(strSettingsDir, opts.bHisto);
+  useGuiSettings(strSettingsDir, opts);
 
   if(opts.bDark)
     QApplication::setPalette(darkPalette());
@@ -898,6 +1237,16 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           checkTheme(window, out);
         if(opts.nExportMenus != 0)
           exportMenus(window, opts, strSettingsDir + "/menu-export-" + QString::number(nFileInd), out);
+        if(!opts.strDetailDlg.isEmpty())
+        {
+          if(!opts.strMarks.isEmpty())
+            markPositions(opts.strMarks, out);
+          // The setting stays for the files after it
+          if(nFileInd == opts.nDetailDlgAt)
+            detailedDecodeMenu(window, opts, out);
+          else
+            out << "harness: detail report " << detailSummary(window.textEdit->toPlainText()) << "\n";
+        }
         out.flush();
       }
 
@@ -945,7 +1294,7 @@ struct ExportOptions
 
 static int runExportJpeg(const QString &strFile, const ExportOptions &opts, const QString &strTmpDir)
 {
-  useGuiSettings(strTmpDir, false);
+  useGuiSettings(strTmpDir, GuiOptions());
 
   MainWindow window;
   window.show();
@@ -1192,7 +1541,7 @@ static int runExportTiff(const QString &strFile, const QString &strFormat, const
     return 2;
   }
 
-  useGuiSettings(strTmpDir, false);
+  useGuiSettings(strTmpDir, GuiOptions());
 
   MainWindow window;
   window.show();
@@ -1248,6 +1597,7 @@ int main(int argc, char **argv)
   const bool bAc = args.removeAll("--ac") > 0;
   const bool bHisto = args.removeAll("--histo") > 0;
   const bool bUnknownExif = args.removeAll("--unknown-exif") > 0;
+  const bool bPreviewMd5 = args.removeAll("--preview-md5") > 0;
   GuiOptions guiOpts;
   guiOpts.bMouse = args.removeAll("--mouse") > 0;
   guiOpts.bLog = args.removeAll("--log") > 0;
@@ -1266,6 +1616,8 @@ int main(int argc, char **argv)
     guiOpts.nExportMenus = 3;
   guiOpts.bOldNumbered = args.removeAll("--old-numbered") > 0;
   guiOpts.bReplace = args.removeAll("--replace") > 0;
+  guiOpts.bAutoReprocess = args.removeAll("--auto-reprocess") > 0;
+  guiOpts.bNoDecodeImage = args.removeAll("--no-decode-image") > 0;
   ExportOptions exportOpts;
   exportOpts.sJpeg.bExtractAll = args.removeAll("--all") > 0;
   exportOpts.sJpeg.bForceSoi = args.removeAll("--force-soi") > 0;
@@ -1278,7 +1630,8 @@ int main(int argc, char **argv)
   // Options with a text value (--scale was applied above)
   QString strPixels;
   QString strFormat;
-  for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format" })
+  QString strDetail;
+  for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -1296,12 +1649,18 @@ int main(int argc, char **argv)
       exportOpts.strOut = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--format"))
       strFormat = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--detail"))
+      strDetail = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--detail-dlg"))
+      guiOpts.strDetailDlg = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--mark"))
+      guiOpts.strMarks = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
   // Options with a numeric value
   uint32_t nStart = 0;
-  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start" })
+  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -1320,6 +1679,8 @@ int main(int argc, char **argv)
       guiOpts.nMaxGrowthMb = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--start"))
       nStart = static_cast<uint32_t>(nVal);
+    else if(QLatin1String(pszOpt) == QLatin1String("--detail-dlg-at"))
+      guiOpts.nDetailDlgAt = nVal;
     else
       guiOpts.nMaxZoomMb = nVal;
   }
@@ -1332,7 +1693,7 @@ int main(int argc, char **argv)
   }
 
   if(strMode == "decode" && args.size() == 1)
-    return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, nStart, tmpDir.path());
+    return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, nStart, strDetail, bPreviewMd5, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
     return runGui(args, guiOpts, tmpDir.path());
   if(strMode == "settings" && args.isEmpty())

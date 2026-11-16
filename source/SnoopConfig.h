@@ -120,6 +120,11 @@ public slots:
   void onScansegmentHistogramy();
   void onScansegmentDump();
 
+public:
+  // Reprocess the file after an option change if Automatic Reprocessing is
+  // on (otherwise offer it, once)
+  void HandleAutoReprocess();
+
 private:
   CSnoopConfig &operator = (const CSnoopConfig&);
   CSnoopConfig(CSnoopConfig&);
@@ -127,7 +132,6 @@ private:
   QString GetExeDir();
   void CreateDir(QString Path);
   void docImageDirty();
-  void HandleAutoReprocess();
 
   CjfifDecode *m_pJfifDec;
 

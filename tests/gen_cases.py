@@ -1285,6 +1285,190 @@ case("E_menus_all_replace", "E", "gui", ["ok_444.jpg"], "--export-menus-all --ol
 case("E_menus_after_failed_open", "E", "gui", ["ok_444.jpg", "e_no_such_file.jpg"], "--export-menus", timeout=30,
      expect="message box: The file shown couldn't be analyzed, so there is nothing to export")
 
+# --- D: Options > Scan Segment > Detailed Decode --------------------------------
+# decode --detail X,Y,LEN prints "harness: detail blocks=N first=X,Y last=X,Y
+# labels=... rgb dumps=N rows=N header=..." and decodes the file again without
+# the detail: "changes report=0 image=0" means only detail lines were added.
+def detail(blocks, first, last, labels, rows, header):
+    return ("harness: detail blocks=%d first=%s last=%s labels=%s rgb dumps=%d rows=%d header=%s"
+            % (blocks, first, last, labels.replace("(", "\\(").replace(")", "\\)"), 1 if rows else 0, rows,
+               header.replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)")))
+
+
+SAME = "harness: detail changes report=0 image=0$"
+ALL = "0,0,4294967295"
+YCC = "Lum/Chr(0)/Chr(1)"
+
+# ok_420.jpg is 64x48 in 16x16 MCUs: 4 x 3 MCUs of 4 Lum blocks, Cb and Cr.
+# Cr was labelled "Chr(0)" like Cb (both use quantization table 1)
+case("D_detail_one_mcu", "D", "decode", "ok_420.jpg", "--ac --detail 1,1,1",
+     expect=detail(6, "1,1", "1,1", YCC, 16, "Detailed Decode: 1 MCU from MCU [1,1]"))
+case("D_detail_one_mcu_same", "D", "decode", "ok_420.jpg", "--ac --detail 1,1,1", expect=SAME)
+# An MCU in the last column lost the last row of its RGB dump
+case("D_detail_last_column", "D", "decode", "ok_420.jpg", "--ac --detail 3,0,1",
+     expect=detail(6, "3,0", "3,0", YCC, 16, "Detailed Decode: 1 MCU from MCU [3,0]"))
+case("D_detail_last_mcu", "D", "decode", "ok_420.jpg", "--ac --detail 3,2,1",
+     expect=detail(6, "3,2", "3,2", YCC, 16, "Detailed Decode: 1 MCU from MCU [3,2]"))
+case("D_detail_444_last", "D", "decode", "ok_444.jpg", "--ac --detail 7,5,1",
+     expect=detail(3, "7,5", "7,5", YCC, 8, "Detailed Decode: 1 MCU from MCU [7,5]"))
+case("D_detail_gray", "D", "decode", "ok_gray.jpg", "--ac --detail 6,5,2",
+     expect=detail(2, "6,5", "7,5", "Lum", 8, "Detailed Decode: 2 MCUs from MCU [6,5]"))
+# Every MCU: the report gains only the detail, in both decode modes. In No
+# IDCT mode the MCUs reported were drawn at full resolution (the others from
+# their DC), which also changed the average and brightest pixel
+case("D_detail_all_ac", "D", "decode", "ok_420.jpg", "--ac --detail " + ALL, expect=SAME)
+case("D_detail_all_dc", "D", "decode", "ok_420.jpg", "--detail " + ALL, expect=SAME)
+case("D_detail_all_dc_444", "D", "decode", "ok_444.jpg", "--detail " + ALL, expect=SAME)
+case("D_detail_dc_note", "D", "decode", "ok_420.jpg", "--detail 1,1,1",
+     expect="^    \\(No IDCT mode: each block shows its DC value only\\)$")
+# A start beyond the right edge picked an MCU in the next row; one far below
+# the image wrapped around to MCU [0,0]; a length past 2^32 - start reported
+# nothing
+case("D_detail_outside_x", "D", "decode", "ok_420.jpg", "--ac --detail 4,0,1",
+     expect=detail(0, "-", "-", "-", 0, "NOTE: Detailed Decode starts at MCU [4,0], outside this image (4 x 3 MCUs), "
+                   "so nothing is reported"))
+case("D_detail_y_wraps", "D", "decode", "ok_420.jpg", "--ac --detail 0,1073741824,1",
+     expect="harness: detail blocks=0 first=- ")
+case("D_detail_len_wraps", "D", "decode", "ok_420.jpg", "--ac --detail 2,0,4294967295",
+     expect=detail(60, "2,0", "3,2", YCC, 16, "Detailed Decode: 4294967295 MCUs from MCU [2,0]"))
+# Restart markers between every MCU, a corrupt scan, a truncated one, an RGB
+# JPEG, and files with no decoded scan
+restart = write("d_restart.jpg", jpeg(color, quality=90, subsampling=2, restart_marker_blocks=1))
+case("D_detail_restart", "D", "decode", restart, "--ac --detail " + ALL,
+     expect=detail(72, "0,0", "3,2", YCC, 16, "Detailed Decode: 4294967295 MCUs from MCU [0,0]"))
+case("D_detail_restart_same", "D", "decode", restart, "--ac --detail " + ALL, expect=SAME)
+p_scan = sos_pos(c420) + 2 + struct.unpack(">H", c420[sos_pos(c420) + 2:sos_pos(c420) + 4])[0]
+rng = random.Random(7)
+corrupt = bytearray(c420)
+for i in range(p_scan + 40, p_scan + 60):
+    corrupt[i] = rng.randrange(0, 0xFF)
+corrupt = write("d_corrupt.jpg", bytes(corrupt))
+case("D_detail_corrupt", "D", "decode", corrupt, "--ac --detail " + ALL, expect=SAME)
+case("D_detail_corrupt_dc", "D", "decode", corrupt, "--detail " + ALL, expect=SAME)
+truncated = write("d_truncated.jpg", c420[:p_scan + 200])
+case("D_detail_truncated", "D", "decode", truncated, "--ac --detail " + ALL, expect=SAME)
+case("D_detail_rgb_jpeg", "D", "decode", "f3_rgb_ids.jpg", "--ac --detail " + ALL, expect=SAME)
+case("D_detail_multiscan", "D", "decode", "f7_multiscan.jpg", "--ac --detail " + ALL, expect=SAME)
+case("D_detail_progressive", "D", "decode", "ok_progressive.jpg", "--ac --detail " + ALL,
+     expect="harness: detail blocks=0 first=- ")
+
+# Second check: what the detail lines say.
+# A 16-bit AC code (run 15, size 10, value 1000) from bit 7 of its byte takes
+# 26 bits over 5 bytes. Only 4 bytes were shown, cutting off its last bit.
+dc_tbl = huff_codes([1] + [0] * 15, [3])
+ac_tbl = huff_codes([1, 1] + [0] * 13 + [1], [0x00, 0x01, 0xFA])
+codes = [dc_tbl[3], (4, 3), ac_tbl[0x01], (1, 1), ac_tbl[0xFA], (1000, 10), ac_tbl[0x00]]
+bits, raw = Bits(), ""
+for value, length in codes:
+    bits.put(value, length)
+    raw += format(value, "0%db" % length)
+head = (b"\xff\xd8" + seg(0xDB, bytes([0]) + bytes([1]) * 64)
+        + seg(0xC0, bytes([8]) + struct.pack(">HHB", 8, 8, 1) + bytes([1, 0x11, 0]))
+        + seg(0xC4, bytes([0x00, 1] + [0] * 15 + [3]))
+        + seg(0xC4, bytes([0x10, 1, 1] + [0] * 13 + [1, 0x00, 0x01, 0xFA]))
+        + seg(0xDA, bytes([1, 1, 0x00, 0, 63, 0])))
+long_vlc = write("d_long_vlc.jpg", head + bits.flush() + b"\xff\xd9")
+raw += "1" * (-len(raw) % 8)                       # padding, as flush() writes it
+shown = [int(raw[i:i + 8], 2) for i in range(0, 40, 8)]
+marked = ("-" * 7 + raw[7:33]).ljust(40, "-")
+case("D_detail_long_vlc", "D", "decode", long_vlc, "--ac --detail 0,0,1",
+     expect="\\[0x%08x\\.7\\]: ZRL=\\[15\\] Val=\\[ 1000\\] Coef=\\[02\\.\\.17\\] Data=\\[0x %s = 0b \\(%s\\)\\]"
+            % (len(head), " ".join("%02x" % b for b in shown), " ".join(marked[i:i + 8] for i in range(0, 40, 8))))
+# Each matrix showed the block's DC difference, so a flat image's blocks after
+# the first had DC 0. A difference of 0 was also marked "EOB".
+flat, _, _ = dc_only_jpeg(24, 8, [(1, 1, 1)], lambda c, x, y: 180)
+flat = write("d_flat.jpg", flat)
+case("D_detail_dc_absolute", "D", "decode", flat, "--ac --detail 0,0,3",
+     expect="harness: detail blocks=3 .* dc=416/416/416$")
+case("D_detail_dc_zero_not_eob", "D", "decode", flat, "--ac --detail 0,0,3",
+     expect="Val=\\[    0\\] Coef=\\[00= DC\\]", forbid="Coef=\\[00= DC\\].* EOB$")
+# The predictor is per component and restarts at each restart marker
+flat_rst = write("d_flat_restart.jpg", jpeg(Image.new("L", (24, 8), 180), quality=100, restart_marker_blocks=1))
+case("D_detail_dc_restart", "D", "decode", flat_rst, "--ac --detail 0,0,3",
+     expect="harness: detail blocks=3 .* dc=416/416/416$")
+# (200, 100, 50) is Y 124, Cb 86, Cr 182: DC -32, -336 and 432
+flat_color = Image.new("RGB", (32, 16), (200, 100, 50))
+FLAT_DC = "harness: detail blocks=12 .* dc=-32/-32/-32/-32/-336/432/-32/-32$"
+case("D_detail_dc_color", "D", "decode",
+     write("d_flat_color.jpg", jpeg(flat_color, quality=100, subsampling=2)), "--ac --detail 0,0,2", expect=FLAT_DC)
+case("D_detail_dc_color_restart", "D", "decode",
+     write("d_flat_color_rst.jpg", jpeg(flat_color, quality=100, subsampling=2, restart_marker_blocks=1)),
+     "--ac --detail 0,0,2", expect=FLAT_DC)
+# An RGB JPEG's blocks were labelled Lum, Chr(0) and Chr(1)
+case("D_detail_rgb_labels", "D", "decode", "f3_rgb_ids.jpg", "--ac --detail 0,0,1",
+     expect="harness: detail blocks=3 first=0,0 last=0,0 labels=R/G/B ")
+# The first code after a restart marker was reported at the padding before the
+# marker, and so was an error there in the normal decode
+restart_bytes = (files_dir / restart).read_bytes()
+p_sos = sos_pos(restart_bytes)
+p_rst = restart_bytes.find(b"\xff\xd0", p_sos + 2 + struct.unpack(">H", restart_bytes[p_sos + 2:p_sos + 4])[0])
+case("D_detail_after_restart", "D", "decode", restart, "--ac --detail 0,0,2",
+     expect="^      \\[0x%08x\\.0\\]: ZRL=\\[ 0\\] Val=\\[ *-?[0-9]+\\] Coef=\\[00= DC\\]" % (p_rst + 2))
+bad_rst = write("d_restart_bad.jpg", restart_bytes[:p_rst + 2] + b"\xff\x00\xff\x00" + restart_bytes[p_rst + 2:])
+case("D_error_after_restart", "D", "decode", bad_rst, "--ac",
+     expect="Bad huffman code @ 0x%08x\\.0$" % (p_rst + 2))
+case("D_error_after_restart_detail", "D", "decode", bad_rst, "--ac --detail 0,0,2",
+     expect="Bad huffman code @ 0x%08x\\.0$" % (p_rst + 2))
+
+# The menu item opens the dialog (it did nothing; the dialog's OK and Cancel
+# did nothing either, so it never closed). gui --detail-dlg answers it; see
+# tests/harness/main.cpp. Pixels (20,4) and (40,20) are MCUs [1,0] and [2,1],
+# 6 MCUs apart in decode order.
+STILL_OPEN = "still open|widgets not found|unavailable"
+case("D_menu_two_clicks", "D", "gui", "ok_420.jpg", "--mark 20,4/40,20 --detail-dlg load,ok --auto-reprocess",
+     timeout=30, forbid=STILL_OPEN,
+     expect="detail report now blocks=36 first=1,0 last=2,1 labels=Lum/Chr\\(0\\)/Chr\\(1\\) rgb dumps=1 rows=16 "
+            "header=Detailed Decode: 6 MCUs from MCU \\[1,0\\]")
+# Clicked last to first: the range began at the later MCU
+case("D_menu_clicks_reversed", "D", "gui", "ok_420.jpg", "--mark 40,20/20,4 --detail-dlg load,ok --auto-reprocess",
+     timeout=30, forbid=STILL_OPEN, expect="detail set en=1 x=1 y=0 len=6$")
+# One click: that MCU (the length was 0, so nothing was reported)
+case("D_menu_one_click", "D", "gui", "ok_420.jpg", "--mark 63,47 --detail-dlg load,ok --auto-reprocess",
+     timeout=30, forbid=STILL_OPEN, expect="detail set en=1 x=3 y=2 len=1$")
+case("D_menu_no_clicks", "D", "gui", "ok_420.jpg", "--detail-dlg load,cancel", timeout=30, forbid=STILL_OPEN,
+     expect="detail dialog: Detailed Scan Decode Options \\(X=0 Y=0 len=1 enabled=0 load=off note=-\\)")
+case("D_menu_cancel", "D", "gui", "ok_420.jpg", "--mark 20,4 --detail-dlg load,cancel", timeout=30,
+     forbid=STILL_OPEN, expect="detail set en=0 x=0 y=0 len=1$")
+case("D_menu_typed", "D", "gui", "ok_420.jpg", "--detail-dlg x=2,y=1,len=2,on,ok --auto-reprocess", timeout=30,
+     forbid=STILL_OPEN, expect="detail report now blocks=12 first=2,1 last=3,1 ")
+# Fields are checked on OK
+BAD_STEPS = "--detail-dlg x=,ok,x=99999999999,ok,x=2,on,len=0,ok,len=3,ok"
+case("D_menu_bad_empty", "D", "gui", "ok_420.jpg", BAD_STEPS, timeout=30,
+     expect="message box: Enter a whole number from 0 to 4294967295 for MCU X\\.$")
+case("D_menu_bad_len0", "D", "gui", "ok_420.jpg", BAD_STEPS, timeout=30,
+     expect="message box: Enter at least 1 for # MCUs: no MCUs would be reported\\.$")
+case("D_menu_bad_then_ok", "D", "gui", "ok_420.jpg", BAD_STEPS, timeout=30, forbid=STILL_OPEN,
+     expect="detail set en=1 x=2 y=0 len=3$")
+# Without Automatic Reprocessing the report changes at the next decode
+case("D_menu_no_auto_now", "D", "gui", "ok_420.jpg", "--mark 20,4/40,20 --detail-dlg load,ok", timeout=30,
+     expect="detail report now blocks=0 first=- .* marks=2$")
+case("D_menu_no_auto_reprocess", "D", "gui", "ok_420.jpg", "--mark 20,4/40,20 --detail-dlg load,ok", timeout=30,
+     expect="detail report after reprocess blocks=36 first=1,0 last=2,1 ")
+# OK with nothing changed doesn't reprocess (the marks stay in the report)
+case("D_menu_unchanged", "D", "gui", "ok_420.jpg", "--mark 20,4 --detail-dlg ok --auto-reprocess", timeout=30,
+     expect="detail report now blocks=0 .* marks=1$")
+# Opened again: it shows the setting; then turned off
+case("D_menu_reopen", "D", "gui", "ok_420.jpg", "--detail-dlg x=1,on,ok+off,ok --auto-reprocess", timeout=30,
+     expect="detail dialog: Detailed Scan Decode Options \\(X=1 Y=0 len=1 enabled=1 ")
+case("D_menu_off", "D", "gui", "ok_420.jpg", "--detail-dlg x=1,on,ok+off,ok --auto-reprocess", timeout=30,
+     expect="detail set en=0 x=1 y=0 len=1$", forbid="detail report (now|after reprocess) blocks=[1-9]")
+# View > Image Chan added another RGB dump to the report for each channel shown
+case("D_menu_channels", "D", "gui", "ok_420.jpg", "--mark 63,47 --detail-dlg load,ok --auto-reprocess --cycle-channels",
+     timeout=60, expect="detail report after channels blocks=6 first=3,2 last=3,2 .* rgb dumps=1 rows=16 ")
+# The setting stays for the next file
+case("D_menu_next_file", "D", "gui", ["ok_420.jpg", "ok_444.jpg"],
+     "--mark 63,47 --detail-dlg load,ok --auto-reprocess", timeout=60,
+     expect="detail report blocks=3 first=3,2 last=3,2 .* rows=8 header=Detailed Decode: 1 MCU from MCU \\[3,2\\]")
+# Positions clicked on the previous file aren't loaded after a failed open
+case("D_menu_failed_open", "D", "gui", ["ok_420.jpg", "e_no_such_file.jpg"],
+     "--mark 20,4 --detail-dlg-at 2 --detail-dlg load,cancel", timeout=30,
+     expect="detail dialog: .* load=off ")
+case("D_menu_decode_off", "D", "gui", "ok_420.jpg", "--no-decode-image --detail-dlg cancel", timeout=30,
+     expect="note=Options > Scan Segment > Decode Image is off, so the scan isn't decoded and there is nothing "
+            "to report\\.\\)$")
+case("D_menu_psd", "D", "gui", "psd_rgb_rle.psd", "--detail-dlg x=0,on,ok --auto-reprocess", timeout=30,
+     forbid=STILL_OPEN, expect="detail report after reprocess blocks=0 ")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

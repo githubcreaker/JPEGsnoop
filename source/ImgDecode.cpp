@@ -149,6 +149,7 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
   m_nDetailVlcX = 0;
   m_nDetailVlcY = 0;
   m_nDetailVlcLen = 1;
+  m_bDetailRgbDump = false;
 
   ResetHistoStats(m_sHisto);
 
@@ -368,6 +369,10 @@ void CimgDecode::ClearDecodedImage()
   m_bDibHistYReady = false;
   m_bBrightValid = false;
   m_bAvgYValid = false;
+
+  // Positions marked on the previous image (for Detailed Decode's Load
+  // Coords) don't apply to the next
+  m_nMarkersBlkNum = 0;
 }
 
 void CimgDecode::ResetState()
@@ -2110,6 +2115,11 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
       // Step 5
       BuffTopup();
 
+      // The code is read after the marker: report its position from there
+      // (it was the position before the marker, of the padding bits)
+      nSavedBufPos = m_anScanBuffPtr_pos[0];
+      nSavedBufAlign = m_nScanBuffPtr_align;
+
       // Step 6
       // Q_ASSERT is because we assume that we don't get 2 restart
       // markers in a row!
@@ -2343,7 +2353,8 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
 // FIXME: need to fix like DecodeScanComp() (ordering of exit conditions, etc.)
 // FIXME: Consider adding checks for DHT table like in ReadScanVal()
 //
-bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t nTblDqt, uint32_t nMcuX, uint32_t nMcuY)
+bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t nTblDqt, uint32_t nMcuX, uint32_t nMcuY,
+                                     uint32_t nComp)
 {
   bool bPrint = true;
 
@@ -2362,18 +2373,25 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
 
   if(bPrint)
   {
-    switch (nTblDqt)
+    // Name the component, not the quantization table: Cb and Cr usually
+    // share table 1, so Cr was labelled "Chr(0)" like Cb. An RGB JPEG's
+    // components are R, G and B.
+    switch (nComp)
     {
-      case 0:
-        strTbl = "Lum";
+      case SCAN_COMP_Y:
+        strTbl = m_bRgbComps ? "R" : "Lum";
         break;
 
-      case 1:
-        strTbl = "Chr(0)";      // Usually Cb
+      case SCAN_COMP_CB:
+        strTbl = m_bRgbComps ? "G" : "Chr(0)";
         break;
 
-      case 2:
-        strTbl = "Chr(1)";      // Usually Cr
+      case SCAN_COMP_CR:
+        strTbl = m_bRgbComps ? "B" : "Chr(1)";
+        break;
+
+      case SCAN_COMP_K:
+        strTbl = "K";
         break;
 
       default:
@@ -2442,6 +2460,11 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
 
       // Step 5
       BuffTopup();
+
+      // The code is read after the marker: report its position from there
+      // (it was the position before the marker, of the padding bits)
+      nSavedBufPos = m_anScanBuffPtr_pos[0];
+      nSavedBufAlign = m_nScanBuffPtr_align;
 
       // Step 6
       // Q_ASSERT is because we assume that we don't get 2 restart
@@ -2532,14 +2555,17 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
     {
       if(bDC)
       {
+        // A DC difference of 0 (size 0), not an end of block (it was
+        // reported as "EOB")
         DecodeIdctSet(nTblDqt, nNumCoeffs, nZrl, nVal2);
         bDC = false;            // Now we will be on AC comps
+        strSpecial = "";
       }
       else
       {
         bDone = true;
+        strSpecial = "EOB";
       }
-      strSpecial = "EOB";
     }
     else if(eRsvRet == RSV_UNDERFLOW)
     {
@@ -2617,29 +2643,65 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
 
   // We finished the MCU component
 
-  // Now calc the IDCT matrix
+  // Now calc the IDCT matrix, as DecodeScanComp() does: only when the image
+  // shows the AC. (In No IDCT mode, the MCUs reported were drawn at full
+  // resolution and the others from their DC, which also changed the average
+  // and brightest pixel.) The report still lists every coefficient.
+  if(m_bDecodeScanAc)
+  {
 #ifdef IDCT_FIXEDPT
-  DecodeIdctCalcFixedpt();
+    DecodeIdctCalcFixedpt();
 #else
 //      DecodeIdctCalcFloat(nNumCoeffs);
-  DecodeIdctCalcFloat(64);
+    DecodeIdctCalcFloat(64);
 #endif
+  }
 
-  // Now report the coefficient matrix (after zigzag reordering)
+  // Now report the coefficient matrix (after zigzag reordering), with the
+  // block's DC: the difference decoded here plus the component's predictor
+  // (read now, as a restart marker in this block resets it). The caller adds
+  // the difference to the predictor afterwards.
   if(bPrint)
   {
-    ReportDctMatrix();
+    ReportDctMatrix(DcPredictor(nComp));
   }
 
   return true;
 }
 
+// The DC predictor of a component: the previous block's DC (dequantized),
+// to which a block's DC difference is added
+//
+int32_t CimgDecode::DcPredictor(uint32_t nComp) const
+{
+  switch(nComp)
+  {
+    case SCAN_COMP_Y:
+      return m_nDcLum;
+
+    case SCAN_COMP_CB:
+      return m_nDcChrCb;
+
+    case SCAN_COMP_CR:
+      return m_nDcChrCr;
+
+    default:
+      // K is only decoded in DEBUG_YCCK builds, whose predictor isn't kept here
+      return 0;
+  }
+}
+
 // Print out the DCT matrix for a given block
 //
+// INPUT:
+// - nDcPredictor                       = Added to the DC entry, which holds the
+//                                        block's DC difference. (The matrix
+//                                        showed the difference, so a flat
+//                                        image's blocks after the first had DC 0.)
 // PRE:
 // - m_anDctBlock[]
 //
-void CimgDecode::ReportDctMatrix()
+void CimgDecode::ReportDctMatrix(int32_t nDcPredictor)
 {
   QString strTmp;
   QString strLine;
@@ -2661,6 +2723,12 @@ void CimgDecode::ReportDctMatrix()
     {
       strTmp = "";
       nCoefVal = m_anDctBlock[nY * 8 + nX];
+
+      if((nY * 8 + nX) == DCT_COEFF_DC)
+      {
+        nCoefVal += nDcPredictor;
+      }
+
       strTmp = QString("%1").arg(nCoefVal, 5);
       strLine.append(strTmp);
 
@@ -2701,84 +2769,50 @@ void CimgDecode::ReportVlc(uint32_t nVlcPos, uint32_t nVlcAlign,
   QString strPos;
   QString strTmp;
 
-  uint32_t nBufByte[4];
   uint32_t nBufPosInd = nVlcPos;
 
-  QString strData = "";
-  QString strByte1 = "";
-  QString strByte2 = "";
-  QString strByte3 = "";
-  QString strByte4 = "";
-  QString strBytes = "";
-  QString strBytesOrig = "";
-  QString strBinMarked = "";
-
   strPos = GetScanBufPos(nVlcPos, nVlcAlign);
+
+  // Show enough bytes for the code and its value from the bit offset, at
+  // least 4 as before. A 16-bit code and a 15-bit value from bit 7 take 5:
+  // with only 4, such a code lost its last bits from the display.
+  const uint32_t nBitsUsed = m_nScanBitsUsed1 + m_nScanBitsUsed2;
+  const uint32_t nBytes = std::min<uint32_t>(std::max<uint32_t>(4, (nVlcAlign + nBitsUsed + 7) / 8), 8);
 
   // Read in the buffer bytes, but skip pad bytes (0xFF00 -> 0xFF)
 
   // We need to look at previous byte as it might have been
   // start of stuff byte! If so, we need to ignore the byte
   // and advance the pointers.
-  uint8_t nBufBytePre = m_pWBuf->Buf(nBufPosInd - 1);
+  uint32_t nBufBytePrev = (nBufPosInd > 0) ? m_pWBuf->Buf(nBufPosInd - 1) : 0;
 
-  nBufByte[0] = m_pWBuf->Buf(nBufPosInd++);
+  QString strHex;
+  QString strBytes;
 
-  if((nBufBytePre == 0xFF) && (nBufByte[0] == 0x00))
+  for(uint32_t nInd = 0; nInd < nBytes; nInd++)
   {
-    nBufByte[0] = m_pWBuf->Buf(nBufPosInd++);
+    uint32_t nBufByte = m_pWBuf->Buf(nBufPosInd++);
+
+    if((nBufBytePrev == 0xFF) && (nBufByte == 0x00))
+    {
+      nBufByte = m_pWBuf->Buf(nBufPosInd++);
+    }
+
+    strHex += QString(" %1").arg(nBufByte, 2, 16, QChar('0'));
+    strBytes += Dec2Bin(nBufByte, 8, true);
+    nBufBytePrev = nBufByte;
   }
 
-  nBufByte[1] = m_pWBuf->Buf(nBufPosInd++);
+  // The code and value's bits, the rest shown as "-", in bytes
+  QString strBinMarked = QString(nVlcAlign, QChar('-')) + strBytes.mid(nVlcAlign, nBitsUsed);
+  strBinMarked = strBinMarked.leftJustified(static_cast<qsizetype>(nBytes * 8), QChar('-'), true);
 
-  if((nBufByte[0] == 0xFF) && (nBufByte[1] == 0x00))
+  for(uint32_t nInd = nBytes - 1; nInd > 0; nInd--)
   {
-    nBufByte[1] = m_pWBuf->Buf(nBufPosInd++);
+    strBinMarked.insert(static_cast<qsizetype>(nInd * 8), QChar(' '));
   }
 
-  nBufByte[2] = m_pWBuf->Buf(nBufPosInd++);
-
-  if((nBufByte[1] == 0xFF) && (nBufByte[2] == 0x00))
-  {
-    nBufByte[2] = m_pWBuf->Buf(nBufPosInd++);
-  }
-
-  nBufByte[3] = m_pWBuf->Buf(nBufPosInd++);
-
-  if((nBufByte[2] == 0xFF) && (nBufByte[3] == 0x00))
-  {
-    nBufByte[3] = m_pWBuf->Buf(nBufPosInd++);
-  }
-
-  strByte1 = Dec2Bin(nBufByte[0], 8, true);
-  strByte2 = Dec2Bin(nBufByte[1], 8, true);
-  strByte3 = Dec2Bin(nBufByte[2], 8, true);
-  strByte4 = Dec2Bin(nBufByte[3], 8, true);
-  strBytesOrig = strByte1 + " " + strByte2 + " " + strByte3 + " " + strByte4;
-  strBytes = strByte1 + strByte2 + strByte3 + strByte4;
-
-  for(uint32_t ind = 0; ind < nVlcAlign; ind++)
-  {
-    strBinMarked += "-";
-  }
-
-  strBinMarked += strBytes.mid(nVlcAlign, m_nScanBitsUsed1 + m_nScanBitsUsed2);
-
-  for(uint32_t ind = nVlcAlign + m_nScanBitsUsed1 + m_nScanBitsUsed2; ind < 32; ind++)
-  {
-    strBinMarked += "-";
-  }
-
-  strBinMarked.insert(24, " ");
-  strBinMarked.insert(16, " ");
-  strBinMarked.insert(8, " ");
-
-  strData = QString("0x %1 %2 %3 %4 = 0b (%5)")
-      .arg(nBufByte[0], 2, 16, QChar('0'))
-      .arg(nBufByte[1], 2, 16, QChar('0'))
-      .arg(nBufByte[2], 2, 16, QChar('0'))
-      .arg(nBufByte[3], 2, 16, QChar('0'))
-      .arg(strBinMarked);
+  QString strData = QString("0x%1 = 0b (%2)").arg(strHex, strBinMarked);
 
   if((nCoeffStart == 0) && (nCoeffEnd == 0))
   {
@@ -3875,6 +3909,29 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
       m_pLog-> AddLineWarn("    NOTE: Low-resolution DC component shown. Can decode full-res with [Options->Scan Segment->Full IDCT]");
     }
 
+    // Options > Scan Segment > Detailed Decode stays on for every file
+    // decoded, so say what it covers
+    if(m_bDetailVlc)
+    {
+      if(DetailVlcInImage())
+      {
+        m_pLog->AddLine(QString("  Detailed Decode: %1 %2 from MCU [%3,%4]")
+                          .arg(m_nDetailVlcLen)
+                          .arg((m_nDetailVlcLen == 1) ? "MCU" : "MCUs")
+                          .arg(m_nDetailVlcX)
+                          .arg(m_nDetailVlcY));
+      }
+      else
+      {
+        m_pLog->AddLineWarn(QString("  NOTE: Detailed Decode starts at MCU [%1,%2], outside this image (%3 x %4 MCUs), "
+                                    "so nothing is reported")
+                              .arg(m_nDetailVlcX)
+                              .arg(m_nDetailVlcY)
+                              .arg(m_nMcuXMax)
+                              .arg(m_nMcuYMax));
+      }
+    }
+
     m_pLog->AddLine("");
   }
 
@@ -3979,15 +4036,15 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
       m_pMcuFileMap[nMcuXY] = PackFileOffset(m_anScanBuffPtr_pos[0], m_nScanBuffPtr_align);
 
       // Is this an MCU that we want full printing of decode process?
+      // (In 64 bits: the range wrapped around, so a large Y or length chose
+      // the wrong MCUs. A start beyond the right edge isn't in the image.)
       bool bVlcDump = false;
 
-      uint32_t nRangeBase;
-      uint32_t nRangeCur;
-
-      if(m_bDetailVlc)
+      if(m_bDetailVlc && DetailVlcInImage())
       {
-        nRangeBase = (m_nDetailVlcY * m_nMcuXMax) + m_nDetailVlcX;
-        nRangeCur = nMcuXY;
+        const uint64_t nRangeBase = static_cast<uint64_t>(m_nDetailVlcY) * static_cast<uint32_t>(m_nMcuXMax) +
+                                    m_nDetailVlcX;
+        const uint64_t nRangeCur = nMcuXY;
 
         if((nRangeCur >= nRangeBase) && (nRangeCur < nRangeBase + m_nDetailVlcLen))
         {
@@ -4029,7 +4086,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
           }
           else
           {
-            bDscRet = DecodeScanCompPrint(nDhtTblDcY, nDhtTblAcY, nDqtTblY, nMcuX, nMcuY);      // Lum DC+AC
+            bDscRet = DecodeScanCompPrint(nDhtTblDcY, nDhtTblAcY, nDqtTblY, nMcuX, nMcuY, SCAN_COMP_Y);      // Lum DC+AC
           }
           
           if(m_nScanCurErr)
@@ -4127,7 +4184,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
             }
             else
             {
-              bDscRet = DecodeScanCompPrint(nDhtTblDcCb, nDhtTblAcCb, nDqtTblCb, nMcuX, nMcuY); // Chr Cb DC+AC
+              bDscRet = DecodeScanCompPrint(nDhtTblDcCb, nDhtTblAcCb, nDqtTblCb, nMcuX, nMcuY, SCAN_COMP_CB); // Chr Cb DC+AC
             }
             
             if(m_nScanCurErr)
@@ -4172,7 +4229,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
             }
             else
             {
-              bDscRet = DecodeScanCompPrint(nDhtTblDcCr, nDhtTblAcCr, nDqtTblCr, nMcuX, nMcuY); // Chr Cr DC+AC
+              bDscRet = DecodeScanCompPrint(nDhtTblDcCr, nDhtTblAcCr, nDqtTblCr, nMcuX, nMcuY, SCAN_COMP_CR); // Chr Cr DC+AC
             }
             
             if(m_nScanCurErr)
@@ -4221,7 +4278,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
             }
             else
             {
-              bDscRet = DecodeScanCompPrint(nDhtTblDcCb, nDhtTblAcCb, nDqtTblCb, nMcuX, nMcuY); // Chr Cb DC+AC
+              bDscRet = DecodeScanCompPrint(nDhtTblDcCb, nDhtTblAcCb, nDqtTblCb, nMcuX, nMcuY, SCAN_COMP_CB); // Chr Cb DC+AC
             }
             
             if(m_nScanCurErr)
@@ -4266,7 +4323,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
             }
             else
             {
-              bDscRet = DecodeScanCompPrint(nDhtTblDcCr, nDhtTblAcCr, nDqtTblCr, nMcuX, nMcuY); // Chr Cr DC+AC
+              bDscRet = DecodeScanCompPrint(nDhtTblDcCr, nDhtTblAcCr, nDqtTblCr, nMcuX, nMcuY, SCAN_COMP_CR); // Chr Cr DC+AC
             }
             
             if(m_nScanCurErr)
@@ -4307,7 +4364,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
             }
             else
             {
-              bDscRet = DecodeScanCompPrint(nDhtTblDcK, nDhtTblAcK, nDqtTblK, nMcuX, nMcuY);    // K DC+AC
+              bDscRet = DecodeScanCompPrint(nDhtTblDcK, nDhtTblAcK, nDqtTblK, nMcuX, nMcuY, SCAN_COMP_K);    // K DC+AC
             }
             
             if(m_nScanCurErr)
@@ -4491,7 +4548,11 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   // with PREVIEW_NONE
   if(bDisplay)
   {
+    // Report the detailed MCU's RGB here, not again each time the preview
+    // is recalculated (such as for View > Image Chan)
+    m_bDetailRgbDump = m_bDetailVlc && (m_nDetailVlcLen > 0) && DetailVlcInImage();
     CalcChannelPreview();
+    m_bDetailRgbDump = false;
   }
 
   // DIB is ready for display now
@@ -5779,13 +5840,21 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
 
   SetStatusText("Color conversion...");
 
-  if(m_bDetailVlc)
+  // Only for the preview made by a decode (DecodeScanImg() sets this)
+  const bool bRgbDump = m_bDetailRgbDump;
+
+  if(bRgbDump)
   {
     m_pLog->AddLine("  Detailed IDCT Dump (RGB):");
     strTmp = QString("    MCU [%1,%2]:")
         .arg(m_nDetailVlcX, 3)
         .arg(m_nDetailVlcY, 3);
     m_pLog->AddLine(strTmp);
+
+    if(!m_bDecodeScanAc)
+    {
+      m_pLog->AddLine("    (No IDCT mode: each block shows its DC value only)");
+    }
   }
 
   // Determine pixel count: the loops below run up to, not including, nRngX2
@@ -5912,38 +5981,19 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
       // If we want a detailed decode of RGB, print it out
       // now if we are on the correct MCU.
       // NOTE: The level shift (adjust) will affect this report!
-      if(m_bDetailVlc)
+      if(bRgbDump && (nMcuY == m_nDetailVlcY) && (nMcuX == m_nDetailVlcX))
       {
-        if(nMcuY == m_nDetailVlcY)
+        if(!bRowStart)
         {
-          if(nMcuX == m_nDetailVlcX)
-          {
-            //if ((nMcuX >= m_nDetailVlcX) && (nMcuX < m_nDetailVlcX+m_nDetailVlcLen)) {
-            if(!bRowStart)
-            {
-              bRowStart = true;
-              strLine = QString("      [ ");
-            }
-
-            strTmp = QString("x%1%2%3 ")
-                .arg(sPixSrc.nFinalR, 2, 16, QChar('0'))
-                .arg(sPixSrc.nFinalG, 2, 16, QChar('0'))
-                .arg(sPixSrc.nFinalB, 2, 16, QChar('0'));
-            strLine.append(strTmp);
-          }
-          else
-          {
-            if(bRowStart)
-            {
-              // We had started a row, but we are now out of range, so we
-              // need to close up!
-              strTmp = QString(" ]");
-              strLine.append(strTmp);
-              m_pLog->AddLine(strLine);
-              bRowStart = false;
-            }
-          }
+          bRowStart = true;
+          strLine = QString("      [ ");
         }
+
+        strTmp = QString("x%1%2%3 ")
+            .arg(sPixSrc.nFinalR, 2, 16, QChar('0'))
+            .arg(sPixSrc.nFinalG, 2, 16, QChar('0'))
+            .arg(sPixSrc.nFinalB, 2, 16, QChar('0'));
+        strLine.append(strTmp);
       }
 
       // Perform any channel filtering if enabled
@@ -5952,12 +6002,21 @@ void CimgDecode::CalcChannelPreviewFull(QRect *, uint8_t *pTmp)
       // Assign the RGB pixel map
       m_pDibTemp->setPixelColor(nPixX, nPixY, QColor(sPixDst.nFinalR, sPixDst.nFinalG, sPixDst.nFinalB));
     }                           // x
+
+    // End the MCU's row here. (It ended at the next MCU's first pixel, so an
+    // MCU in the last column lost its last row.)
+    if(bRowStart)
+    {
+      strLine.append(" ]");
+      m_pLog->AddLine(strLine);
+      bRowStart = false;
+    }
   }                             // y
 
   SetStatusText("");
   // ---------------------------------------------------------
 
-  if(m_bDetailVlc)
+  if(bRgbDump)
   {
     m_pLog->AddLine("");
   }
@@ -6068,6 +6127,14 @@ void CimgDecode::GetDetailVlc(bool & bDetail, uint32_t &nX, uint32_t &nY, uint32
   nX = m_nDetailVlcX;
   nY = m_nDetailVlcY;
   nLen = m_nDetailVlcLen;
+}
+
+// Is the detailed scan decode's first MCU in the image being decoded?
+// (PRE: m_nMcuXMax and m_nMcuYMax, set by DecodeScanImg())
+bool CimgDecode::DetailVlcInImage() const
+{
+  return (m_nMcuXMax > 0) && (m_nMcuYMax > 0) &&
+         (m_nDetailVlcX < static_cast<uint32_t>(m_nMcuXMax)) && (m_nDetailVlcY < static_cast<uint32_t>(m_nMcuYMax));
 }
 
 // Set the detailed scan decode settings (VLC)

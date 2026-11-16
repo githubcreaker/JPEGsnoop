@@ -417,7 +417,7 @@ public:
   QImage *yHistogram() { return m_pDibHistY; }
   QImage *rgbHistogram() { return m_pDibHistRgb; }
 
-  void ReportDctMatrix();
+  void ReportDctMatrix(int32_t nDcPredictor);
   void ReportDctYccMatrix();
   void ReportVlc(uint32_t nVlcPos, uint32_t nVlcAlign,
                  uint32_t nZrl, int32_t nVal, uint32_t nCoeffStart, uint32_t nCoeffEnd, QString specialStr);
@@ -466,7 +466,10 @@ private:
   uint32_t ExtractBits(uint32_t nWord, uint32_t nBits);
   teRsvRet ReadScanVal(uint32_t nClass, uint32_t nTbl, uint32_t & rZrl, int32_t &rVal);
   bool DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t nTblDqt, uint32_t nMcuX, uint32_t nMcuY);
-  bool DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t nTblDqt, uint32_t nMcuX, uint32_t nMcuY);
+  bool DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t nTblDqt, uint32_t nMcuX, uint32_t nMcuY,
+                           uint32_t nComp);
+  bool DetailVlcInImage() const;
+  int32_t DcPredictor(uint32_t nComp) const;
   int32_t HuffmanDc2Signed(uint32_t nVal, uint32_t nBits);
   void CheckScanErrors(uint32_t nMcuX, uint32_t nMcuY, uint32_t nCssX, uint32_t nCssY, uint32_t nComp);
 
@@ -574,6 +577,7 @@ private:
   uint32_t m_nDetailVlcX;
   uint32_t m_nDetailVlcY;
   uint32_t m_nDetailVlcLen;
+  bool m_bDetailRgbDump;        // Report the detailed MCU's RGB in the next preview calculation
 
   uint32_t m_nZoomMode;
   double m_nZoom;

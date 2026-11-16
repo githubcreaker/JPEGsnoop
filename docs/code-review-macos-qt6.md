@@ -666,6 +666,119 @@ old check.
 **Still open:** Developer ID signing and notarization (M5); latent code; Select All,
 Find, File Overlay, Detailed Decode, About and Batch Process.
 
+### Detailed Decode
+
+Options > Scan Segment > Detailed Decode did nothing. Its dialog had been ported, but
+nothing opened it, and its OK and Cancel did nothing, so it couldn't have been closed
+(section 7). It now works as on Windows:
+- **Choosing the MCUs:** type the first MCU and how many to report, or click Load Coords
+  to take them from the last one or two positions clicked on the image.
+- **The report:** the next decode reports each variable-length code in those MCUs, each
+  block's coefficients, and the first MCU's pixels.
+- **New:** with Automatic Reprocessing on, that decode starts on OK, as for the other
+  Scan Segment options. Windows waited for the next decode.
+
+The decoder already had the code. Problems fixed in it (inherited unless marked):
+- **The image changed in No IDCT mode:** the detailed path always ran the full IDCT. In
+  No IDCT (DC only) mode, the default, the MCUs reported were drawn at full resolution
+  and the rest from their DC, which changed the average luminance and brightest pixel
+  too. The image now follows the decode mode. The report still lists every coefficient,
+  and the pixel dump notes that it shows DC values only.
+- **Cr labelled as Cb:** blocks were named after their quantization table. Cr nearly
+  always shares table 1 with Cb, so both were "Chr(0)". They are now named after the
+  component: Lum, Chr(0) for Cb and Chr(1) for Cr.
+- **Pixel dump:**
+  - **Last row:** a row ended at the next MCU's first pixel, so an MCU in the last column
+    lost its last row.
+  - **Repeated:** the dump is made when the preview is calculated, so each View > Image
+    Chan change added another copy to the end of the report. Only a decode makes it now.
+- **Range:**
+  - **Wrapping:** the start and length were added in 32 bits. A start far below the
+    image wrapped around to MCU [0,0], and a length near 2^32 reported nothing.
+  - **Start past the edge:** a start beyond the right edge picked an MCU in the next row.
+    A start outside the image now reports nothing, and a note says so.
+- **Load Coords:**
+  - **Reverse order:** after two clicks, later MCU first, the length was right but the
+    range began at the later MCU.
+  - **One click:** it loaded a length of 0, which reports nothing. It now loads 1.
+  - **Failed open** (port): positions clicked on the previous image stayed after a
+    failed open, so Load Coords offered them for a file that hadn't been decoded.
+- **Dialog** (port): fixed positions are replaced by layouts.
+  - **Fields** must be whole numbers, checked on OK. The length must be at least 1
+    while the decode is on.
+  - **Load Coords** is unavailable until a position is clicked.
+  - **Decode Image off:** a note says so, as nothing is decoded then.
+- **New report line:** the setting applies to every file decoded until it's turned off,
+  so the scan section now says what it covers, as in "Detailed Decode: 6 MCUs from MCU
+  [1,0]".
+
+**Tests:** 40 new `D` cases (242 in all).
+- **`decode --detail X,Y,LEN`:** summarizes what the report shows, then decodes the file
+  again without the detail. Cases check that only detail lines are added and the image
+  is unchanged, in both decode modes. Files: every MCU of 4:2:0, 4:4:4 and greyscale
+  images, restart markers, a corrupt scan, a truncated scan, an RGB JPEG and a
+  multi-scan file.
+- **`gui --detail-dlg`:** clicks the image and goes through the menu and dialog.
+- **Against the old code:** the decode cases fail before this change. They show the Cr
+  label, 15 dump rows instead of 16, a start past the edge picking MCU [0,1], and the
+  image changing in No IDCT mode. The menu cases did nothing.
+
+**Checks:**
+- **All 242 pass** with and without ASan/UBSan.
+- **No change with the setting off:** the reports and images of the 109 test files that
+  run in under a minute, in both decode modes, are the same as for `525232b`.
+- **Every test file in detail:** decoded with every MCU reported, in both modes, each
+  gives the same report apart from the detail lines, and the same image.
+- **Speed:** an MCU of a 4:2:0 image is about 80 report lines. With a 1024×768 JPEG,
+  100 MCUs took 1.2 seconds and all 3,072 (249,000 lines) 29 seconds; an earlier run
+  on a busier machine took twice as long. Nearly all of the time is spent in Qt's text
+  widget: with the report off, a decode that took 8.8 seconds took 0.46. Windows had
+  no limit, and none is added.
+- **Not checked:** the dialog in the macOS style. The tests run offscreen, where it was
+  checked in Qt's Fusion style.
+
+**Second check:** a reviewer found three errors in what the detail lines say. All are
+fixed, along with two more found while checking them (all inherited):
+- **Long codes cut off:** each code was shown in the 4 bytes from where it starts. A
+  16-bit code with a 10-bit value from bit 7 takes 33 bits, so its last bit was missing.
+  As many bytes as the code needs are now shown, 5 at most. Lines that fit in 4 bytes
+  are unchanged: 64,000 lines from six files are the same as before.
+- **DC in the matrices:** each matrix showed the block's DC difference, not its DC, so in
+  a flat image every block after the first had DC 0. The component's predictor is now
+  added, read after any restart marker in the block. The code's own line still shows
+  the difference, as coded.
+- **RGB JPEG labels:** an RGB JPEG's blocks were Lum, Chr(0) and Chr(1). They are now R,
+  G and B.
+- **Found while checking:**
+  - **DC of 0 marked "EOB":** a DC difference of 0 has size 0, which the decoder returns
+    as it does an end of block, and the line said "EOB".
+  - **After a restart marker:** the first code was reported at the padding before the
+    marker, with the padding's bits. The normal decode gave the same position for a bad
+    code there: "Bad huffman code @ 0x00000298.0" for a code at 0x29B. Both now give the
+    position after the marker.
+
+10 new cases (252 in all), with generated files:
+- **Long code:** a JPEG with the 26-bit code at bit 7. Its line must show all 26 bits.
+- **DC:** flat grey and colour images, with and without restart markers. Every matrix
+  must show the same DC: 416 for grey, and -32, -336 and 432 for Y, Cb and Cr.
+- **Other files:** an RGB JPEG, and a JPEG with an invalid code right after a restart
+  marker.
+- **Against the old code:** each case fails before these fixes but one. In the flat grey
+  file with a restart marker after every block, each difference is the whole DC, so its
+  matrices were already right.
+
+**Checks:**
+- **All 252 pass** with and without ASan/UBSan.
+- **Setting off:** the reports are the same as for `525232b` for every test file but the
+  new one with a bad code after a restart marker, where only the error's position
+  changes.
+- **Every test file in detail:** still adds only detail lines, in both decode modes.
+- **The reviewer's files:** the long code shows all 26 bits, and all three flat blocks
+  show DC 416.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; Select All,
+Find, File Overlay, About and Batch Process.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:
@@ -935,7 +1048,7 @@ These can't be reached in this build, but will matter when the features are fini
 - **Signature submit:** `strFormData` is never built (`8846` commented out).
 - `General.cpp:107-111` (`Uint2DotByte`): operator precedence makes every field the low byte; `93-98` (`Uint2Chars`): chained `.arg()` substitutes `%` in file bytes.
 - `WindowBuf.cpp:584`, `196`, `347`: printf formats passed to `.arg()`; `716`: `OverlayGet` has no bounds check.
-- `q_decodedetaildlg.cpp:38-46`: empty `accept()`/`reject()`, so the dialog can't be closed once wired up.
+- `q_decodedetaildlg.cpp:38-46`: empty `accept()`/`reject()`, so the dialog can't be closed once wired up. (Fixed: see "Detailed Decode".)
 
 ## 8. Found earlier, during the macOS build work
 

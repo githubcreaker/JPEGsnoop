@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <new>
+#include <utility>
 
 #include <QtWidgets>
 #include <QtPrintSupport/qtprintsupportglobal.h>
@@ -33,6 +34,7 @@
 #include "Viewer.h"
 #include "WindowBuf.h"
 #include "note.h"
+#include "q_decodedetaildlg.h"
 #include "snoop.h"
 #include "snoopconfigdialog.h"
 
@@ -523,6 +525,7 @@ void MainWindow::createActions(void)
   connect(dumpAct, SIGNAL(triggered()), m_pAppConfig, SLOT(onScansegmentDump()));
 
   detailedDecodeAct = new QAction(tr("Detailed Decode..."), this);
+  connect(detailedDecodeAct, &QAction::triggered, this, &MainWindow::onDetailedDecode);
 
   // Help menu
   aboutAct = new QAction(tr("&About JPEGsnoop..."), this);
@@ -1466,6 +1469,96 @@ bool MainWindow::exportTiff(const QString &strOut, FileTiff::teFormat eFormat, Q
   m_pDocLog->AddLine("  Export done");
   m_StatusBar->showMessage(tr("Exported TIFF"), 5000);
   return true;
+}
+
+//-----------------------------------------------------------------------------
+
+// The MCUs between the last two positions clicked on the image, first to
+// last in decode order (or the one MCU clicked, if only one was). False if
+// nothing has been clicked on this image.
+bool MainWindow::detailRangeFromMarks(uint32_t &nMcuX, uint32_t &nMcuY, uint32_t &nMcuLen)
+{
+  const uint32_t nMarks = m_pImgDec->GetMarkerCount();
+
+  if(!m_pImgDec->IsImgDecoded() || (nMarks == 0))
+  {
+    return false;
+  }
+
+  // Marks are 8x8 blocks: the MCU holding a block's top-left pixel
+  auto markMcu = [this](uint32_t nInd) {
+    const QPoint ptBlk = m_pImgDec->GetMarkerBlk(nInd);
+    return m_pImgDec->PixelToMcu(QPoint(ptBlk.x() * BLK_SZ_X, ptBlk.y() * BLK_SZ_Y));
+  };
+
+  QPoint ptStart = markMcu(nMarks - 1);
+  nMcuLen = 1;
+
+  if(nMarks >= 2)
+  {
+    QPoint ptEnd = ptStart;
+    ptStart = markMcu(nMarks - 2);
+
+    // Clicked last to first: swap them. (Master swapped the positions for
+    // the length but kept the first click as the start, so the range began
+    // at the later MCU.)
+    if(m_pImgDec->McuXyToLinear(ptStart) > m_pImgDec->McuXyToLinear(ptEnd))
+    {
+      std::swap(ptStart, ptEnd);
+    }
+
+    nMcuLen = m_pImgDec->McuXyToLinear(ptEnd) - m_pImgDec->McuXyToLinear(ptStart) + 1;
+  }
+
+  nMcuX = static_cast<uint32_t>(ptStart.x());
+  nMcuY = static_cast<uint32_t>(ptStart.y());
+  return true;
+}
+
+// Options > Scan Segment > Detailed Decode: choose the MCUs whose scan decode
+// the report shows in detail (each variable-length code, the coefficients of
+// each block and the first MCU's pixels). It applies from the next decode,
+// which Automatic Reprocessing starts at once. (The menu item did nothing.)
+void MainWindow::onDetailedDecode()
+{
+  bool bEn = false;
+  uint32_t nMcuX = 0;
+  uint32_t nMcuY = 0;
+  uint32_t nMcuLen = 0;
+  m_pImgDec->GetDetailVlc(bEn, nMcuX, nMcuY, nMcuLen);
+
+  Q_DecodeDetailDlg dlg(bEn, nMcuX, nMcuY, nMcuLen, this);
+
+  uint32_t nLoadX = 0;
+  uint32_t nLoadY = 0;
+  uint32_t nLoadLen = 0;
+
+  if(detailRangeFromMarks(nLoadX, nLoadY, nLoadLen))
+  {
+    dlg.setLoadCoords(nLoadX, nLoadY, nLoadLen);
+  }
+
+  if(!m_pAppConfig->decodeImage())
+  {
+    dlg.setNote(tr("Options > Scan Segment > Decode Image is off, so the scan isn't decoded and there is "
+                   "nothing to report."));
+  }
+
+  if(dlg.exec() != QDialog::Accepted)
+  {
+    return;
+  }
+
+  m_pImgDec->SetDetailVlc(dlg.detailEnabled(), dlg.mcuX(), dlg.mcuY(), dlg.mcuLen());
+
+  // Only a change to what the report shows needs a new decode
+  const bool bChanged = (dlg.detailEnabled() != bEn) ||
+                        (bEn && ((dlg.mcuX() != nMcuX) || (dlg.mcuY() != nMcuY) || (dlg.mcuLen() != nMcuLen)));
+
+  if(bChanged && !m_currentFile.isEmpty())
+  {
+    m_pAppConfig->HandleAutoReprocess();
+  }
 }
 
 //-----------------------------------------------------------------------------

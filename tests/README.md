@@ -18,11 +18,17 @@ when it is installed, so Pillow needn't be installed separately).
 - `harness/` builds `jpegsnoop-harness` from the app's sources (shared through
   `JPEGsnoopQt.pri`) plus a small driver:
   - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]
-    [--start N]` decodes one file in non-interactive mode and prints the report
+    [--start N] [--detail X,Y,LEN] [--preview-md5]` decodes one file in
+    non-interactive mode and prints the report
     (`--unknown-exif` also reports unknown EXIF tags, which the app hides by
     default; `--pixels` prints the decoded colour at each point; with
     `--histo` it also counts the pixels drawn in each histogram image;
-    `--start` decodes from file offset N);
+    `--start` decodes from file offset N; `--preview-md5` prints an MD5 of the
+    decoded image). `--detail` turns on Options > Scan Segment > Detailed
+    Decode for LEN MCUs from MCU X,Y, prints a `harness: detail blocks=...`
+    summary of what the report shows (ending with the DC of the first 8
+    blocks' matrices), and decodes the file again without it:
+    `harness: detail changes report=0 image=0` means it only added lines;
   - `gui <file>... [--mouse] [--log] [--reprocess-first] [--histo]
     [--cycle-channels] [--repeat N] [--max-growth-mb N]` opens the files in the
     real `MainWindow` like a fresh install. `--mouse` moves and clicks over the
@@ -49,6 +55,16 @@ when it is installed, so Pillow needn't be installed separately).
       Extract All and prints the numbered files written; `--old-numbered` leaves
       files named as the first of them and as the name chosen beforehand, and
       `--replace` answers Replace when asked (otherwise questions are cancelled).
+    - `--detail-dlg STEPS` chooses Options > Scan Segment > Detailed Decode after
+      the first file (or file N with `--detail-dlg-at N`) and answers its dialog
+      with STEPS, a comma-separated list of `load` (Load Coords), `x=N`, `y=N`,
+      `len=N`, `on`, `off`, `ok` and `cancel`; `+` chooses the menu item again
+      for the steps after it. It prints the dialog's fields each time it shows,
+      the setting chosen, and a summary of the report's detailed decode as it is,
+      after File > Reprocess and (with `--cycle-channels`) after the channels.
+      `--mark X,Y/X,Y...` first clicks the image at those pixels after each file;
+      `--auto-reprocess` turns on Automatic Reprocessing and `--no-decode-image`
+      turns off Decode Image.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -87,8 +103,9 @@ Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
 (`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
 GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F10`
-are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, and `E`
-in its "Export JPEG and Export TIFF" section);
+are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
+in its "Export JPEG and Export TIFF" section, and `D` in its "Detailed Decode"
+section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

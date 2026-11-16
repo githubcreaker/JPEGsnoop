@@ -78,6 +78,7 @@ private slots:
   void printPreview(QPrinter *);
   void onExportJpeg();
   void onExportTiff();
+  void onDetailedDecode();
 
 private:
   MainWindow &operator = (const MainWindow&);
@@ -92,6 +93,7 @@ private:
   void AnalyzeFileDo();
   void AnalyzeClose();
   bool exportAllJpegs(const QString &strOut, const ExportJpegSettings &sSettings);
+  bool detailRangeFromMarks(uint32_t &nMcuX, uint32_t &nMcuY, uint32_t &nMcuLen);
 
   CDocLog *m_pDocLog;
   CDbSigs *m_pDbSigs;
