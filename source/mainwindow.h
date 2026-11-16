@@ -79,6 +79,7 @@ private slots:
   void onExportJpeg();
   void onExportTiff();
   void onDetailedDecode();
+  void onAbout();
 
 private:
   MainWindow &operator = (const MainWindow&);

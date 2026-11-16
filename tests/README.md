@@ -65,6 +65,9 @@ when it is installed, so Pillow needn't be installed separately).
       `--mark X,Y/X,Y...` first clicks the image at those pixels after each file;
       `--auto-reprocess` turns on Automatic Reprocessing and `--no-decode-image`
       turns off Decode Image.
+    - `--about` chooses Help > About JPEGsnoop after the first file and prints
+      the item's menu role, the dialog's texts and links, and its icon's size,
+      pixel ratio and number of colours, then clicks OK.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -104,8 +107,8 @@ Case ids start with the finding they cover in
 (`C` memory safety, `H` hangs, `U` GUI, `R` report output, `S` settings and
 GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F10`
 are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
-in its "Export JPEG and Export TIFF" section, and `D` in its "Detailed Decode"
-section);
+in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
+section, and `A` in its "About" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

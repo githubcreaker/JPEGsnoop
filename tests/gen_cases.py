@@ -1469,6 +1469,29 @@ case("D_menu_decode_off", "D", "gui", "ok_420.jpg", "--no-decode-image --detail-
 case("D_menu_psd", "D", "gui", "psd_rgb_rle.psd", "--detail-dlg x=0,on,ok --auto-reprocess", timeout=30,
      forbid=STILL_OPEN, expect="detail report after reprocess blocks=0 ")
 
+# --- A: Help > About JPEGsnoop ---------------------------------------------------
+# The menu item did nothing. gui --about opens the dialog through the menu and
+# prints what it shows; on macOS the item belongs in the application menu.
+snoop_h = (Path(__file__).resolve().parent.parent / "source" / "snoop.h").read_text()
+version = snoop_h.split('#define VERSION_STR "', 1)[1].split('"', 1)[0]
+ver_re = version.replace(".", "\\.")
+case("A_about_role", "A", "gui", "ok_444.jpg", "--about", timeout=30, expect="harness: about role=about$")
+case("A_about_text", "A", "gui", "ok_444.jpg", "--about", timeout=30,
+     expect="harness: about: About JPEGsnoop \\(JPEGsnoop / Version %s / Copyright [^ ]+ 2017 Calvin Hass / "
+            "Qt 6\\.[0-9]+\\.[0-9]+\\)$" % ver_re)
+case("A_about_links", "A", "gui", "ok_444.jpg", "--about", timeout=30,
+     expect="harness: about links: Documentation and Updates for JPEGsnoop -> "
+            "https://www\\.impulseadventure\\.com/photo/jpeg-snoop\\.html\\?ver=%s \\| "
+            "www\\.impulseadventure\\.com/photo/ -> https://www\\.impulseadventure\\.com/photo/ external=1$" % ver_re)
+# The icon is the 48-pixel frame with the most colours (the 32-bit one; the
+# 16-colour frame has about a dozen), doubled pixel for pixel on a Retina screen
+ICON_COLOURS = "colours=([6-9][0-9]{2}|[0-9]{4,})$"
+case("A_about_icon", "A", "gui", "ok_444.jpg", "--about", timeout=30,
+     expect="harness: about icon=48x48 dpr=1 " + ICON_COLOURS)
+case("A_about_icon_retina", "A", "gui", "ok_444.jpg", "--about --scale 2", timeout=30,
+     expect="harness: about icon=96x96 dpr=2 " + ICON_COLOURS)
+case("A_about_closes", "A", "gui", "ok_444.jpg", "--about", timeout=30, expect="harness: about closed=1$")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

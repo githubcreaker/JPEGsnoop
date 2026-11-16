@@ -86,6 +86,11 @@
 //     --auto-reprocess turns on Automatic Reprocessing; --no-decode-image
 //     turns off Options > Scan Segment > Decode Image.
 //
+// gui ... --about
+//     After the first file, choose Help > About JPEGsnoop and print its menu
+//     role, what the dialog shows (texts, links, the icon's size, pixel ratio
+//     and number of colours), then click OK.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -138,6 +143,7 @@
 #include "SnoopConfig.h"
 #include "Viewer.h"
 #include "WindowBuf.h"
+#include "aboutdialog.h"
 #include "mainwindow.h"
 #include "q_decodedetaildlg.h"
 #include "snoopconfigdialog.h"
@@ -154,7 +160,7 @@ static void usage()
           "                         [--export-menus | --export-menus-cancel | --export-menus-all]\n"
           "                         [--old-numbered] [--replace]\n"
           "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
-          "                          [--auto-reprocess] [--no-decode-image]]\n"
+          "                          [--auto-reprocess] [--no-decode-image]] [--about]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--out PATH] [--out-same] [--out-same-case]\n"
@@ -841,6 +847,7 @@ struct GuiOptions
   int nDetailDlgAt = 1;           // --detail-dlg-at N
   bool bAutoReprocess = false;    // --auto-reprocess
   bool bNoDecodeImage = false;    // --no-decode-image
+  bool bAbout = false;            // --about
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -1179,6 +1186,71 @@ static void detailedDecodeMenu(MainWindow &window, const GuiOptions &opts, QText
   out.flush();
 }
 
+// Help > About JPEGsnoop as a user chooses it (see --about above)
+static void aboutMenu(MainWindow &window, QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("&About JPEGsnoop..."));
+  if(!pAction || !pAction->isEnabled())
+  {
+    out << "harness: menu About unavailable\n";
+    return;
+  }
+  out << "harness: about role=" << ((pAction->menuRole() == QAction::AboutRole) ? "about" : "other") << "\n";
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    AboutDialog *pDlg = qobject_cast<AboutDialog *>(QApplication::activeModalWidget());
+    if(!pDlg)
+      return;
+    auto text = [pDlg](const char *pszName) {
+      const QLabel *pLabel = pDlg->findChild<QLabel *>(QLatin1String(pszName));
+      return pLabel ? pLabel->text() : QStringLiteral("?");
+    };
+    out << "harness: about: " << pDlg->windowTitle() << " (" << text("lblName") << " / " << text("lblVersion")
+        << " / " << text("lblCopyright") << " / " << text("lblQt") << ")\n";
+
+    static const QRegularExpression reHref(QStringLiteral("href=\"([^\"]*)\">([^<]*)<"));
+    QStringList astrLinks;
+    bool bExternal = true;
+    for(const char *pszName : { "lblDocLink", "lblSiteLink" })
+    {
+      const QLabel *pLabel = pDlg->findChild<QLabel *>(QLatin1String(pszName));
+      const QRegularExpressionMatch match = reHref.match(pLabel ? pLabel->text() : QString());
+      astrLinks << (match.hasMatch() ? match.captured(2) + " -> " + match.captured(1) : QStringLiteral("?"));
+      bExternal = bExternal && pLabel && pLabel->openExternalLinks();
+    }
+    out << "harness: about links: " << astrLinks.join(" | ") << " external=" << (bExternal ? 1 : 0) << "\n";
+
+    const QLabel *pIcon = pDlg->findChild<QLabel *>(QStringLiteral("lblIcon"));
+    const QImage img = pIcon ? pIcon->pixmap().toImage().convertToFormat(QImage::Format_ARGB32) : QImage();
+    QSet<QRgb> setColours;
+    for(int nY = 0; nY < img.height(); nY++)
+      for(int nX = 0; nX < img.width(); nX++)
+        setColours.insert(img.pixel(nX, nY));
+    out << QString("harness: about icon=%1x%2 dpr=%3 colours=%4\n")
+             .arg(img.width())
+             .arg(img.height())
+             .arg(pIcon ? pIcon->pixmap().devicePixelRatio() : 0.0)
+             .arg(setColours.size());
+    out.flush();
+
+    QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>(QStringLiteral("buttonBox"));
+    if(pButtons && pButtons->button(QDialogButtonBox::Ok))
+      pButtons->button(QDialogButtonBox::Ok)->click();
+    else
+      static_cast<QDialog *>(pDlg)->reject();
+  });
+  timer.start(50);
+  pAction->trigger();
+  QCoreApplication::processEvents();
+  timer.stop();
+
+  bool bOpen = false;
+  for(QWidget *pWidget : QApplication::topLevelWidgets())
+    bOpen = bOpen || (qobject_cast<AboutDialog *>(pWidget) && pWidget->isVisible());
+  out << "harness: about closed=" << (bOpen ? 0 : 1) << "\n";
+}
+
 static int runGui(const QStringList &files, const GuiOptions &opts, const QString &strSettingsDir)
 {
   useGuiSettings(strSettingsDir, opts);
@@ -1237,6 +1309,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           checkTheme(window, out);
         if(opts.nExportMenus != 0)
           exportMenus(window, opts, strSettingsDir + "/menu-export-" + QString::number(nFileInd), out);
+        if(opts.bAbout && (nFileInd == 1))
+          aboutMenu(window, out);
         if(!opts.strDetailDlg.isEmpty())
         {
           if(!opts.strMarks.isEmpty())
@@ -1618,6 +1692,7 @@ int main(int argc, char **argv)
   guiOpts.bReplace = args.removeAll("--replace") > 0;
   guiOpts.bAutoReprocess = args.removeAll("--auto-reprocess") > 0;
   guiOpts.bNoDecodeImage = args.removeAll("--no-decode-image") > 0;
+  guiOpts.bAbout = args.removeAll("--about") > 0;
   ExportOptions exportOpts;
   exportOpts.sJpeg.bExtractAll = args.removeAll("--all") > 0;
   exportOpts.sJpeg.bForceSoi = args.removeAll("--force-soi") > 0;

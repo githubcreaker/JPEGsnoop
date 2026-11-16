@@ -8,7 +8,8 @@ The Windows icon is pixel art at 16, 32 and 48 pixels. macOS wants sizes up to
 1024, so the larger sizes are the 48-pixel art enlarged by a whole number
 (each pixel a sharp square, no blur) and centred at 75% of the canvas, close to
 the margin Apple's icon grid leaves. 16 and 32 use the hand-drawn frames as
-they are, and 64 is the 32-pixel frame doubled. Needs macOS (iconutil).
+they are, and 64 is the 32-pixel frame doubled. Each size comes from its 32-bit
+frame (the one with the most colours). Needs macOS (iconutil).
 
 The .icns is checked in, so building the app doesn't need Pillow; run this
 again only if the .ico changes.
@@ -27,8 +28,21 @@ src = repo / "images" / "jpegsnoop.ico"
 dst = repo / "images" / "jpegsnoop.icns"
 
 
+def colours(img):
+    return len(img.getcolors(img.width * img.height))
+
+
 def frame(ico, size):
-    return ico.ico.getimage((size, size)).convert("RGBA")
+    """The size's frame with the most colours.
+
+    The .ico has each size in 16 colours, 256 colours and 32 bits, and Pillow's
+    getimage((size, size)) returns the first, which here is the 16-colour one.
+    """
+    every = [ico.ico.frame(i).convert("RGBA") for i in range(len(ico.ico.entry))]
+    frames = [img for img in every if img.size == (size, size)]
+    if not frames:
+        sys.exit(f"error: {src.name} has no {size}x{size} frame")
+    return max(frames, key=colours)
 
 
 def enlarged(art, canvas):

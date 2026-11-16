@@ -28,6 +28,7 @@
 
 #include "DbSigs.h"
 #include "General.h"
+#include "aboutdialog.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
@@ -529,6 +530,9 @@ void MainWindow::createActions(void)
 
   // Help menu
   aboutAct = new QAction(tr("&About JPEGsnoop..."), this);
+  // On macOS: JPEGsnoop > About JPEGsnoop, where Mac apps have it
+  aboutAct->setMenuRole(QAction::AboutRole);
+  connect(aboutAct, &QAction::triggered, this, &MainWindow::onAbout);
 
   if(DEBUG_EN)
     m_pAppConfig->DebugLogAdd("MainWindow::createActions() End");
@@ -1519,6 +1523,15 @@ bool MainWindow::detailRangeFromMarks(uint32_t &nMcuX, uint32_t &nMcuY, uint32_t
 // the report shows in detail (each variable-length code, the coefficients of
 // each block and the first MCU's pixels). It applies from the next decode,
 // which Automatic Reprocessing starts at once. (The menu item did nothing.)
+void MainWindow::onAbout()
+{
+  // Modal and on the stack, like the other dialogs (it did nothing)
+  AboutDialog dlg(this);
+  dlg.exec();
+}
+
+//-----------------------------------------------------------------------------
+
 void MainWindow::onDetailedDecode()
 {
   bool bEn = false;

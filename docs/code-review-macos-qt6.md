@@ -164,7 +164,8 @@ In detail:
 - **M5 Packaging:** bundle ID `com.impulseadventure.JPEGsnoopQt` (the name macOS gives
   the app's settings), version 1.8.0 from `snoop.h`, and an app icon made from
   `images/jpegsnoop.ico` by `scripts/make-macos-icon.py`. The 48-pixel art is enlarged
-  in whole-pixel steps, so the large sizes are sharp but look like pixel art.
+  in whole-pixel steps, so the large sizes are sharp but look like pixel art. (It first
+  used the `.ico`'s 16-colour frames; fixed later, see [About](#about).)
   `NSHighResolutionCapable` is set. The packaging script now rewrites `Info.plist` on
   each build; qmake only wrote it when it was missing.
 - **Also:** the unused `labelClick` widget is removed.
@@ -778,6 +779,52 @@ fixed, along with two more found while checking them (all inherited):
 
 **Still open:** Developer ID signing and notarization (M5); latent code; Select All,
 Find, File Overlay, About and Batch Process.
+
+### About
+
+Help > About JPEGsnoop did nothing. It now opens the About box Windows has: the icon,
+name, version and copyright, and links to the documentation and the site.
+- **macOS menu:** the item has Qt's About role, so on macOS it is in the application
+  menu as "About JPEGsnoop", where Mac apps put it, as Configuration already is.
+  Elsewhere it stays in Help.
+- **Changes from Windows:**
+  - **https links:** both pages answer over https (checked 2026-11-15); Windows used
+    http. The documentation link still ends in `?ver=` and the version.
+  - **Qt version:** a line gives the Qt it runs on, for bug reports.
+  - **Icon:** the 48-pixel frame of `images/jpegsnoop.ico` with the most colours (the
+    32-bit one), doubled pixel for pixel on a Retina screen so it stays sharp.
+
+**Found and fixed: the macOS app icon used the 16-colour art.**
+`images/jpegsnoop.icns` was built from the `.ico`'s 16-colour frames.
+`scripts/make-macos-icon.py` asked Pillow for each size, and Pillow returns the first
+frame of that size, which in this file is the 16-colour one. The 48-pixel art came out
+with 11 colours instead of 821, and without the 32-bit frame's shading and shadow.
+- **Fix:** the script now takes each size's frame with the most colours (the 32-bit
+  one), and `images/jpegsnoop.icns` is rebuilt from them.
+- **Checked:**
+  - The 16 and 32-pixel images in the new `.icns` equal the 32-bit frames pixel for
+    pixel, and the 1024-pixel one equals the 48-pixel frame enlarged 16 times.
+  - Every size now has the 32-bit frame's colours: 163, 465 and 821 for the 16, 32 and
+    48-pixel art.
+  - Running the script again gives a byte-identical file. Pillow 10.0.1 and 13.0.0
+    pick the same frames.
+  - The packaged app and its zip carry the new icon, and the signature checks out.
+
+**Tests:** 6 new `A` cases (258 in all). `gui --about` chooses the menu item and prints
+its menu role, the dialog's texts and links, and the icon's size, pixel ratio and
+number of colours, then clicks OK. The expected version is read from `source/snoop.h`.
+On the old code all six fail: the item had no handler.
+
+**Checks:**
+- **All 258 pass** with and without ASan/UBSan.
+- **Layout:** checked offscreen in Qt's Fusion style, with light and dark palettes.
+- **Not checked:** the dialog on screen in the macOS style, the application menu, and
+  the link colour in Dark Mode. The test's dark palette sets no link colour, so links
+  there are the light palette's dark blue; on macOS, Qt takes the system's.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; Select All,
+Find, File Overlay and Batch Process. The new icon has not been seen in the Finder or
+Dock, only as the images in the `.icns`.
 
 ## How this was reviewed
 

@@ -1,6 +1,7 @@
 <RCC>
     <qresource prefix="/">
         <file>eula.txt</file>
+        <file>images/jpegsnoop.ico</file>
         <file>images/mac/editcopy.png</file>
         <file>images/mac/editcut.png</file>
         <file>images/mac/editpaste.png</file>
