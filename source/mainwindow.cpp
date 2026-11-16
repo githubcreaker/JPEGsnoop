@@ -25,11 +25,13 @@
 #include <QPrintDialog>
 #include <QPrinter>
 #include <QPrintPreviewDialog>
+#include <QScopeGuard>
 
 #include "DbSigs.h"
 #include "General.h"
 #include "aboutdialog.h"
 #include "finddialog.h"
+#include "overlaydialog.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
@@ -445,6 +447,7 @@ void MainWindow::createActions(void)
 
   fileOverlayAct = new QAction(tr("File Overlay..."), this);
   fileOverlayAct->setEnabled(false);
+  connect(fileOverlayAct, &QAction::triggered, this, &MainWindow::onFileOverlay);
 
   searchDqtAct = new QAction(tr("Search Executable for DQT..."), this);
 
@@ -693,6 +696,11 @@ void MainWindow::openFile(const QString &strPath)
 {
   m_currentFile = strPath;
 
+  // A File Overlay is a change to try on the file it was made for (on
+  // Windows it stayed in place for the next file opened, which was then
+  // decoded with those bytes replaced). Reprocess keeps it.
+  m_pWBuf->OverlayRemoveAll();
+
   // A new file means a new image source: without this the scan decoder keeps
   // the previous file's state and skips decoding (master did this in
   // CJPEGsnoopDoc::Reset() on every open).
@@ -819,6 +827,18 @@ void MainWindow::AnalyzeFileDo()
   m_pDocLog->AddLine("");
   m_pDocLog->AddLine(QString("  Filename: [%1]").arg(m_currentFile));
   m_pDocLog->AddLine(QString("  Filesize: [%1] bytes").arg(m_lFileSize));
+
+  // A File Overlay changes what is decoded, so say so first. (Windows only
+  // listed it in the scan section, which isn't there with Decode Image off.)
+  unsigned char *pOverlay = nullptr;
+  uint32_t nOverlayLen = 0;
+  uint32_t nOverlayStart = 0;
+  if(m_pWBuf->OverlayGet(0, pOverlay, nOverlayLen, nOverlayStart))
+  {
+    m_pDocLog->AddLineWarn(QString("  Overlay:  [%1] bytes replaced at offset [0x%2] (Tools > File Overlay)")
+                             .arg(nOverlayLen)
+                             .arg(QString("%1").arg(nOverlayStart, 8, 16, QChar('0')).toUpper()));
+  }
   m_pDocLog->AddLine("");
 
   // Perform the actual decoding
@@ -1311,6 +1331,24 @@ bool MainWindow::exportJpeg(const QString &strOut, const ExportJpegSettings &sSe
     return false;
   }
 
+  // Without Enable Overlays the export copies the file's own bytes, so it
+  // must also find the JPEG (its markers, and with Extract All each SOI) in
+  // them. With the File Overlay in place it found what the overlay put there:
+  // an FFD9 overlaid in the scan ended the export at it, without an EOI. So
+  // the overlay is set aside for the export and put back after it. (Windows
+  // had the same problem.)
+  QByteArray abOverlay;
+  uint32_t nOverlayStart = 0;
+  const bool bSetAside = !sSettings.bOverlayEn && currentOverlay(abOverlay, nOverlayStart);
+  if(bSetAside)
+  {
+    setCurrentOverlay(QByteArray(), 0);
+  }
+  const auto restoreOverlay = qScopeGuard([&]() {
+    if(bSetAside)
+      setCurrentOverlay(abOverlay, nOverlayStart);
+  });
+
   // Analyze the file again first, as master did: the export copies the
   // marker positions this finds, and the file may have changed since it was
   // opened. (AnalyzeFileDo() clears the preview, so the image is decoded
@@ -1338,6 +1376,17 @@ bool MainWindow::exportJpeg(const QString &strOut, const ExportJpegSettings &sSe
           m_pJfifDec->ExportJpegPrepare(m_currentFile, sSettings.bForceSoi, sSettings.bForceEoi, sSettings.bIgnoreEoi) &&
           m_pJfifDec->ExportJpegDo(m_currentFile, strOut, static_cast<uint32_t>(m_lFileSize), sSettings.bOverlayEn,
                                    sSettings.bDhtAviInsert, sSettings.bForceSoi, sSettings.bForceEoi);
+  }
+
+  // The report above is of the file without the overlay, which stays in
+  // place. It says "exported" only if the export succeeded: after a write
+  // error, nothing (or with Extract All, not everything) was written.
+  if(bSetAside)
+  {
+    m_pDocLog->AddLine(bOk ? QString("  NOTE: File Overlay left out (Enable Overlays is off): the file was analyzed "
+                                     "and exported as it is on disk")
+                           : QString("  NOTE: File Overlay left out (Enable Overlays is off): the file was analyzed "
+                                     "as it is on disk"));
   }
 
   AnalyzeClose();
@@ -1687,6 +1736,91 @@ void MainWindow::onAbout()
   // Modal and on the stack, like the other dialogs (it did nothing)
   AboutDialog dlg(this);
   dlg.exec();
+}
+
+//-----------------------------------------------------------------------------
+
+// Tools > File Overlay: a run of bytes to decode in place of the file's own
+// at an offset, to try out a change without editing the file. As on Windows,
+// OK or Apply puts it in place (or removes it, with Overlay Enabled off) and
+// reprocesses the file; Apply leaves the dialog open. There is one overlay:
+// on Windows each OK or Apply with it on added another, so an earlier one at
+// another offset stayed in place, and the dialog showed the first.
+void MainWindow::onFileOverlay()
+{
+  if(m_currentFile.isEmpty())
+  {
+    return;
+  }
+
+  // The menu stays enabled after a file that couldn't be opened
+  if(!m_bFileAnalyzed)
+  {
+    QMessageBox::warning(this, "JPEGsnoop", tr("The file shown couldn't be analyzed, so there is nothing to overlay."));
+    return;
+  }
+
+  // The file's own bytes, for the dialog to show
+  const QString strFile = m_currentFile;
+  auto readFile = [strFile](quint32 nOffset, int nLen) {
+    QFile file(strFile);
+    if(!file.open(QIODevice::ReadOnly) || !file.seek(nOffset))
+      return QByteArray();
+    return file.read(nLen);
+  };
+
+  COverlayDialog dlg(readFile, static_cast<quint64>(m_lFileSize), this);
+  auto showOverlay = [this, &dlg]() {
+    QByteArray abData;
+    uint32_t nStart = 0;
+    const bool bEn = currentOverlay(abData, nStart);
+    dlg.setOverlay(bEn, nStart, abData);
+  };
+  auto applyOverlay = [this, &dlg]() {
+    setCurrentOverlay(dlg.overlayEnabled() ? dlg.data() : QByteArray(), dlg.offset());
+    reprocess();
+  };
+
+  showOverlay();
+  connect(&dlg, &COverlayDialog::applied, this, [&]() {
+    applyOverlay();
+    showOverlay();
+  });
+
+  if(dlg.exec() == QDialog::Accepted)
+  {
+    applyOverlay();
+  }
+}
+
+//-----------------------------------------------------------------------------
+
+// The File Overlay in place: false if there is none
+bool MainWindow::currentOverlay(QByteArray &abData, uint32_t &nStart)
+{
+  unsigned char *pData = nullptr;
+  uint32_t nLen = 0;
+  nStart = 0;
+  abData.clear();
+  if(!m_pWBuf->OverlayGet(0, pData, nLen, nStart))
+  {
+    return false;
+  }
+  abData = QByteArray(reinterpret_cast<const char *>(pData), static_cast<int>(nLen));
+  return true;
+}
+
+// Puts abData in place at nStart as the File Overlay (there is one), or with
+// abData empty removes it. Reprocess to see the change.
+void MainWindow::setCurrentOverlay(const QByteArray &abData, uint32_t nStart)
+{
+  m_pWBuf->OverlayRemoveAll();
+  if(!abData.isEmpty())
+  {
+    QByteArray abCopy = abData;
+    m_pWBuf->OverlayInstall(0, reinterpret_cast<unsigned char *>(abCopy.data()), static_cast<uint32_t>(abCopy.size()),
+                            nStart, 0, 0, 0, 0, 0, 0, 0);
+  }
 }
 
 //-----------------------------------------------------------------------------

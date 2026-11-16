@@ -1645,6 +1645,139 @@ find_case("FN_report_unchanged", "find,what:Precision,next,next,return,escape",
 find_case("FN_next_file", "findnext,find,what:Precision,next,next,next,cancel,activate",
           'harness: find findnext: find=1 findnext=1 dialog=hidden .* match=1/3 ', names=("ok_444.jpg", "ok_444.jpg"))
 
+# --- OV: Tools > File Overlay ------------------------------------------------------
+# It did nothing. As on Windows, its dialog sets bytes to decode in place of the
+# file's own at an offset, and OK or Apply reprocesses the file with them. gui
+# --overlay answers the dialog and prints its fields and a summary of the
+# report: APP0's version, the overlays the scan section lists (the first's
+# length and offset) and the header's overlay line. ok_444.jpg's APP0 version
+# bytes, 01 01, are at 0x0B; its density at 0x0E; the file is 1380 bytes.
+def overlay_case(cid, steps, expect, names=("ok_444.jpg",), extra="", forbid="-"):
+    case(cid, "OV", "gui", list(names), ("--overlay " + steps + " " + extra).strip(), timeout=30,
+         expect=expect, forbid=forbid)
+
+
+OVL_NONE = "version=\\[1\\.1\\] overlays=0 len=- offset=- header=-$"
+OVL_VERSION = "version=\\[1\\.2\\] overlays=1 len=2 offset=0x0000000B header=2@0x0000000B$"
+overlay_case("OV_off_failed_open", "on,ok", "harness: menu File Overlay unavailable$", names=("f4_no_such_file.jpg",))
+# The menu stays on after a file that couldn't be opened
+overlay_case("OV_not_analyzed", "on,ok",
+             "harness: message box: The file shown couldn't be analyzed, so there is nothing to overlay\\.$",
+             names=("ok_444.jpg", "f4_no_such_file.jpg"), extra="--overlay-at 2")
+overlay_case("OV_dialog_opens", "cancel",
+             'harness: overlay dialog: File Overlay Test \\(en=0 offset=0x00000000 original="0x FF D8 FF E0 00 10 4A 46 '
+             '\\.\\.\\." bin="0b 11111111 11011000 11111111 11100000 00000000 00010000 01001010 01000110 \\.\\.\\." '
+             'value= len=0\\)$')
+# The file's bytes follow the offset typed (on Windows only Load Original
+# updated them); near the end there are fewer, with no "..."; past it, none
+overlay_case("OV_original_follows", "offset=0B,fields,cancel",
+             'harness: overlay fields \\(en=0 offset=0B original="0x 01 01 00 00 01 00 01 00 \\.\\.\\." '
+             'bin="0b 00000001 00000001 ')
+overlay_case("OV_original_load", "offset=0B,load,fields,cancel", 'harness: overlay fields \\(.* original="0x 01 01 ')
+overlay_case("OV_original_at_end", "offset=0x55E,fields,cancel",
+             'harness: overlay fields \\(.* original="0x AE 27 08 7F FF D9" bin="0b 10101110 00100111 00001000 '
+             '01111111 11111111 11011001" ')
+overlay_case("OV_original_past_end", "offset=564,fields,cancel",
+             'harness: overlay fields \\(.* original="\\(past the end of the file\\)" bin="" ')
+# Len follows the bytes typed
+overlay_case("OV_len_follows", "value=01020304,fields,cancel", "harness: overlay fields \\(.* value=01020304 len=4\\)$")
+# OK puts the overlay in place and reprocesses: the report shows the new
+# version, lists the overlay with its offset, and says so in its header
+overlay_case("OV_ok_installs", "on,offset=0B,value=0102,ok", "harness: overlay after: " + OVL_VERSION)
+overlay_case("OV_reprocess_keeps", "on,offset=0B,value=0102,ok", "harness: overlay after reprocess: " + OVL_VERSION)
+# With Decode Image off there is no scan section, but the header still says so
+overlay_case("OV_header_without_scan", "on,offset=0B,value=0102,ok",
+             "harness: overlay after: version=\\[1\\.2\\] overlays=0 len=- offset=- header=2@0x0000000B$",
+             extra="--no-decode-image")
+# A shorter Len uses only the first bytes
+overlay_case("OV_len_shorter", "on,offset=0B,value=0203,len=1,ok",
+             "harness: overlay after: version=\\[2\\.1\\] overlays=1 len=1 offset=0x0000000B ")
+overlay_case("OV_apply_reprocesses", "on,offset=0B,value=0102,apply,cancel",
+             "harness: overlay applied \\(en=1 offset=0x0000000B .* value=0102 len=2\\) report " + OVL_VERSION)
+overlay_case("OV_cancel_keeps_applied", "on,offset=0B,value=0102,apply,cancel", "harness: overlay after: " + OVL_VERSION)
+overlay_case("OV_cancel_changes_nothing", "on,offset=0B,value=0102,cancel", "harness: overlay after: " + OVL_NONE)
+# A second Apply replaces the overlay (on Windows it added another, and the
+# first stayed in place)
+overlay_case("OV_apply_replaces", "on,offset=0B,value=0102,apply,offset=0x0E,value=0002,ok",
+             "harness: overlay after: version=\\[1\\.1\\] overlays=1 len=2 offset=0x0000000E header=2@0x0000000E$")
+overlay_case("OV_reopen_shows", "on,offset=0B,value=0102,ok+cancel",
+             'harness: overlay dialog: File Overlay Test \\(en=1 offset=0x0000000B original="0x 01 01 .* '
+             'value=0102 len=2\\)$')
+overlay_case("OV_off_removes", "on,offset=0B,value=0102,ok+off,ok", "harness: overlay after: " + OVL_NONE)
+# An overlay is for the file it was made for: the next file is decoded as it is
+overlay_case("OV_next_file_clears", "on,offset=0B,value=0102,ok",
+             "harness: overlay file 2: " + OVL_NONE, names=("ok_444.jpg", "ok_420.jpg"))
+# Fields that can't be used are refused with a message, and the dialog stays
+# open (on Windows they became offset 0, or bytes read from past the value)
+for cid, steps, msg in (
+        ("OV_bad_offset", "on,offset=zz,value=01,ok",
+         "File Offset must be a hexadecimal number, such as 0x0000ABCD\\."),
+        ("OV_offset_past_end", "on,offset=564,value=01,ok",
+         "File Offset 0x00000564 is past the end of the file \\(1380 bytes\\)\\."),
+        ("OV_bad_value", "on,offset=0B,value=XYZ,ok",
+         "The new value must be hexadecimal bytes, two digits each, such as FFD8\\."),
+        ("OV_odd_digits", "on,offset=0B,value=010,ok",
+         "The new value must be hexadecimal bytes, two digits each, such as FFD8\\."),
+        ("OV_empty_value", "on,offset=0B,ok",
+         "The new value must be hexadecimal bytes, two digits each, such as FFD8\\."),
+        ("OV_len_too_long", "on,offset=0B,value=0102,len=3,ok",
+         "Len must be from 1 to the number of bytes in the new value \\(2\\)\\."),
+        ("OV_len_zero", "on,offset=0B,value=0102,len=0,ok",
+         "Len must be from 1 to the number of bytes in the new value \\(2\\)\\."),
+        ("OV_runs_past_end", "on,offset=0x562,value=FFD9FF,ok",
+         "The overlay runs past the end of the file \\(1380 bytes\\)\\."),
+        ("OV_value_too_long", "on,offset=10,value=" + "00" * 500 + ",ok",
+         "The new value can be at most 499 bytes\\.")):
+    overlay_case(cid, steps + ",cancel", "harness: message box: " + msg + "$", forbid="overlays=1|header=[0-9]")
+# 499 bytes is allowed (zeros over the tables and frame header: decoding must
+# cope)
+overlay_case("OV_max_length", "on,offset=10,value=" + "00" * 499 + ",ok",
+             "harness: overlay after: .* header=499@0x00000010$")
+# Off, the fields don't matter
+overlay_case("OV_off_ignores_fields", "off,offset=zz,ok", "harness: overlay after: " + OVL_NONE, forbid="message box")
+# Export JPEG's Enable Overlays (disabled until now) writes the overlaid bytes;
+# without it the export is the file's own. The file itself is never changed.
+c444_ovl = bytearray(c444)
+c444_ovl[0x0B:0x0D] = b"\x01\x02"
+overlay_case("OV_export_box_on", "cancel", "harness: dialog: Enable Overlays available$", extra="--export-menus")
+case("OV_export_with", "OV", "export-jpeg", "ok_444.jpg", "--overlays --overlay on,offset=0B,value=0102,ok", timeout=30,
+     expect=f"harness: exported 1 md5s={hashlib.md5(c444_ovl).hexdigest()}$")
+case("OV_export_without", "OV", "export-jpeg", "ok_444.jpg", "--overlay on,offset=0B,value=0102,ok", timeout=30,
+     expect=f"harness: exported 1 md5s={hashlib.md5(c444).hexdigest()}$")
+case("OV_export_source_kept", "OV", "export-jpeg", "ok_444.jpg", "--overlays --overlay on,offset=0B,value=0102,ok",
+     timeout=30, expect="harness: source unchanged=1$")
+# The export finds the JPEG in the bytes it copies. With an EOI (FFD9) overlaid
+# in the scan, an export without Enable Overlays analyzed the overlaid bytes,
+# stopped at that EOI and wrote the first 675 bytes of the file itself, with no
+# EOI; Extract All did the same. Now it is the whole file, with a note in the
+# report, and the overlay is still in place afterwards. With Enable Overlays,
+# the export ends at the overlaid EOI.
+EOI_STEPS = "--overlay on,offset=2A1,value=FFD9,ok"
+c444_eoi = bytearray(c444)
+c444_eoi[0x2A1:0x2A3] = b"\xff\xd9"
+EOI_KEPT = ("harness: overlay after export and reprocess: version=\\[1\\.1\\] overlays=1 len=2 offset=0x000002A1 "
+            "header=2@0x000002A1$")
+for cid, flags, data in (("OV_eoi_export_without", "", c444), ("OV_eoi_export_with", "--overlays ", c444_eoi[:0x2A3]),
+                         ("OV_eoi_all_without", "--all ", c444),
+                         ("OV_eoi_all_with", "--all --overlays ", c444_eoi[:0x2A3])):
+    case(cid, "OV", "export-jpeg", "ok_444.jpg", flags + EOI_STEPS, timeout=30,
+         expect=f"harness: exported 1 md5s={hashlib.md5(data).hexdigest()}$",
+         forbid="File Overlay left out" if "--overlays" in flags else "-")
+case("OV_eoi_export_note", "OV", "export-jpeg", "ok_444.jpg", EOI_STEPS, timeout=30,
+     expect="  NOTE: File Overlay left out \\(Enable Overlays is off\\): the file was analyzed and exported as it is "
+            "on disk$")
+case("OV_eoi_export_kept", "OV", "export-jpeg", "ok_444.jpg", EOI_STEPS, timeout=30, expect=EOI_KEPT)
+case("OV_eoi_all_kept", "OV", "export-jpeg", "ok_444.jpg", "--all " + EOI_STEPS, timeout=30, expect=EOI_KEPT)
+# A failed export (a folder that doesn't exist) writes nothing, so the note
+# mustn't say the file was exported; the overlay is still kept
+UNWRITABLE = "--out /nonexistent-jpegsnoop-dir/out.jpg "
+for cid, flags in (("OV_eoi_unwritable_note", ""), ("OV_eoi_all_unwritable_note", "--all ")):
+    case(cid, "OV", "export-jpeg", "ok_444.jpg", flags + UNWRITABLE + EOI_STEPS, timeout=30,
+         expect="  NOTE: File Overlay left out \\(Enable Overlays is off\\): the file was analyzed as it is on disk$",
+         forbid="exported as it is on disk")
+case("OV_eoi_unwritable_kept", "OV", "export-jpeg", "ok_444.jpg", UNWRITABLE + EOI_STEPS, timeout=30,
+     expect=EOI_KEPT)
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

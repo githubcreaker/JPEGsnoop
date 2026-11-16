@@ -55,11 +55,7 @@ ExportJpegDialog::ExportJpegDialog(uint32_t nStartOffset, const ExportJpegSettin
   m_pForceEoi->setChecked(sInit.bForceEoi);
   m_pIgnoreEoi->setChecked(sInit.bIgnoreEoi && !sInit.bForceEoi);
 
-  // Nothing in this version installs file overlays (Tools > File Overlay
-  // isn't available yet), so the option would change nothing
-  m_pOverlay->setEnabled(false);
-  m_pOverlay->setToolTip(tr("Applies the changes made with Tools > File Overlay, which isn't available in this "
-                            "version."));
+  m_pOverlay->setToolTip(tr("Exports the file with the bytes set in Tools > File Overlay in place of its own."));
   m_pExtractAll->setToolTip(tr("Exports every JPEG in the file, such as a video's frames and embedded previews, "
                                "as name.000001.jpg, name.000002.jpg and so on."));
   m_pDhtAvi->setToolTip(tr("Adds the standard Huffman tables that Motion JPEG frames leave out."));

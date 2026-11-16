@@ -582,9 +582,11 @@ void CwindowBuf::ReportOverlays(CDocLog *pLog)
       if(m_psOverlay[ind])
       {
         // Qt placeholders (this still had master's printf format, which
-        // QString::arg doesn't understand)
+        // QString::arg doesn't understand). The file offset is new: Windows
+        // didn't say where the overlay was.
         strTmp =
-          QString("    %1: MCU[%2,%3] MCU DelLen=[%4] InsLen=[%5] DC Offset YCC=[%6,%7,%8] Overlay Byte Len=[%9]")
+          QString("    %1: MCU[%2,%3] MCU DelLen=[%4] InsLen=[%5] DC Offset YCC=[%6,%7,%8] Overlay Byte Len=[%9] "
+                  "Offset=[0x%10]")
           .arg(ind, 3, 10, QChar('0'))
           .arg(m_psOverlay[ind]->nMcuX, 4)
           .arg(m_psOverlay[ind]->nMcuY, 4)
@@ -593,7 +595,8 @@ void CwindowBuf::ReportOverlays(CDocLog *pLog)
           .arg(m_psOverlay[ind]->nDcAdjustY, 5)
           .arg(m_psOverlay[ind]->nDcAdjustCb, 5)
           .arg(m_psOverlay[ind]->nDcAdjustCr, 5)
-          .arg(m_psOverlay[ind]->nLen, 4);
+          .arg(m_psOverlay[ind]->nLen, 4)
+          .arg(QString("%1").arg(m_psOverlay[ind]->nStart, 8, 16, QChar('0')).toUpper());
         pLog->AddLine(strTmp);
       }
     }

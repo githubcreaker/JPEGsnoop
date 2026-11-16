@@ -47,11 +47,15 @@
 //     dialog against a throwaway settings store; prints "harness:" lines.
 //
 // export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
-//     [--dht-avi] [--out PATH] [--out-same] [--out-same-case]
+//     [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]
+//     [--out-same-case]
 //     Open the file in the real MainWindow and run Tools > Export JPEG with
 //     these settings (--all: Extract All), to a temporary out.jpg unless
 //     --out says where. --out-same / --out-same-case export over the file
-//     itself, by the same name or by the name in another case. Prints the
+//     itself, by the same name or by the name in another case. --overlay
+//     first answers Tools > File Overlay's dialog with STEPS (as for gui),
+//     and afterwards reprocesses and prints the overlay summary again;
+//     --overlays ticks Enable Overlays. Prints the
 //     size and MD5 of each file written, as "harness: exported N md5s=...",
 //     whether the source is unchanged, and the report from the export on.
 //
@@ -118,6 +122,19 @@
 //     and text) and which of the dialog text's matches it is, where the
 //     dialog is (over it, above, below or beside it), and the status bar's
 //     message.
+//
+// gui ... --overlay STEPS
+//     For each file, print a "harness: overlay file N" summary of the report:
+//     APP0's version, how many buffer overlays its scan section lists and the
+//     first one's length and offset, and its header's overlay line. After the first file (or file N with --overlay-at
+//     N), choose Tools > File Overlay
+//     and answer its dialog with STEPS, a comma-separated list of on and off
+//     (Overlay Enabled?), offset=HEX, value=HEX (typed, so Len follows it),
+//     len=N, load (Load Original), fields (print the fields), apply, ok and
+//     cancel; "+" chooses the menu item again for the steps after it. Print
+//     the dialog's fields each time it shows, at apply, ok and cancel, and
+//     the report summary after apply, after the last step and after File >
+//     Reprocess.
 //
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
@@ -196,10 +213,11 @@ static void usage()
           "                         [--old-numbered] [--replace]\n"
           "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
           "                          [--auto-reprocess] [--no-decode-image]] [--about]\n"
-          "                         [--edit STEPS [--edit-before]]\n"
+          "                         [--edit STEPS [--edit-before]] [--overlay STEPS [--overlay-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
-          "                         [--dht-avi] [--out PATH] [--out-same] [--out-same-case]\n"
+          "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
+          "                         [--out-same-case]\n"
           "       jpegsnoop-harness export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]\n"
           "       any mode: [--scale F]\n");
 }
@@ -886,6 +904,8 @@ struct GuiOptions
   bool bAbout = false;            // --about
   QString strEdit;                // --edit STEPS
   bool bEditBefore = false;       // --edit-before
+  QString strOverlay;             // --overlay STEPS
+  int nOverlayAt = 1;             // --overlay-at N
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -1038,8 +1058,11 @@ static void exportMenus(MainWindow &window, const GuiOptions &opts, const QStrin
     {
       const QLabel *pOffset = pJpegDlg->findChild<QLabel *>();
       const QCheckBox *pDht = pJpegDlg->findChild<QCheckBox *>("cbDhtAvi");
+      const QCheckBox *pOverlays = pJpegDlg->findChild<QCheckBox *>("cbOverlay");
       out << "harness: dialog: " << pJpegDlg->windowTitle() << " (" << (pOffset ? pOffset->text() : QString("?"))
           << ", MJPEG DHT " << ((pDht && pDht->isChecked()) ? "on" : "off") << ")\n";
+      out << "harness: dialog: Enable Overlays " << ((pOverlays && pOverlays->isEnabled()) ? "available" : "unavailable")
+          << "\n";
       if(QCheckBox *pAll = pJpegDlg->findChild<QCheckBox *>("cbExtractAll"))
         pAll->setChecked(bAll);
       bCancel ? pJpegDlg->reject() : pJpegDlg->accept();
@@ -1221,6 +1244,128 @@ static void detailedDecodeMenu(MainWindow &window, const GuiOptions &opts, QText
     cycleChannels(window);
     out << "harness: detail report after channels " << detailSummary(window.textEdit->toPlainText()) << "\n";
   }
+  out.flush();
+}
+
+// What the report shows of a File Overlay (see --overlay above): APP0's
+// version, the number of buffer overlays listed in the scan section and the
+// first one's length and offset, and the header's overlay line (length@offset)
+static QString overlayReport(MainWindow &window)
+{
+  const QString strLog = window.textEdit->toPlainText();
+  const QRegularExpressionMatch mVersion = QRegularExpression(QStringLiteral("^  version    = (\\S+)$"),
+                                                              QRegularExpression::MultilineOption).match(strLog);
+  const QRegularExpressionMatch mCount = QRegularExpression(QStringLiteral("^  Buffer Overlays active: (\\d+)$"),
+                                                            QRegularExpression::MultilineOption).match(strLog);
+  const QRegularExpressionMatch mFirst =
+    QRegularExpression(QStringLiteral("^    000: .* Overlay Byte Len=\\[ *(\\d+)\\] Offset=\\[(0x[0-9A-F]+)\\]$"),
+                       QRegularExpression::MultilineOption).match(strLog);
+  const QRegularExpressionMatch mHeader =
+    QRegularExpression(QStringLiteral("^  Overlay:  \\[(\\d+)\\] bytes replaced at offset \\[(0x[0-9A-F]+)\\] "),
+                       QRegularExpression::MultilineOption).match(strLog);
+  return QString("version=%1 overlays=%2 len=%3 offset=%4 header=%5")
+           .arg(mVersion.hasMatch() ? mVersion.captured(1) : QStringLiteral("-"),
+                mCount.hasMatch() ? mCount.captured(1) : QStringLiteral("0"),
+                mFirst.hasMatch() ? mFirst.captured(1) : QStringLiteral("-"),
+                mFirst.hasMatch() ? mFirst.captured(2) : QStringLiteral("-"),
+                mHeader.hasMatch() ? (mHeader.captured(1) + QLatin1Char('@') + mHeader.captured(2)) : QStringLiteral("-"));
+}
+
+// Tools > File Overlay as a user chooses it (see --overlay above). The dialog
+// is found by name, so the driver also builds with versions without it.
+static void overlayMenu(MainWindow &window, const QString &strSteps, QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("File Overlay..."));
+  if(!pAction || !pAction->isEnabled())
+  {
+    out << "harness: menu File Overlay unavailable\n";
+    return;
+  }
+
+  const QStringList astrOpenings = strSteps.split('+');
+  QStringList astrSteps;
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QDialog *pDlg = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if(!pDlg || (pDlg->objectName() != QLatin1String("fileOverlayDialog")))
+      return;
+    QCheckBox *pEn = pDlg->findChild<QCheckBox *>("overlayEnabled");
+    QLineEdit *pOffset = pDlg->findChild<QLineEdit *>("offset");
+    QLabel *pOrigHex = pDlg->findChild<QLabel *>("originalHex");
+    QLabel *pOrigBin = pDlg->findChild<QLabel *>("originalBin");
+    QLineEdit *pValue = pDlg->findChild<QLineEdit *>("newValue");
+    QLineEdit *pLen = pDlg->findChild<QLineEdit *>("length");
+    QPushButton *pLoad = pDlg->findChild<QPushButton *>("loadOriginal");
+    QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+    if(!pEn || !pOffset || !pOrigHex || !pOrigBin || !pValue || !pLen || !pLoad || !pButtons)
+    {
+      out << "harness: overlay dialog widgets not found\n";
+      pDlg->reject();
+      return;
+    }
+
+    auto fields = [&]() {
+      return QString("en=%1 offset=%2 original=\"%3\" bin=\"%4\" value=%5 len=%6")
+               .arg(pEn->isChecked() ? 1 : 0)
+               .arg(pOffset->text(), pOrigHex->text(), pOrigBin->text(), pValue->text(), pLen->text());
+    };
+    out << "harness: overlay dialog: " << pDlg->windowTitle() << " (" << fields() << ")\n";
+
+    while(!astrSteps.isEmpty())
+    {
+      const QString strStep = astrSteps.takeFirst();
+      if((strStep == "on") || (strStep == "off"))
+        pEn->setChecked(strStep == "on");
+      else if(strStep.startsWith("offset="))
+        pOffset->setText(strStep.mid(7));
+      else if(strStep.startsWith("value="))
+      {
+        pValue->clear();
+        QTest::keyClicks(pValue, strStep.mid(6));
+      }
+      else if(strStep.startsWith("len="))
+        pLen->setText(strStep.mid(4));
+      else if(strStep == "load")
+        pLoad->click();
+      else if(strStep == "fields")
+        out << "harness: overlay fields (" << fields() << ")\n";
+      else if(strStep == "apply")
+      {
+        // A refused Apply shows a message box, closed and printed
+        pButtons->button(QDialogButtonBox::Apply)->click();
+        QCoreApplication::processEvents();
+        out << "harness: overlay applied (" << fields() << ") report " << overlayReport(window) << "\n";
+      }
+      else if((strStep == "ok") || (strStep == "cancel"))
+      {
+        out << "harness: overlay dialog " << strStep << " (" << fields() << ")\n";
+        out.flush();
+        // A refused OK shows a message box: the steps left carry on after it
+        pButtons->button((strStep == "ok") ? QDialogButtonBox::Ok : QDialogButtonBox::Cancel)->click();
+        return;
+      }
+      else
+        out << "harness: unknown overlay step " << strStep << "\n";
+    }
+
+    out << "harness: overlay dialog still open: cancelled\n";
+    pDlg->reject();
+  });
+  timer.start(50);
+
+  for(const QString &strOpening : astrOpenings)
+  {
+    astrSteps = strOpening.split(',', Qt::SkipEmptyParts);
+    pAction->trigger();
+    QCoreApplication::processEvents();
+  }
+  timer.stop();
+
+  out << "harness: overlay after: " << overlayReport(window) << "\n";
+  window.reprocess();
+  QCoreApplication::processEvents();
+  out << "harness: overlay after reprocess: " << overlayReport(window) << "\n";
   out.flush();
 }
 
@@ -1719,6 +1864,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
         out.flush();
       }
 
+      if((nRound == 0) && !opts.strOverlay.isEmpty())
+      {
+        out << "harness: overlay file " << nFileInd << ": " << overlayReport(window) << "\n";
+        if(nFileInd == opts.nOverlayAt)
+          overlayMenu(window, opts.strOverlay, out);
+      }
+
       if(nRound == 0)
       {
         if(!opts.strZoom.isEmpty())
@@ -1788,6 +1940,7 @@ struct ExportOptions
   QString strOut;                 // --out PATH
   bool bOutSame = false;          // --out-same
   bool bOutSameCase = false;      // --out-same-case
+  QString strOverlay;             // --overlay STEPS
 };
 
 static int runExportJpeg(const QString &strFile, const ExportOptions &opts, const QString &strTmpDir)
@@ -1805,6 +1958,9 @@ static int runExportJpeg(const QString &strFile, const ExportOptions &opts, cons
   const QString strSrcMd5 = fileMd5(strFile);
   window.openFile(strFile);
   QCoreApplication::processEvents();
+
+  if(!opts.strOverlay.isEmpty())
+    overlayMenu(window, opts.strOverlay, out);
 
   QString strOut = opts.strOut;
   if(opts.bOutSame)
@@ -1860,6 +2016,15 @@ static int runExportJpeg(const QString &strFile, const ExportOptions &opts, cons
   out << "harness: exported " << astrWritten.size() << " md5s=" << astrMd5.join(',') << "\n";
   out << "harness: source unchanged=" << ((fileMd5(strFile) == strSrcMd5) ? 1 : 0) << "\n";
   out << exportReport(window) << "\n";
+
+  // The File Overlay is still in place afterwards (an export without Enable
+  // Overlays sets it aside)
+  if(!opts.strOverlay.isEmpty())
+  {
+    window.reprocess();
+    QCoreApplication::processEvents();
+    out << "harness: overlay after export and reprocess: " << overlayReport(window) << "\n";
+  }
   out << "harness: done\n";
   return 0;
 }
@@ -2124,6 +2289,7 @@ int main(int argc, char **argv)
   exportOpts.sJpeg.bForceEoi = args.removeAll("--force-eoi") > 0;
   exportOpts.sJpeg.bIgnoreEoi = args.removeAll("--ignore-eoi") > 0;
   exportOpts.sJpeg.bDhtAviInsert = args.removeAll("--dht-avi") > 0;
+  exportOpts.sJpeg.bOverlayEn = args.removeAll("--overlays") > 0;
   exportOpts.bOutSame = args.removeAll("--out-same") > 0;
   exportOpts.bOutSameCase = args.removeAll("--out-same-case") > 0;
 
@@ -2132,7 +2298,7 @@ int main(int argc, char **argv)
   QString strFormat;
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
-                             "--edit" })
+                             "--edit", "--overlay" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -2158,12 +2324,14 @@ int main(int argc, char **argv)
       guiOpts.strMarks = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--edit"))
       guiOpts.strEdit = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--overlay"))
+      guiOpts.strOverlay = exportOpts.strOverlay = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
   // Options with a numeric value
   uint32_t nStart = 0;
-  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at" })
+  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -2184,6 +2352,8 @@ int main(int argc, char **argv)
       nStart = static_cast<uint32_t>(nVal);
     else if(QLatin1String(pszOpt) == QLatin1String("--detail-dlg-at"))
       guiOpts.nDetailDlgAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--overlay-at"))
+      guiOpts.nOverlayAt = nVal;
     else
       guiOpts.nMaxZoomMb = nVal;
   }

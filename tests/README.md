@@ -95,13 +95,27 @@ when it is installed, so Pillow needn't be installed separately).
       selection's line, length and text and which match of the dialog's text it
       is, where the dialog is (`over` it, `above`, `below` or `beside`), and
       the status bar's message.
+    - `--overlay STEPS` prints a `harness: overlay file N` summary of each
+      file's report (APP0's version, the overlays its scan section lists, the
+      first one's length and offset, and the header's overlay line). After the
+      first file (or file N with `--overlay-at N`) it chooses Tools > File
+      Overlay and answers the dialog with STEPS: `on`, `off`, `offset=HEX`,
+      `value=HEX` (typed, so Len follows it), `len=N`, `load`, `fields`,
+      `apply`, `ok` and `cancel`, with `+` to choose the menu item again. It
+      prints the dialog's fields when it shows and at `apply`, `ok` and
+      `cancel`, and the summary after `apply`, after the dialog closes and
+      after File > Reprocess. `--export-menus` also says whether Export JPEG's
+      Enable Overlays box is available.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
   - `export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
-    [--dht-avi] [--out PATH] [--out-same] [--out-same-case]` opens the file in
-    the real `MainWindow` and runs Export JPEG with those settings (`--all` is
-    Extract All), to a temporary `out.jpg` unless `--out` gives a path.
+    [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]
+    [--out-same-case]` opens the file in the real `MainWindow` and runs Export
+    JPEG with those settings (`--all` is Extract All, `--overlays` is Enable
+    Overlays), to a temporary `out.jpg` unless `--out` gives a path.
+    `--overlay` first answers Tools > File Overlay's dialog, as for `gui`, and
+    afterwards reprocesses and prints the overlay summary again.
     `--out-same` and `--out-same-case` export over the file itself, by its name
     or by its name in the other case. It prints the size and MD5 of each file
     written, a `harness: exported N md5s=...` line, whether the source is
@@ -136,7 +150,7 @@ GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F
 are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
 in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
 section, `A` in its "About" section, `T` in its "Select All and Copy"
-section, and `FN` in its "Find" section);
+section, `FN` in its "Find" section, and `OV` in its "File Overlay" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

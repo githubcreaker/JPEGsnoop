@@ -85,6 +85,7 @@ private slots:
   void onExportJpeg();
   void onExportTiff();
   void onDetailedDecode();
+  void onFileOverlay();
   void onAbout();
 
 private:
@@ -97,6 +98,8 @@ private:
   void updateTextActions();
   bool findInReport();
   void moveFindDialogOffSelection();
+  bool currentOverlay(QByteArray &abData, uint32_t &nStart);
+  void setCurrentOverlay(const QByteArray &abData, uint32_t nStart);
   void clearImageViews();
   void AnalyzeFile();
   bool AnalyzeOpen();

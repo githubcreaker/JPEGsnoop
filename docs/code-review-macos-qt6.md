@@ -970,6 +970,106 @@ already was. Three deliberate breaks each fail their own cases:
 **Still open:** Developer ID signing and notarization (M5); latent code; File Overlay
 and Batch Process.
 
+### File Overlay
+
+Tools > File Overlay did nothing. On Windows it sets a run of bytes to decode in place
+of the file's own at an offset, to try out a change without editing the file. The
+buffer code for it was already in the port; only the dialog and its handler were
+missing. Now, as there:
+- **The dialog** ("File Overlay Test"): Overlay Enabled?, File Offset (hex) with Load
+  Original, the file's first 8 bytes there in hex and binary, the new value (hex) and
+  Len (bytes).
+- **OK or Apply** puts the overlay in place, or removes it with Overlay Enabled off, and
+  reprocesses the file. Apply leaves the dialog open; Cancel changes nothing more.
+- **Reopened,** the dialog shows the overlay in place.
+- **Reprocess keeps it,** and the scan section lists it, as on Windows.
+- **Export JPEG's Enable Overlays,** disabled until now because nothing could add an
+  overlay, is available again. With it, the export has the overlaid bytes; without it,
+  the file's own (see the second check below).
+
+The dialog is `COverlayDialog` (`source/overlaydialog.cpp`).
+
+**Found and fixed** (all as on Windows 1.8.0):
+- **A second overlay instead of a new one:** each OK or Apply with the overlay on added
+  another. One made earlier at another offset stayed in place, the report listed both,
+  and the dialog showed the first. There is now one overlay, replaced each time.
+- **The next file was overlaid too:** nothing removed an overlay when another file was
+  opened, so that file was decoded with those bytes replaced. Opening a file now
+  removes it.
+- **Bytes from past the value:** the value went into a 16-byte array, so a longer one
+  overran it, and a Len longer than the value overlaid whatever followed it in memory.
+  Fields that can't be used are now refused with a message saying why:
+  - an offset that isn't hex (Windows read it as 0), or is past the end of the file;
+  - a value that isn't whole hex bytes, or is over 499 bytes, the most an overlay
+    holds;
+  - a Len not from 1 to the value's length;
+  - an overlay that runs past the end of the file.
+
+**Changes from Windows:**
+- **The file's bytes** follow the offset as it is typed. On Windows they stayed those of
+  the last offset loaded until Load Original was pressed; that button is still there.
+- **Len** follows the number of bytes typed, and can then be made shorter. On Windows
+  it had to be typed as well.
+- **The report says where:** the scan section's overlay line now gives the offset. The
+  report's header also gets a line, `Overlay: [2] bytes replaced at offset
+  [0x0000000B]`, since with Decode Image off there is no scan section, and nothing said
+  the decode used other bytes.
+
+**Unchanged from Windows:** reads of 2 or 4 bytes at once (`CwindowBuf::BufX`) don't
+see overlays. The JPEG and EXIF decoding reads a byte at a time, so it does; an AVI's
+RIFF headers and most of a Photoshop file's fields don't.
+
+**Tests:** 44 new `OV` cases (359 in all). `gui --overlay STEPS` answers the dialog (on
+or off, offset, value, Len, Load Original, Apply, OK, Cancel) and prints:
+- the dialog's fields, including the file's bytes it shows;
+- a summary of the report after each step that changes it: APP0's version, which the
+  tests overlay, the overlays the scan section lists, and the header's line;
+- the same summary after File > Reprocess, and for each file opened.
+
+`export-jpeg` takes the same steps and `--overlays`, and the tests compare the export's
+MD5 with that of the file with those bytes changed. Afterwards it reprocesses and prints
+the summary again, to show the overlay is still in place.
+
+On the old code 35 fail. The other nine check what held because nothing could add an
+overlay: no change on Cancel or with it off, the next file, exports without overlays,
+the source file kept, and the menu off after a failed first open. Three deliberate
+breaks each fail their own cases:
+- **Adding overlays (as Windows):** the case for a second Apply fails.
+- **Keeping it for the next file:** the next-file case fails.
+- **No header line:** 7 cases fail.
+
+**Second check:** a further review found that an export without Enable Overlays still
+analyzed the overlaid bytes. Export JPEG analyzes the file again to find the JPEG's
+markers (and Extract All searches for each SOI), and that read through the overlay,
+while the copy took the file's own bytes. With FFD9 overlaid at 0x2A1, in the scan, the
+export reported success but wrote the file's first 675 bytes of 1,380, without an EOI;
+Extract All did the same. Windows has the same problem. Now, without Enable Overlays,
+the overlay is set aside for the export and put back after it:
+- **The export** is the whole file, as it is on disk.
+- **The report** after the export is of the file without the overlay, and ends with a
+  note saying so.
+- **The overlay** is still in place: the next Reprocess shows it.
+
+With Enable Overlays the export still ends at the overlaid EOI, since that is the file
+it was asked for. Seven cases cover this: both kinds of export, with and without
+overlays; the note; and the overlay kept after each kind. With the set-aside switched
+off, the two exports without overlays and the note fail.
+
+**Third check:** the note said "the file was analyzed and exported" even when the export
+failed. Exporting to a folder that doesn't exist reported the write error and wrote
+nothing, then claimed the export. The note now says "exported" only when the export
+succeeded, and otherwise "the file was analyzed as it is on disk". A failed Extract All
+gets the second wording too, though it may have written some files before the error: the
+lines above the note list each one. Three cases cover a failed export: the note for each
+kind, and the overlay kept. With the old wording, the two note cases fail.
+
+**Checks:**
+- **All 359 pass** with and without ASan/UBSan, including a 499-byte overlay of zeros
+  over the file's tables and frame header.
+- **Not checked:** the dialog on the macOS platform.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; Batch Process.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:
