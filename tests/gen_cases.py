@@ -12,6 +12,7 @@
 
 import hashlib
 import io
+import os
 import random
 import struct
 import sys
@@ -1777,6 +1778,296 @@ for cid, flags in (("OV_eoi_unwritable_note", ""), ("OV_eoi_all_unwritable_note"
          forbid="exported as it is on disk")
 case("OV_eoi_unwritable_kept", "OV", "export-jpeg", "ok_444.jpg", UNWRITABLE + EOI_STEPS, timeout=30,
      expect=EOI_KEPT)
+
+# --- Batch Process (BP) -------------------------------------------------------
+# File > Batch Process. The driver copies a folder made here to <tmp>/batch/in,
+# so a batch can write beside its files, answers the dialog, and prints each
+# file the batch writes below <tmp>/batch ("<batch>" in its output) and a
+# "files:" line listing them.
+
+
+def tree(root, entries):
+    """A folder of files below files_dir: {path below it: bytes}."""
+    for rel, data in entries.items():
+        path = files_dir / root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    return root
+
+
+def batch_case(cid, steps, expect="-", names=("bp_tree",), extra="", forbid="-", timeout=60):
+    case(cid, "BP", "batch", list(names), ("--batch " + steps + " " + extra).strip(), timeout=timeout, expect=expect,
+         forbid=forbid)
+
+
+junk_bytes = bytes(range(100))
+bp_two = junk_bytes + c444 + junk_bytes + c420 + junk_bytes
+tree("bp_tree", {
+    "a.jpg": c444,
+    "B.JPEG": c420,                 # the extension in capitals
+    "empty.jpg": b"",
+    "junk.jpg": bytes(range(256)) * 4,
+    "notes.txt": b"not an image\n",
+    "two.bin": bp_two,              # two JPEGs inside, for Extract All
+    ".hidden.jpg": c444,            # hidden files and folders are left out
+    ".hiddendir/f.jpg": c444,
+    "photos.jpg/e.jpg": c444,       # a folder named like an image
+    "sub/c.jpg": c444,
+    "sub/deeper/d.jpeg": c420,
+})
+# A link to its parent folder: followed (as master did), the batch would list
+# the same files again at each level
+try:
+    os.symlink("..", files_dir / "bp_tree/sub/loop")
+except FileExistsError:
+    pass
+tree("bp_none", {"notes.txt": b"not an image\n", "sub/readme.md": b"# none\n"})
+(files_dir / "bp_empty").mkdir(exist_ok=True)
+tree("bp_old", {"a.jpg": c444, "a.jpg.txt": b"an old log\n", "b.jpg": c420})
+tree("bp_old_all", {"a.jpg": c444, "a.jpg.export.000001.jpg": b"an old export\n"})
+tree("bp_logdir", {"a.jpg": c444, "a.jpg.txt/keep": b"", "b.jpg": c420})
+tree("bp_utf8", {"café.jpg": c444})
+tree("bp_alias", {"a.jpg": c444, "b.jpg": c420, "notes.txt": b"not an image\n"})
+# A Motion JPEG AVI: its frames leave out the Huffman tables
+mjpeg_movi = b"movi" + chunk(b"00dc", mjpeg_frame) + chunk(b"00dc", mjpeg_frame)
+mjpeg_avi_body = (b"AVI " + chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56))) + chunk(b"LIST", strl)
+                  + chunk(b"LIST", mjpeg_movi))
+tree("bp_mjpeg", {"clip.avi": b"RIFF" + struct.pack("<I", len(mjpeg_avi_body)) + mjpeg_avi_body})
+
+BP_RUN = "in=in,out=out,ok"
+BP_FILES = "out/B.JPEG.txt,out/a.jpg.txt,out/empty.jpg.txt,out/junk.jpg.txt"
+BP_SUB_FILES = BP_FILES + ",out/photos.jpg/e.jpg.txt,out/sub/c.jpg.txt,out/sub/deeper/d.jpeg.txt"
+
+# The menu item, in the File menu as on Windows, on with no file open
+batch_case("BP_menu", "cancel",
+           'harness: batch menu=&File after="Reprocess File" enabled=1 tip="Start batch processing"$')
+batch_case("BP_dialog_defaults", "fields,cancel",
+           "harness: batch dialog: Batch Processing \\(in=<home> out=<home> subfolders=0 all=0\\)$")
+batch_case("BP_dialog_cancel", "in=in,out=out,cancel", "harness: batch 1 files: -$")
+batch_case("BP_dialog_cancel_report", "in=in,out=out,cancel", "harness: batch 1 report unchanged$")
+
+# The logs: .jpg and .jpeg files (any case), not hidden ones, each log the
+# report File > Open shows for the file
+batch_case("BP_logs", BP_RUN, f"harness: batch 1 files: {BP_FILES}$")
+batch_case("BP_subfolders", "in=in,out=out,subfolders,ok", f"harness: batch 1 files: {BP_SUB_FILES}$")
+batch_case("BP_order", "in=in,out=out,subfolders,ok",
+           "^  Batch processing file      5 of      7 \\( 71\\.43 %\\): \\[<batch>/in/photos\\.jpg/e\\.jpg\\]$")
+batch_case("BP_hidden_left_out", "in=in,out=out,subfolders,all,ok", "harness: batch 1 wrote new=", forbid="hidden")
+batch_case("BP_link_not_followed", "in=in,out=out,subfolders,ok", "harness: batch 1 wrote new=7 ", forbid="/loop")
+batch_case("BP_logs_are_reports", "in=in,out=out,subfolders,ok", "harness: batch compared 7 same=7$",
+           extra="--batch-compare")
+batch_case("BP_log_header", BP_RUN, "^harness: cat:   Filename: \\[<batch>/in/a\\.jpg\\]$",
+           extra="--batch-cat out/a.jpg.txt")
+batch_case("BP_log_decoded", BP_RUN, "^harness: cat: \\*\\*\\* Decoding SCAN Data \\*\\*\\*$",
+           extra="--batch-cat out/a.jpg.txt")
+batch_case("BP_log_empty_file", BP_RUN,
+           "^harness: cat: ERROR: File length is zero, no decoding done\\. \\[<batch>/in/empty\\.jpg\\]$",
+           extra="--batch-cat out/empty.jpg.txt")
+# UTF-8, as Save Log writes (master used the Windows code page)
+batch_case("BP_log_utf8", BP_RUN, "^harness: cat:   Filename: \\[<batch>/in/caf(\u00e9|e\u0301)\\.jpg\\]$",
+           names=("bp_utf8",), extra="--batch-cat out/caf\u00e9.jpg.txt")
+batch_case("BP_sources_kept", "in=in,out=in,subfolders,all,ok", "harness: batch sources unchanged=1$")
+batch_case("BP_beside_images", "in=in,out=in,ok",
+           "harness: batch 1 files: in/B.JPEG.txt,in/a.jpg.txt,in/empty.jpg.txt,in/junk.jpg.txt$")
+
+# The report: the settings, master's line for each file, what it wrote
+batch_case("BP_report_header", BP_RUN, "^\\*\\*\\* Batch Processing \\*\\*\\*$")
+batch_case("BP_report_folders", BP_RUN, "^  Output folder:      \\[<batch>/out\\]$")
+batch_case("BP_report_log", BP_RUN, "^    Log written to \\[<batch>/out/B\\.JPEG\\.txt\\]$")
+batch_case("BP_report_complete", BP_RUN, "^  Batch processing complete: 4 files$")
+batch_case("BP_report_counts", BP_RUN, "^  Logs written:      4$")
+batch_case("BP_message", BP_RUN,
+           "harness: message box: Batch processing complete\\. 4 of 4 files processed: 4 logs written\\.$")
+
+# Extract All: every file, and every JPEG in each
+bp_all_files = sorted(
+    [f"out/{n}.txt" for n in ("a.jpg", "B.JPEG", "empty.jpg", "junk.jpg", "notes.txt", "two.bin", "photos.jpg/e.jpg",
+                              "sub/c.jpg", "sub/deeper/d.jpeg")]
+    + [f"out/{n}.export.000001.jpg" for n in ("a.jpg", "B.JPEG", "photos.jpg/e.jpg", "sub/c.jpg", "sub/deeper/d.jpeg",
+                                              "two.bin")]
+    + ["out/two.bin.export.000002.jpg"])
+BP_ALL = "in=in,out=out,subfolders,all,ok"
+batch_case("BP_all_files", BP_ALL, f"harness: batch 1 files: {','.join(bp_all_files)}$")
+batch_case("BP_all_second", BP_ALL,
+           f"harness: batch 1 new out/two\\.bin\\.export\\.000002\\.jpg size={len(c420)} md5={md5(c420)}$")
+batch_case("BP_all_report", BP_ALL,
+           f"^    \\[0x{len(junk_bytes) * 2 + len(c444):08x}\\] Exported to \\[<batch>/out/two\\.bin\\.export\\.000002\\.jpg\\]$")
+batch_case("BP_all_message", BP_ALL,
+           "harness: message box: Batch processing complete\\. 9 of 9 files processed: 9 logs written, 7 JPEGs "
+           "exported\\.$")
+# Motion JPEG frames get the standard tables, as Export JPEG's default
+# (master exported them without)
+batch_case("BP_all_mjpeg", "in=in,out=out,all,ok",
+           f"harness: batch 1 new out/clip\\.avi\\.export\\.000002\\.jpg size={len(mjpeg_std)} md5={md5(mjpeg_std)}$",
+           names=("bp_mjpeg",))
+# The output folder inside the input folder isn't searched: a second batch
+# writes the same files again (master processed the first one's logs)
+BP_INSIDE = "in=in,out=in/logs,subfolders,all,ok"
+batch_case("BP_output_inside", BP_INSIDE + "+" + BP_INSIDE, "harness: batch 2 wrote new=0 changed=0$",
+           extra="--replace", forbid="logs/logs")
+batch_case("BP_output_inside_first", BP_INSIDE + "+" + BP_INSIDE, "harness: batch 1 wrote new=16 changed=0$",
+           extra="--replace")
+
+# Files that exist: asked first (master replaced them)
+batch_case("BP_existing_asked", "in=in,out=in,ok",
+           'harness: message box: A file the batch writes already exists: "a\\.jpg\\.txt"\\. Each one the batch '
+           'writes again is replaced\\. Replace them\\?$', names=("bp_old",))
+batch_case("BP_existing_cancel", "in=in,out=in,ok", "harness: batch 1 files: -$", names=("bp_old",))
+batch_case("BP_existing_replace", "in=in,out=in,ok", "harness: batch 1 files: in/a.jpg.txt,in/b.jpg.txt$",
+           names=("bp_old",), extra="--replace")
+batch_case("BP_existing_replaced", "in=in,out=in,ok", "harness: batch 1 wrote new=1 changed=1$", names=("bp_old",),
+           extra="--replace")
+batch_case("BP_existing_export", "in=in,out=in,all,ok",
+           'harness: message box: A file the batch writes already exists: "a\\.jpg\\.export\\.000001\\.jpg"\\.',
+           names=("bp_old_all",))
+batch_case("BP_existing_two", BP_RUN + "+" + BP_RUN,
+           'harness: message box: 4 files the batch writes already exist, such as "a\\.jpg\\.txt"\\.')
+
+# Errors: listed, and the other files still processed
+batch_case("BP_unreadable", BP_RUN, "^    ERROR: Couldn't open file: .+$", extra="--batch-unreadable a.jpg")
+batch_case("BP_unreadable_others", BP_RUN, "harness: batch 1 files: out/B.JPEG.txt,out/empty.jpg.txt,out/junk.jpg.txt$",
+           extra="--batch-unreadable a.jpg")
+batch_case("BP_unreadable_count", BP_RUN, "^  Files with errors: 1$", extra="--batch-unreadable a.jpg")
+batch_case("BP_unreadable_message", BP_RUN, "1 file had errors; the report lists them\\.$",
+           extra="--batch-unreadable a.jpg")
+batch_case("BP_log_unwritable", "in=in,out=in,ok", "^    ERROR: Couldn't write the log \\[<batch>/in/a\\.jpg\\.txt\\]: .+$",
+           names=("bp_logdir",), extra="--replace")
+batch_case("BP_log_unwritable_others", "in=in,out=in,ok", "harness: batch 1 files: in/b.jpg.txt$",
+           names=("bp_logdir",), extra="--replace")
+batch_case("BP_output_unwritable", "in=in,out=/nonexistent-jpegsnoop-dir/logs,ok",
+           'harness: message box: Couldn\'t create the output folder "/nonexistent-jpegsnoop-dir/logs"\\.$')
+batch_case("BP_no_files", BP_RUN, 'harness: message box: There are no \\.jpg or \\.jpeg files in ".*/batch/in"\\.$',
+           names=("bp_none",))
+batch_case("BP_no_files_sub", "in=in,out=out,subfolders,ok", "files in \".*/batch/in\" or its subfolders\\.$",
+           names=("bp_none",))
+batch_case("BP_no_files_all", "in=in,out=out,all,ok", 'There are no files to process in ".*/batch/in"\\.$',
+           names=("bp_empty",))
+
+# A name the batch writes that is a link: the link is replaced, and the file
+# it led to (an image the batch processes, or any other) is left as it was.
+# Opened to write, a log named like a link to b.jpg wrote over b.jpg, whose
+# own log then had no image in it.
+BP_ALIAS = "in=in,out=in,ok"
+BP_LINK_REPLACED = "now exists=1 symlink=0 names=1 target exists=1 unchanged=1$"
+batch_case("BP_alias_symlink", BP_ALIAS, "harness: batch link sym:in/a\\.jpg\\.txt=in/b\\.jpg " + BP_LINK_REPLACED,
+           names=("bp_alias",), extra="--batch-link sym:in/a.jpg.txt=in/b.jpg --replace")
+batch_case("BP_alias_symlink_next", BP_ALIAS, "^harness: cat: \\*\\*\\* Decoding SCAN Data \\*\\*\\*$",
+           names=("bp_alias",), extra="--batch-link sym:in/a.jpg.txt=in/b.jpg --replace --batch-cat in/b.jpg.txt")
+batch_case("BP_alias_hardlink", BP_ALIAS, "harness: batch link hard:in/a\\.jpg\\.txt=in/b\\.jpg " + BP_LINK_REPLACED,
+           names=("bp_alias",), extra="--batch-link hard:in/a.jpg.txt=in/b.jpg --replace")
+batch_case("BP_alias_other_folder", BP_RUN, "harness: batch link sym:out/a\\.jpg\\.txt=in/b\\.jpg " + BP_LINK_REPLACED,
+           names=("bp_alias",), extra="--batch-link sym:out/a.jpg.txt=in/b.jpg --replace")
+batch_case("BP_alias_not_input", BP_RUN,
+           "harness: batch link sym:out/a\\.jpg\\.txt=in/notes\\.txt " + BP_LINK_REPLACED,
+           names=("bp_alias",), extra="--batch-link sym:out/a.jpg.txt=in/notes.txt --replace")
+# A link that leads nowhere is asked about too (opened to write, it made the
+# file it named)
+batch_case("BP_alias_dangling_asked", BP_RUN,
+           'harness: message box: A file the batch writes already exists: "a\\.jpg\\.txt"\\.',
+           names=("bp_alias",), extra="--batch-link sym:out/a.jpg.txt=nowhere")
+batch_case("BP_alias_dangling", BP_RUN,
+           "harness: batch link sym:out/a\\.jpg\\.txt=nowhere now exists=1 symlink=0 names=1 target exists=0 "
+           "unchanged=1$", names=("bp_alias",), extra="--batch-link sym:out/a.jpg.txt=nowhere --replace")
+# Extract All's exports (a QSaveFile wrote through a symbolic link; it
+# already replaced a hard one)
+batch_case("BP_alias_export", "in=in,out=out,all,ok",
+           "harness: batch link sym:out/a\\.jpg\\.export\\.000001\\.jpg=in/b\\.jpg " + BP_LINK_REPLACED,
+           names=("bp_alias",), extra="--batch-link sym:out/a.jpg.export.000001.jpg=in/b.jpg --replace")
+batch_case("BP_alias_export_hardlink", "in=in,out=out,all,ok",
+           "harness: batch link hard:out/a\\.jpg\\.export\\.000001\\.jpg=in/b\\.jpg " + BP_LINK_REPLACED,
+           names=("bp_alias",), extra="--batch-link hard:out/a.jpg.export.000001.jpg=in/b.jpg --replace")
+batch_case("BP_alias_export_dangling_asked", "in=in,out=out,all,ok",
+           'harness: message box: A file the batch writes already exists: "a\\.jpg\\.export\\.000001\\.jpg"\\.',
+           names=("bp_alias",), extra="--batch-link sym:out/a.jpg.export.000001.jpg=nowhere")
+
+# Folders that can't be read: listed, with the files in the others processed
+# (master took them for empty ones)
+BP_SUB = "in=in,out=out,subfolders,ok"
+batch_case("BP_folder_unreadable", BP_SUB, "^  ERROR: Couldn't read the folder \\[<batch>/in/sub\\]: Permission denied$",
+           extra="--batch-unreadable sub")
+batch_case("BP_folder_unreadable_others", BP_SUB,
+           f"harness: batch 1 files: {BP_FILES},out/photos.jpg/e.jpg.txt$", extra="--batch-unreadable sub")
+batch_case("BP_folder_unreadable_count", BP_SUB, "^  Folders not read:  1$", extra="--batch-unreadable sub")
+batch_case("BP_folder_unreadable_message", BP_SUB,
+           "harness: message box: Batch processing complete\\. 5 of 5 files processed: 5 logs written\\. 1 folder "
+           "couldn't be read; the report lists it\\.$", extra="--batch-unreadable sub")
+batch_case("BP_folder_and_file_message", BP_SUB,
+           "1 file had errors and 1 folder couldn't be read; the report lists them\\.$",
+           extra="--batch-unreadable sub --batch-unreadable a.jpg")
+batch_case("BP_folder_deeper", BP_SUB,
+           "^  ERROR: Couldn't read the folder \\[<batch>/in/sub/deeper\\]: Permission denied$",
+           extra="--batch-unreadable sub/deeper")
+batch_case("BP_folder_not_searched", BP_RUN, f"harness: batch 1 files: {BP_FILES}$", forbid="Couldn't read",
+           extra="--batch-unreadable sub")
+batch_case("BP_folder_hidden", BP_SUB, f"harness: batch 1 files: {BP_SUB_FILES}$", forbid="Couldn't read",
+           extra="--batch-unreadable .hiddendir")
+# Read but not searched: its files are listed but can't be opened
+batch_case("BP_folder_unsearchable", BP_SUB,
+           "^  ERROR: Couldn't read the folder \\[<batch>/in/sub/deeper\\]: Permission denied$",
+           extra="--batch-mode 444:sub")
+batch_case("BP_folder_unsearchable_file", BP_SUB, "^    ERROR: Couldn't open file: Permission denied$",
+           extra="--batch-mode 444:sub")
+batch_case("BP_folder_no_files", BP_SUB,
+           "harness: message box: There are no \\.jpg or \\.jpeg files in the folders that could be read\\. "
+           "Couldn't read \".*/batch/in/sub\": Permission denied\\.$", names=("bp_none",),
+           extra="--batch-unreadable sub")
+# The input folder: refused in the dialog
+batch_case("BP_input_unreadable", "in=in,out=out,ok,cancel",
+           "harness: message box: Couldn't read the input folder \".*/batch/in\": Permission denied\\.$",
+           extra="--batch-unreadable .")
+
+# The dialog's fields: refused with a message, and the dialog stays open
+for cid, steps, message in (
+        ("BP_input_missing", "in=nope", 'The input folder doesn\'t exist: ".*/batch/nope"\\.$'),
+        ("BP_input_file", "in=in/notes.txt", 'The input folder is a file: ".*/batch/in/notes\\.txt"\\.$'),
+        ("BP_input_empty", "in=-", "Choose the folder of images to process\\.$"),
+        ("BP_input_relative", "in=raw:in", "The input folder must be a full path, such as ~/Pictures\\.$"),
+        ("BP_input_home", "in=raw:~/no-such-jpegsnoop-folder",
+         'The input folder doesn\'t exist: "/[^~"]*/no-such-jpegsnoop-folder"\\.$'),
+        ("BP_output_empty", "in=in,out=-", "Choose a folder for the logs\\.$"),
+        ("BP_output_relative", "in=in,out=raw:logs",
+         "The output folder must be a full path, such as ~/Pictures\\.$"),
+        ("BP_output_file", "in=in,out=in/notes.txt", 'The output folder is a file: ".*/batch/in/notes\\.txt"\\.$')):
+    batch_case(cid, steps + ",ok,cancel", "harness: message box: " + message)
+batch_case("BP_refused_then_ok", "in=nope,ok,in=in,out=out,ok", f"harness: batch 1 files: {BP_FILES}$")
+# Choose...: as on Windows, the input folder chosen is also the output folder
+batch_case("BP_choose_title", "browse-in=in/sub,cancel",
+           "harness: batch chooser: Select input image folder \\(start <home>\\)$")
+batch_case("BP_choose_input", "browse-in=in/sub,fields,cancel",
+           "harness: batch dialog: Batch Processing \\(in=<batch>/in/sub out=<batch>/in/sub subfolders=0 all=0\\)$")
+batch_case("BP_choose_output", "in=in,out=out,browse-out=in/sub/deeper,fields,cancel",
+           "harness: batch dialog: Batch Processing \\(in=<batch>/in out=<batch>/in/sub/deeper subfolders=0 all=0\\)$")
+batch_case("BP_choose_cancel", "in=in,out=out,browse-in,fields,cancel",
+           "harness: batch dialog: Batch Processing \\(in=<batch>/in out=<batch>/out subfolders=0 all=0\\)$")
+# The folders are remembered, and saved with the settings
+batch_case("BP_remembered", BP_RUN + "+fields,cancel",
+           "harness: batch dialog: Batch Processing \\(in=<batch>/in out=<batch>/out subfolders=0 all=0\\)$")
+batch_case("BP_saved", BP_RUN, "harness: batch saved in=<batch>/in out=<batch>/out$")
+
+# The progress, which can stop the batch (master's couldn't)
+batch_case("BP_progress", BP_RUN, 'harness: batch progress shown=1 modal=app title="Batch Processing"$')
+batch_case("BP_progress_label", BP_RUN, 'harness: batch progress 0/4 "Batch processing file 1 of 4: / a\\.jpg"$')
+batch_case("BP_cancel", BP_RUN, "harness: batch 1 files: out/B.JPEG.txt,out/a.jpg.txt$",
+           extra="--batch-cancel-after 2")
+batch_case("BP_cancel_report", BP_RUN, "^  Batch processing stopped after 2 of 4 files$", extra="--batch-cancel-after 2")
+batch_case("BP_cancel_message", BP_RUN,
+           "harness: message box: Batch processing stopped\\. 2 of 4 files processed: 2 logs written\\.$",
+           extra="--batch-cancel-after 2")
+batch_case("BP_close_window", BP_RUN, "harness: batch window closed=0$", extra="--batch-close-after 1")
+batch_case("BP_close_stops", BP_RUN, "^  Batch processing stopped after 1 of 4 files$", extra="--batch-close-after 1")
+batch_case("BP_messages_after", BP_RUN, "harness: message box: ERROR: Couldn't open file: \\[.*/no-such-file\\.jpg\\]$",
+           extra="--batch-open-missing")
+
+# The file shown is left as it was: its own decoders, start offset and File
+# Overlay (which isn't applied to the batch's files)
+BP_OPEN = ("bp_tree", "ok_444.jpg")
+batch_case("BP_file_kept", BP_RUN, "harness: batch after reprocess file=ok_444\\.jpg scan=1$", names=BP_OPEN)
+batch_case("BP_file_note", BP_RUN, "^  File > Reprocess shows the report of \\[.*/ok_444\\.jpg\\] again$", names=BP_OPEN)
+batch_case("BP_no_file_no_note", BP_RUN, "harness: batch 1 wrote new=4 ", forbid="File > Reprocess shows")
+batch_case("BP_overlay_not_used", BP_RUN, "^harness: cat:   version    = \\[1\\.1\\]$", names=BP_OPEN,
+           extra="--overlay on,offset=0B,value=0102,ok --batch-cat out/a.jpg.txt")
+batch_case("BP_overlay_kept", BP_RUN, "harness: batch after reprocess overlay: " + OVL_VERSION, names=BP_OPEN,
+           extra="--overlay on,offset=0B,value=0102,ok")
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

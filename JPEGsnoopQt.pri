@@ -78,6 +78,8 @@ SOURCES += \
     $$PWD/source/mainwindow.cpp \
     $$PWD/source/exportdialogs.cpp \
     $$PWD/source/aboutdialog.cpp \
+    $$PWD/source/batchdialog.cpp \
+    $$PWD/source/batchprocess.cpp \
     $$PWD/source/finddialog.cpp \
     $$PWD/source/overlaydialog.cpp \
     $$PWD/source/q_decodedetaildlg.cpp \
@@ -102,6 +104,8 @@ HEADERS += \
     $$PWD/source/WindowBuf.h \
     $$PWD/source/exportdialogs.h \
     $$PWD/source/aboutdialog.h \
+    $$PWD/source/batchdialog.h \
+    $$PWD/source/batchprocess.h \
     $$PWD/source/finddialog.h \
     $$PWD/source/overlaydialog.h \
     $$PWD/source/q_decodedetaildlg.h \

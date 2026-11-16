@@ -1070,6 +1070,140 @@ kind, and the overlay kept. With the old wording, the two note cases fail.
 
 **Still open:** Developer ID signing and notarization (M5); latent code; Batch Process.
 
+### Batch Process
+
+File > Batch Process wasn't in any menu: its action was made but never connected. On
+Windows it analyzes each image in a folder and saves each report as a log. Now, as there:
+- **The menu item** is in the File menu after Reprocess File, and is on with no file
+  open.
+- **The dialog** ("Batch Processing") has two notes, the input image folder and the
+  output log folder (each with Choose...), Process subfolders? and Extract all JPEGs.
+  It starts with the last folders used, which are saved with the settings. Choosing the
+  input folder makes it the output folder too.
+- **Each file's log** is its path below the input folder, in the output folder, with
+  `.txt` added. Subfolders are made as needed. Without Extract All, only `.jpg` and
+  `.jpeg` files are processed, in any case.
+- **With Extract All,** every file is processed, and each JPEG in it is exported to
+  `<its path>.export.000001.jpg`, `.000002.jpg`, ..., as Tools > Export JPEG's Extract
+  All does.
+- **The report** then lists what was done: the settings, master's line for each file
+  (`Batch processing file      1 of      4 ( 25.00 %): [...]`), the log written or the
+  error, and the totals. A message box says it is done.
+
+The batch has its own decoders (`CBatchProcess`, `source/batchprocess.cpp`), as master's
+had its own `CJPEGsnoopCore`. So the file shown keeps its image, start offset and File
+Overlay, which isn't applied to the batch's files, and File > Reprocess shows its report
+again. The dialog is `CBatchDialog` (`source/batchdialog.cpp`). Extract All's loop is now
+`extractAllJpegs()`, shared with Export JPEG, and the report's header lines are shared
+too.
+
+**Found and fixed** (all as on Windows 1.8.0):
+- **Files replaced without asking:** logs and numbered exports already there were
+  overwritten. The batch now asks first, naming one of them and how many there are.
+- **Links to folders were followed:** one leading back to a parent folder made the batch
+  process the same files again at each level below it, until the paths got too long (from
+  the code). Links to folders are now skipped; links to files are processed.
+- **The output folder was searched:** when it was inside the input folder, each batch
+  with subfolders and Extract All processed the last one's logs and exports, a level
+  deeper each time. It is now left out, unless it is the input folder itself (the
+  default).
+- **Logs were written through links:** a log's name that was a link to another file,
+  symbolic or hard, put the log into that file, even when it was one of the images being
+  processed (master opened each log to write in place, from the code). Each log now
+  replaces the name itself and nothing else: a symbolic link there is removed, and the
+  log is written beside it and renamed into place, which replaces a hard link rather
+  than the file it shares. A failed log leaves the old one. Extract All's numbered
+  exports remove a symbolic link the same way (they were already renamed into place). A
+  link that leads nowhere is now in the Replace question too.
+- **Folders that couldn't be read looked empty:** master's search found nothing in them,
+  so their files were left out without a word, and an input folder it couldn't read had
+  nothing to process (from the code). The dialog now refuses an input folder it can't
+  read and says why. A subfolder it can't read is listed in the report with the reason,
+  counted ("Folders not read"), and named in the final message. When no files are left
+  to process, the message says that the folders it couldn't read were left out. Hidden
+  folders aren't searched, so a disk's unreadable `.Trashes` and the like aren't errors.
+- **Motion JPEG frames couldn't be opened:** Extract All exported them without the
+  Huffman tables they need. They now get the standard tables, as Export JPEG does by
+  default.
+- **Errors weren't reported:**
+  - A file that couldn't be opened was skipped without a word.
+  - A log that couldn't be written showed a message box for each file.
+
+  Both are now listed in the report and counted in the final message.
+- **The folders weren't checked:** with an input folder that didn't exist, the batch
+  found nothing and said "Batch Processing Complete!". The dialog now refuses a missing
+  input folder, a file, an empty field or a relative path, and says why. A folder with
+  nothing to process, and an output folder that can't be made, are reported before
+  anything is written.
+- **It couldn't be stopped:** there was only a wait cursor. A progress dialog now shows
+  the file and the count, and Cancel (or closing the main window) stops the batch after
+  the file it is on.
+
+**Changes from Windows:**
+- **Hidden files and folders** (names starting with a dot) are left out. On some disks
+  macOS puts a `._name.jpg` file beside each image, which isn't an image.
+- **The logs are UTF-8,** as File > Save Log writes. Master wrote them in the Windows
+  code page, with characters it lacks changed to "?". Each log is exactly the report
+  File > Open shows.
+- **Wording:** "folder" for "directory", as macOS says, and "Choose..." for "...". Note 2
+  names the menu item: Options > Scan Segment > Decode Image.
+- **"~"** in a folder field is the home folder.
+- **The report** lists the logs written, the files exported and any errors, with totals.
+  Master's had only its line for each file.
+
+**Unchanged from Windows:**
+- **The options:** every file is decoded with the current options (Decode Image, Full
+  IDCT and so on), from its start.
+- **Extract All's settings** are Export JPEG's defaults, with no way to change them.
+- **No command line:** master's `-b` and `-br` options aren't ported.
+
+**Tests:** 95 new `BP` cases (454 in all). The driver's `batch` mode copies a folder that
+`gen_cases.py` makes, answers the dialog, and prints each file the batch writes and its
+MD5, a list of them, and the report. The cases cover:
+- **The dialog:** the menu item, the fields and their checks, and Choose....
+- **The files processed:** extensions in capitals, subfolders, a folder named like an
+  image, hidden files, and a link to a parent folder.
+- **The logs:** each one the report File > Open shows (7 compared), in UTF-8, and an
+  empty file's.
+- **Extract All:** two JPEGs in one file, a Motion JPEG AVI, and the output folder inside
+  the input folder.
+- **The Replace question,** and the errors: an unreadable file, a log that can't be
+  written, and an output folder that can't be made.
+- **Links among the names it writes:** a log or export named like a symbolic or hard
+  link to an image, to a file that isn't processed, or to nothing. Each one leaves the
+  linked file as it was.
+- **Folders it can't read:** the input folder, a subfolder, one deeper down, one it can
+  read but not search, a hidden one, and one holding the only images.
+- **Stopping:** Cancel, closing the window, and message boxes on again afterwards.
+- **The file shown,** kept with its File Overlay.
+
+On the previous commit 86 fail. The other nine check what held because no batch could
+run: nothing written on Cancel or without Replace, hidden files, the output folder, the
+sources kept, the file shown and its overlay, and message boxes afterwards. Nine
+deliberate breaks each fail their own cases:
+- **Listing hidden files:** 22 cases fail.
+- **Searching the output folder:** the output-folder case fails.
+- **No tables for Motion JPEG:** the Motion JPEG case fails.
+- **Leaving message boxes off:** 5 cases fail.
+- **Writing the log through a link** (as before the fix): 6 cases fail.
+- **Writing an export through a link:** the export case fails.
+- **Not checking subfolders:** 7 cases fail.
+- **Not checking the input folder:** its case fails.
+- **Not asking about links that lead nowhere:** 2 cases fail.
+
+The hard-linked export passes without the fix too: it was already renamed into place.
+
+**Checks:**
+- **All 454 pass** with and without ASan/UBSan, including every Export JPEG case on the
+  shared Extract All loop.
+- **The layout:** the dialog and the progress were rendered offscreen and looked at.
+- **Not checked:** the dialogs on the macOS platform, including the native folder
+  chooser, and a large folder.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; the other menu
+items not yet ported, such as File > Offset, Tools > Image Search, Lookup MCU Offset,
+Search Executable for DQT, and the signature database items.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

@@ -30,6 +30,9 @@
 #include "reportview.h"
 
 class QPrinter;
+class QProgressDialog;
+struct BatchList;
+struct BatchSettings;
 
 class CFindDialog;
 class SnoopConfigDialog;
@@ -86,6 +89,7 @@ private slots:
   void onExportTiff();
   void onDetailedDecode();
   void onFileOverlay();
+  void onBatchProcess();
   void onAbout();
 
 private:
@@ -94,6 +98,7 @@ private:
   
   void createActions(void);
   void createMenus(void);
+  void runBatch(const BatchSettings &sBatch, const BatchList &list);
   void enableMenus();
   void updateTextActions();
   bool findInReport();
@@ -246,6 +251,9 @@ private:
   bool m_bFindCase = false;
   bool m_bFindWord = false;
   QString m_strFindStatus;      // what the status bar shows after a search found nothing
+
+  // File > Batch Process's progress, while a batch runs
+  QProgressDialog *m_pBatchProgress = nullptr;
 };
 
 #endif // MAINWINDOW_H

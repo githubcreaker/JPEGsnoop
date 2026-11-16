@@ -124,6 +124,40 @@ when it is installed, so Pillow needn't be installed separately).
     runs Export TIFF the same way, then reads the TIFF back and checks its tags
     and every sample against a separate decode of the file
     (`harness: tiff ... check=ok`);
+  - `batch <folder> [<file>...] --batch STEPS` copies the folder to a
+    temporary `batch/in`, so a batch can write beside its files. It opens any
+    files given (answering `--overlay`'s steps for the last), then chooses
+    File > Batch Process and answers its dialog with STEPS:
+    - `in=PATH` and `out=PATH` type a folder: a path below the temporary
+      `batch` folder, `/...` or `~...` as given, `raw:` then text typed as
+      it is, or `-` for nothing;
+    - `subfolders` and `all` tick the boxes, and `fields` prints the fields;
+    - `browse-in=PATH` and `browse-out=PATH` click Choose... and choose that
+      folder (without `=PATH`, cancel it);
+    - `ok` and `cancel`, with `+` to choose the menu item again.
+
+    After each batch it prints each file written or changed below `batch`
+    with its size and MD5, a `files:` line listing them, and the report.
+    Paths print with `<batch>` and `<home>` for those folders.
+    - `--batch-cat REL` prints a file written (any number of times).
+    - `--batch-compare` opens each file processed and checks that its log is
+      the report shown.
+    - `--batch-unreadable REL` makes a file or folder below `batch/in`
+      unreadable first, and `--batch-mode OCTAL:REL` gives it those
+      permissions (`444:sub`: read, but not searched). Both are put back
+      afterwards.
+    - `--batch-link sym:NAME=TARGET` and `hard:NAME=TARGET` make a symbolic
+      or hard link NAME to TARGET first, both below `batch` (the symbolic link
+      holds TARGET's full path, which needn't exist). Afterwards it prints
+      `harness: batch link ... now exists= symlink= names=` for NAME (`names`
+      is its number of hard links) and `target exists= unchanged=`.
+    - `--batch-cancel-after N` and `--batch-close-after N` click Cancel, or
+      close the window, when the progress reaches N files.
+    - `--batch-open-missing` opens a missing file afterwards.
+
+    It also prints the menu item's place, the progress dialog and its
+    labels, the folders saved in the settings, and with a file open, the
+    file that Reprocess shows afterwards;
   - `settings` exercises settings load/store, option toggles and the
     Configuration dialog;
   - `--scale F`, in any mode, runs as if on a screen with F device pixels per
@@ -138,7 +172,7 @@ when it is installed, so Pillow needn't be installed separately).
   from `dc_only_jpeg()`, a small encoder for images made of flat 8×8 blocks.
   Photoshop files come from `psd()`, which writes raw or PackBits image data,
   and layers from `psd_layers()` (one) or `psd_layer_section()` (any, with
-  masks and tagged blocks).
+  masks and tagged blocks). Folders for the `batch` mode come from `tree()`.
 - `run-tests.sh` runs each case with a time limit. A case fails on a crash,
   timeout, sanitizer report, missing expected output or forbidden output.
   Output of failed cases is kept in `build-tests*/logs/`.
@@ -150,7 +184,8 @@ GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F
 are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
 in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
 section, `A` in its "About" section, `T` in its "Select All and Copy"
-section, `FN` in its "Find" section, and `OV` in its "File Overlay" section);
+section, `FN` in its "Find" section, `OV` in its "File Overlay" section, and
+`BP` in its "Batch Process" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

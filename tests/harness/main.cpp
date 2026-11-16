@@ -145,6 +145,7 @@
 #include <QClipboard>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileDialog>
 #include <QCoreApplication>
 #include <QDate>
@@ -153,11 +154,17 @@
 #include <QFileInfo>
 #include <QLineEdit>
 #include <QLabel>
+#include <QMap>
+#include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPalette>
 #include <QPixmap>
+#include <QPointer>
+#include <QProcess>
+#include <QProgressBar>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStatusBar>
@@ -168,6 +175,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QStyle>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
@@ -177,6 +185,7 @@
 #include <QTimer>
 #include <QtMath>
 #include <cmath>
+#include <functional>
 #include <cstdio>
 #include <cstring>
 
@@ -185,6 +194,8 @@
 #else
 #include <sys/resource.h>
 #endif
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "DbSigs.h"
 #include "DocLog.h"
@@ -219,6 +230,11 @@ static void usage()
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
           "                         [--out-same-case]\n"
           "       jpegsnoop-harness export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]\n"
+          "       jpegsnoop-harness batch <folder> [<file to open first> ...] --batch STEPS [--batch-cat REL]...\n"
+          "                         [--batch-unreadable REL]... [--batch-mode OCTAL:REL]...\n"
+          "                         [--batch-link sym|hard:NAME=TARGET]... [--batch-compare] [--batch-open-missing]\n"
+          "                         [--batch-cancel-after N] [--batch-close-after N] [--replace]\n"
+          "                         [--no-decode-image] [--overlay STEPS]\n"
           "       any mode: [--scale F]\n");
 }
 
@@ -2233,6 +2249,470 @@ static int runExportTiff(const QString &strFile, const QString &strFormat, const
   return 0;
 }
 
+// Calls fnShown when a widget is shown, as it is shown (the batch's progress
+// is shown and updated with no event loop between)
+class ShowHook : public QObject
+{
+public:
+  explicit ShowHook(std::function<void(QWidget *)> fnShown) : m_fnShown(std::move(fnShown)) {}
+
+protected:
+  bool eventFilter(QObject *pObj, QEvent *pEvent) override
+  {
+    if((pEvent->type() == QEvent::Show) && pObj->isWidgetType())
+      m_fnShown(static_cast<QWidget *>(pObj));
+    return false;
+  }
+
+private:
+  std::function<void(QWidget *)> m_fnShown;
+};
+
+struct BatchOptions
+{
+  QString strSteps;               // --batch STEPS
+  QStringList astrCat;            // --batch-cat REL (any number)
+  QStringList astrUnreadable;     // --batch-unreadable REL (any number)
+  QStringList astrModes;          // --batch-mode OCTAL:REL (any number)
+  QStringList astrLinks;          // --batch-link sym|hard:NAME=TARGET (any number)
+  bool bCompare = false;          // --batch-compare
+  bool bReopenMissing = false;    // --batch-open-missing
+  int nCancelAfter = -1;          // --batch-cancel-after N
+  int nCloseAfter = -1;           // --batch-close-after N
+};
+
+// Every file below strRoot (with hidden ones), by its path below it, and its MD5
+static QMap<QString, QString> filesBelow(const QString &strRoot)
+{
+  QMap<QString, QString> mapFiles;
+  const QDir dirRoot(strRoot);
+  QDirIterator it(strRoot, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+  while(it.hasNext())
+  {
+    const QString strPath = it.next();
+    mapFiles.insert(dirRoot.relativeFilePath(strPath), fileMd5(strPath));
+  }
+  return mapFiles;
+}
+
+// File > Batch Process as a user chooses it. strFolder is copied to <tmp>/batch/in
+// first, so the batch can write beside its files. The files in astrOpen are
+// opened first (and --overlay's steps answered for the last). Then for each
+// of STEPS' openings ("+" between them), the menu item is chosen and its
+// dialog answered (see tests/README.md), and what the batch wrote and its
+// report are printed.
+static int runBatchMode(const QString &strFolder, const QStringList &astrOpen, const GuiOptions &guiOpts,
+                        const BatchOptions &opts, const QString &strTmpDir)
+{
+  useGuiSettings(strTmpDir, guiOpts);
+
+  MainWindow window;
+  window.show();
+  QCoreApplication::processEvents();
+
+  QTextStream out(stdout);
+  QTimer timerMsgBox;
+  closeMessageBoxes(timerMsgBox, out, guiOpts.bReplace);
+
+  const QString strRoot = strTmpDir + "/batch";
+  QDir().mkpath(strRoot);
+  if(QProcess::execute("/bin/cp", QStringList() << "-R" << strFolder << strRoot + "/in") != 0)
+  {
+    out << "harness: couldn't copy " << strFolder << "\n";
+    return 2;
+  }
+  // Links, made after the copy (cp -R copies symbolic links, but not hard
+  // ones). NAME and TARGET are below <tmp>/batch; a symbolic link leads to
+  // TARGET's full path, which needn't exist.
+  struct MadeLink
+  {
+    QString strSpec;
+    QString strName;
+    QString strTarget;
+    QString strTargetMd5;         // Before the batch ("" if it didn't exist)
+  };
+  QList<MadeLink> links;
+  for(const QString &strSpec : opts.astrLinks)
+  {
+    const qsizetype nColon = strSpec.indexOf(':');
+    const qsizetype nEq = strSpec.indexOf('=');
+    const QString strKind = strSpec.left(nColon);
+    MadeLink sLink{ strSpec, strSpec.mid(nColon + 1, nEq - nColon - 1), strSpec.mid(nEq + 1), QString() };
+    const QByteArray abName = QFile::encodeName(strRoot + "/" + sLink.strName);
+    const QByteArray abTarget = QFile::encodeName(strRoot + "/" + sLink.strTarget);
+    QDir().mkpath(QFileInfo(strRoot + "/" + sLink.strName).path());
+    ::unlink(abName.constData());
+    const bool bMade = (nColon > 0) && (nEq > nColon) &&
+                       (((strKind == "sym") && (::symlink(abTarget.constData(), abName.constData()) == 0)) ||
+                        ((strKind == "hard") && (::link(abTarget.constData(), abName.constData()) == 0)));
+    if(!bMade)
+    {
+      out << "harness: couldn't make the link " << strSpec << "\n";
+      return 2;
+    }
+    if(QFileInfo::exists(strRoot + "/" + sLink.strTarget))
+      sLink.strTargetMd5 = fileMd5(strRoot + "/" + sLink.strTarget);
+    links << sLink;
+  }
+
+  // Permissions taken away, and given back afterwards so the temporary
+  // folder can be removed
+  QStringList astrModes = opts.astrModes;
+  for(const QString &strRel : opts.astrUnreadable)
+    astrModes << "000:" + strRel;
+  const auto restoreModes = qScopeGuard([&]() {
+    for(const QString &strMode : astrModes)
+      ::chmod(QFile::encodeName(strRoot + "/in/" + strMode.mid(strMode.indexOf(':') + 1)).constData(), 0755);
+  });
+  for(const QString &strMode : astrModes)
+  {
+    bool bOk = false;
+    const qsizetype nColon = strMode.indexOf(':');
+    const mode_t nMode = static_cast<mode_t>(strMode.left(nColon).toUInt(&bOk, 8));
+    if(!bOk || (nColon < 0) ||
+       (::chmod(QFile::encodeName(strRoot + "/in/" + strMode.mid(nColon + 1)).constData(), nMode) != 0))
+    {
+      out << "harness: couldn't set the mode " << strMode << "\n";
+      return 2;
+    }
+  }
+  const QMap<QString, QString> mapSources = filesBelow(strRoot);
+
+  // Paths as printed: the batch folder and the home folder by name
+  const QString strRootCanonical = QFileInfo(strRoot).canonicalFilePath();
+  auto shown = [&](QString str) {
+    str.replace(strRootCanonical, "<batch>");
+    str.replace(strRoot, "<batch>");
+    str.replace(QDir::homePath(), "<home>");
+    return str;
+  };
+  // A path in a step: below <tmp>/batch, or as given if it starts with "/"
+  // or "~" or after "raw:" ("-" is empty)
+  auto stepPath = [&](const QString &strArg) {
+    if(strArg == "-")
+      return QString();
+    if(strArg.startsWith("raw:"))
+      return strArg.mid(4);
+    if(strArg.startsWith('/') || strArg.startsWith('~'))
+      return strArg;
+    return strRoot + "/" + strArg;
+  };
+
+  for(const QString &strFile : astrOpen)
+  {
+    window.openFile(strFile);
+    QCoreApplication::processEvents();
+    out << "harness: opened " << QFileInfo(strFile).fileName() << "\n";
+  }
+  if(!astrOpen.isEmpty() && !guiOpts.strOverlay.isEmpty())
+    overlayMenu(window, guiOpts.strOverlay, out);
+
+  QAction *pAction = findAction(window, QStringLiteral("Batch Process..."));
+  if(!pAction)
+  {
+    out << "harness: menu Batch Process unavailable\n";
+    out << "harness: done\n";
+    return 0;
+  }
+  // Where it is: the menu's title and the item before it
+  {
+    QString strMenu = "-";
+    QString strBefore = "-";
+    const QList<QObject *> objects = pAction->associatedObjects();
+    for(QObject *pObj : objects)
+    {
+      QMenu *pMenu = qobject_cast<QMenu *>(pObj);
+      if(!pMenu)
+        continue;
+      strMenu = pMenu->title();
+      const QList<QAction *> actions = pMenu->actions();
+      const qsizetype nInd = actions.indexOf(pAction);
+      if(nInd > 0)
+        strBefore = actions.at(nInd - 1)->text();
+    }
+    out << "harness: batch menu=" << strMenu << " after=\"" << strBefore << "\" enabled=" << (pAction->isEnabled() ? 1 : 0)
+        << " tip=\"" << pAction->statusTip() << "\"\n";
+  }
+
+  QStringList astrSteps;
+  QString strChoose;              // The folder to choose in the folder dialog
+  QPointer<QProgressDialog> pHooked;
+
+  // The progress, while the batch runs
+  ShowHook hook([&](QWidget *pWidget) {
+    QProgressDialog *pProgress = qobject_cast<QProgressDialog *>(pWidget);
+    if(pProgress && (pProgress->objectName() == QLatin1String("batchProgress")))
+    {
+      if(pHooked != pProgress)
+      {
+        pHooked = pProgress;
+        out << "harness: batch progress shown=" << (pProgress->isVisible() ? 1 : 0) << " modal="
+            << ((pProgress->windowModality() == Qt::ApplicationModal) ? "app" : "other") << " title=\""
+            << pProgress->windowTitle() << "\"\n";
+        QProgressBar *pBar = pProgress->findChild<QProgressBar *>();
+        QObject::connect(pBar, &QProgressBar::valueChanged, pProgress, [&, pProgress](int nValue) {
+          out << "harness: batch progress " << nValue << "/" << pProgress->maximum() << " \""
+              << shown(pProgress->labelText()).replace('\n', " / ") << "\"\n";
+          if((opts.nCancelAfter >= 0) && (nValue >= opts.nCancelAfter) && !pProgress->wasCanceled())
+          {
+            out << "harness: batch cancel\n";
+            pProgress->cancel();
+          }
+          if((opts.nCloseAfter >= 0) && (nValue == opts.nCloseAfter))
+          {
+            window.close();
+            out << "harness: batch window closed=" << (window.isVisible() ? 0 : 1) << "\n";
+          }
+        });
+      }
+    }
+  });
+  qApp->installEventFilter(&hook);
+
+  // The folder dialog opens from the dialog's timer's slot, where that timer
+  // doesn't fire again, so it has its own
+  QTimer timerChooser;
+  QObject::connect(&timerChooser, &QTimer::timeout, [&]() {
+    QFileDialog *pChooser = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+    if(!pChooser || (pChooser->objectName() != QLatin1String("batchFolderDialog")))
+      return;
+    out << "harness: batch chooser: " << pChooser->windowTitle() << " (start "
+        << shown(pChooser->directory().absolutePath()) << ")\n";
+    if(strChoose.isEmpty())
+    {
+      pChooser->reject();
+      return;
+    }
+    pChooser->setDirectory(strChoose);
+    static_cast<QDialog *>(pChooser)->done(QDialog::Accepted);
+  });
+  timerChooser.start(20);
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QWidget *pModal = QApplication::activeModalWidget();
+    QDialog *pDlg = qobject_cast<QDialog *>(pModal);
+    if(!pDlg || (pDlg->objectName() != QLatin1String("batchDialog")))
+      return;
+    QLineEdit *pIn = pDlg->findChild<QLineEdit *>("inputFolder");
+    QLineEdit *pOut = pDlg->findChild<QLineEdit *>("outputFolder");
+    QCheckBox *pSub = pDlg->findChild<QCheckBox *>("processSubfolders");
+    QCheckBox *pAll = pDlg->findChild<QCheckBox *>("extractAll");
+    QPushButton *pBrowseIn = pDlg->findChild<QPushButton *>("browseInput");
+    QPushButton *pBrowseOut = pDlg->findChild<QPushButton *>("browseOutput");
+    QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+    if(!pIn || !pOut || !pSub || !pAll || !pBrowseIn || !pBrowseOut || !pButtons)
+    {
+      out << "harness: batch dialog widgets not found\n";
+      pDlg->reject();
+      return;
+    }
+
+    auto fields = [&]() {
+      return QString("in=%1 out=%2 subfolders=%3 all=%4")
+               .arg(shown(pIn->text()), shown(pOut->text()))
+               .arg(pSub->isChecked() ? 1 : 0)
+               .arg(pAll->isChecked() ? 1 : 0);
+    };
+
+    while(!astrSteps.isEmpty())
+    {
+      const QString strStep = astrSteps.takeFirst();
+      if(strStep == "fields")
+        out << "harness: batch dialog: " << pDlg->windowTitle() << " (" << fields() << ")\n";
+      else if(strStep.startsWith("in="))
+        pIn->setText(stepPath(strStep.mid(3)));
+      else if(strStep.startsWith("out="))
+        pOut->setText(stepPath(strStep.mid(4)));
+      else if(strStep == "subfolders")
+        pSub->setChecked(true);
+      else if(strStep == "all")
+        pAll->setChecked(true);
+      else if(strStep.startsWith("browse-in") || strStep.startsWith("browse-out"))
+      {
+        // The folder dialog comes next; the steps left carry on after it
+        const qsizetype nEq = strStep.indexOf('=');
+        strChoose = (nEq < 0) ? QString() : stepPath(strStep.mid(nEq + 1));
+        (strStep.startsWith("browse-in") ? pBrowseIn : pBrowseOut)->click();
+        out << "harness: batch after " << strStep << " (" << fields() << ")\n";
+      }
+      else if((strStep == "ok") || (strStep == "cancel"))
+      {
+        out << "harness: batch dialog " << strStep << " (" << fields() << ")\n";
+        out.flush();
+        // A refused OK shows a message box: the steps left carry on after it
+        pButtons->button((strStep == "ok") ? QDialogButtonBox::Ok : QDialogButtonBox::Cancel)->click();
+        return;
+      }
+      else
+        out << "harness: unknown batch step " << strStep << "\n";
+    }
+
+    out << "harness: batch dialog still open: cancelled\n";
+    pDlg->reject();
+  });
+  timer.start(20);
+
+  int nOpening = 0;
+  for(const QString &strOpening : opts.strSteps.split('+'))
+  {
+    nOpening++;
+    astrSteps = strOpening.split(',', Qt::SkipEmptyParts);
+    const QMap<QString, QString> mapBefore = filesBelow(strRoot);
+    const QString strReportBefore = window.textEdit->toPlainText();
+
+    out.flush();
+    pAction->trigger();
+    QCoreApplication::processEvents();
+
+    // What it wrote, below <tmp>/batch
+    const QMap<QString, QString> mapAfter = filesBelow(strRoot);
+    int nNew = 0;
+    int nChanged = 0;
+    QStringList astrWritten;
+    for(auto it = mapAfter.cbegin(); it != mapAfter.cend(); ++it)
+    {
+      const bool bNew = !mapBefore.contains(it.key());
+      if(!bNew && (mapBefore.value(it.key()) == it.value()))
+        continue;
+      (bNew ? nNew : nChanged)++;
+      astrWritten << it.key();
+      out << "harness: batch " << nOpening << (bNew ? " new " : " changed ") << it.key()
+          << " size=" << QFileInfo(strRoot + "/" + it.key()).size() << " md5=" << it.value() << "\n";
+    }
+    out << "harness: batch " << nOpening << " wrote new=" << nNew << " changed=" << nChanged << "\n";
+    out << "harness: batch " << nOpening << " files: " << (astrWritten.isEmpty() ? "-" : astrWritten.join(',')) << "\n";
+
+    const QString strReport = window.textEdit->toPlainText();
+    if(strReport == strReportBefore)
+      out << "harness: batch " << nOpening << " report unchanged\n";
+    else if(strReport.contains("*** Batch Processing ***"))
+      out << shown(strReport) << "\n";
+    else
+      out << "harness: batch " << nOpening << " report changed, without a batch\n";
+    out.flush();
+  }
+  timer.stop();
+  timerChooser.stop();
+  qApp->removeEventFilter(&hook);
+
+  for(const QString &strRel : opts.astrCat)
+  {
+    QFile file(strRoot + "/" + strRel);
+    if(!file.open(QIODevice::ReadOnly | QIODevice::Text))
+    {
+      out << "harness: cat " << strRel << ": can't be read\n";
+      continue;
+    }
+    const QString strText = QString::fromUtf8(file.readAll());
+    out << "harness: cat " << strRel << " bytes=" << file.size() << " lines=" << strText.split('\n').size()
+        << " starts-blank=" << (strText.startsWith('\n') ? 1 : 0) << " ends-newline=" << (strText.endsWith('\n') ? 1 : 0)
+        << "\n";
+    for(const QString &strLine : strText.split('\n'))
+      out << "harness: cat: " << shown(strLine) << "\n";
+  }
+
+  // What each link is now, and whether the file it led to changed
+  for(const MadeLink &sLink : links)
+  {
+    struct stat sStat;
+    const bool bStat = (::lstat(QFile::encodeName(strRoot + "/" + sLink.strName).constData(), &sStat) == 0);
+    const QString strTarget = strRoot + "/" + sLink.strTarget;
+    const bool bTargetExists = QFileInfo::exists(strTarget);
+    const QString strTargetMd5 = bTargetExists ? fileMd5(strTarget) : QString();
+    out << "harness: batch link " << sLink.strSpec << " now exists=" << (bStat ? 1 : 0)
+        << " symlink=" << ((bStat && S_ISLNK(sStat.st_mode)) ? 1 : 0)
+        << " names=" << (bStat ? static_cast<qulonglong>(sStat.st_nlink) : 0) << " target exists=" << (bTargetExists ? 1 : 0)
+        << " unchanged=" << ((strTargetMd5 == sLink.strTargetMd5) ? 1 : 0) << "\n";
+  }
+
+  // The sources are as they were (unless the batch replaced one)
+  {
+    const QMap<QString, QString> mapAfter = filesBelow(strRoot);
+    int nChanged = 0;
+    for(auto it = mapSources.cbegin(); it != mapSources.cend(); ++it)
+    {
+      if(mapAfter.value(it.key()) != it.value())
+        nChanged++;
+    }
+    out << "harness: batch sources unchanged=" << ((nChanged == 0) ? 1 : 0) << "\n";
+  }
+
+  // The file shown before the batch is still there
+  if(!astrOpen.isEmpty())
+  {
+    const QString strLog = window.textEdit->toPlainText();
+    const QRegularExpression reName("Filename: \\[([^\\]]*)\\]");
+    window.reprocess();
+    QCoreApplication::processEvents();
+    const QRegularExpressionMatch match = reName.match(window.textEdit->toPlainText());
+    out << "harness: batch after reprocess file=" << (match.hasMatch() ? QFileInfo(match.captured(1)).fileName() : "-")
+        << " scan=" << (window.textEdit->toPlainText().contains("*** Decoding SCAN Data ***") ? 1 : 0) << "\n";
+    if(!guiOpts.strOverlay.isEmpty())
+      out << "harness: batch after reprocess overlay: " << overlayReport(window) << "\n";
+  }
+
+  // Each log is the report File > Open shows for its file
+  if(opts.bCompare)
+  {
+    const QRegularExpression reFile("Batch processing file .*: \\[(.*)\\]$");
+    const QRegularExpression reLog("^    Log written to \\[(.*)\\]$");
+    QString strSrc;
+    int nSame = 0;
+    int nCompared = 0;
+    // The batch's report, from the last opening
+    QStringList astrLines;
+    {
+      QStringList astrAll = window.textEdit->toPlainText().split('\n');
+      astrLines = astrAll;
+    }
+    // (Reprocess above replaced the report if a file was open: run the
+    // comparison only without one)
+    for(const QString &strLine : astrLines)
+    {
+      const QRegularExpressionMatch mFile = reFile.match(strLine);
+      if(mFile.hasMatch())
+      {
+        strSrc = mFile.captured(1);
+        continue;
+      }
+      const QRegularExpressionMatch mLog = reLog.match(strLine);
+      if(!mLog.hasMatch() || strSrc.isEmpty())
+        continue;
+      QFile fileLog(mLog.captured(1));
+      if(!fileLog.open(QIODevice::ReadOnly | QIODevice::Text))
+        continue;
+      const QString strLogText = QString::fromUtf8(fileLog.readAll());
+      window.openFile(strSrc);
+      QCoreApplication::processEvents();
+      const bool bSame = (window.textEdit->toPlainText() == strLogText);
+      nCompared++;
+      nSame += bSame ? 1 : 0;
+      out << "harness: batch compare " << shown(mLog.captured(1)) << " same=" << (bSame ? 1 : 0) << "\n";
+    }
+    out << "harness: batch compared " << nCompared << " same=" << nSame << "\n";
+  }
+
+  // Message boxes are on again after the batch
+  if(opts.bReopenMissing)
+  {
+    window.openFile(strRoot + "/no-such-file.jpg");
+    QCoreApplication::processEvents();
+  }
+
+  // The folders are saved with the settings when the app quits
+  window.close();
+  QCoreApplication::processEvents();
+  {
+    QSettings settings;
+    out << "harness: batch saved in=" << shown(settings.value("General\\BatchLastInput").toString())
+        << " out=" << shown(settings.value("General\\BatchLastOutput").toString()) << "\n";
+  }
+
+  out << "harness: done\n";
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   if(qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
@@ -2292,13 +2772,34 @@ int main(int argc, char **argv)
   exportOpts.sJpeg.bOverlayEn = args.removeAll("--overlays") > 0;
   exportOpts.bOutSame = args.removeAll("--out-same") > 0;
   exportOpts.bOutSameCase = args.removeAll("--out-same-case") > 0;
+  BatchOptions batchOpts;
+  batchOpts.bCompare = args.removeAll("--batch-compare") > 0;
+  batchOpts.bReopenMissing = args.removeAll("--batch-open-missing") > 0;
+  // Options that can be given more than once
+  for(const char *pszOpt : { "--batch-cat", "--batch-unreadable", "--batch-mode", "--batch-link" })
+  {
+    QStringList &astrValues = (QLatin1String(pszOpt) == QLatin1String("--batch-cat"))          ? batchOpts.astrCat
+                              : (QLatin1String(pszOpt) == QLatin1String("--batch-unreadable")) ? batchOpts.astrUnreadable
+                              : (QLatin1String(pszOpt) == QLatin1String("--batch-mode"))       ? batchOpts.astrModes
+                                                                                               : batchOpts.astrLinks;
+    for(qsizetype nInd = args.indexOf(QLatin1String(pszOpt)); nInd >= 0; nInd = args.indexOf(QLatin1String(pszOpt)))
+    {
+      if(nInd + 1 >= args.size())
+      {
+        usage();
+        return 2;
+      }
+      astrValues << args.at(nInd + 1);
+      args.remove(nInd, 2);
+    }
+  }
 
   // Options with a text value (--scale was applied above)
   QString strPixels;
   QString strFormat;
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
-                             "--edit", "--overlay" })
+                             "--edit", "--overlay", "--batch" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -2326,12 +2827,15 @@ int main(int argc, char **argv)
       guiOpts.strEdit = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--overlay"))
       guiOpts.strOverlay = exportOpts.strOverlay = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--batch"))
+      batchOpts.strSteps = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
   // Options with a numeric value
   uint32_t nStart = 0;
-  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at" })
+  for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
+                             "--batch-cancel-after", "--batch-close-after" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -2354,6 +2858,10 @@ int main(int argc, char **argv)
       guiOpts.nDetailDlgAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--overlay-at"))
       guiOpts.nOverlayAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
+      batchOpts.nCancelAfter = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))
+      batchOpts.nCloseAfter = nVal;
     else
       guiOpts.nMaxZoomMb = nVal;
   }
@@ -2375,6 +2883,8 @@ int main(int argc, char **argv)
     return runExportJpeg(args.first(), exportOpts, tmpDir.path());
   if(strMode == "export-tiff" && args.size() == 1)
     return runExportTiff(args.first(), strFormat, exportOpts, tmpDir.path());
+  if(strMode == "batch" && !args.isEmpty() && !batchOpts.strSteps.isEmpty())
+    return runBatchMode(args.first(), args.mid(1), guiOpts, batchOpts, tmpDir.path());
 
   usage();
   return 2;

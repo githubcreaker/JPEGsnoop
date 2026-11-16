@@ -30,6 +30,8 @@
 #include "DbSigs.h"
 #include "General.h"
 #include "aboutdialog.h"
+#include "batchdialog.h"
+#include "batchprocess.h"
 #include "finddialog.h"
 #include "overlaydialog.h"
 #include "ImgDecode.h"
@@ -236,7 +238,10 @@ void MainWindow::createActions(void)
 //   saveAct->setStatusTip(tr("Save the document to disk"));
    connect(reprocessAct, &QAction::triggered, this, &MainWindow::reprocess);
 
+  // Always on: it needs no file open (as on Windows)
   batchProcessAct = new QAction(tr("Batch Process..."), this);
+  batchProcessAct->setStatusTip(tr("Start batch processing"));
+  connect(batchProcessAct, &QAction::triggered, this, &MainWindow::onBatchProcess);
   OffsetAct = new QAction(tr("Offset"), this);
 
   const QIcon printIcon = QIcon::fromTheme("document-print", QIcon(rsrcPath + "/fileprint.png"));
@@ -566,6 +571,7 @@ void MainWindow::createMenus(void)
   fileMenu->addAction(openAct);
   fileMenu->addAction(saveLogAct);
   fileMenu->addAction(reprocessAct);
+  fileMenu->addAction(batchProcessAct);
   fileMenu->addSeparator();
   fileMenu->addAction(OffsetAct);
   fileMenu->addSeparator();
@@ -786,7 +792,7 @@ bool MainWindow::AnalyzeOpen()
   {
     // Say so, as master did, rather than leaving the previous file's report
     m_pDocLog->Clear();
-    m_pDocLog->AddLineErr(QString("ERROR: File length is zero, no decoding done. [%1]").arg(m_currentFile));
+    m_pDocLog->AddLineErr(emptyFileError(m_currentFile));
     m_pFile->close();
     return false;
   }
@@ -820,13 +826,8 @@ void MainWindow::AnalyzeFileDo()
   // Clear the document log
   m_pDocLog->Clear();
 
-  m_pDocLog->AddLine("");
-  m_pDocLog->AddLine(QString("JPEGsnoop %1 by Calvin Hass").arg(QString(VERSION_STR)));
-  m_pDocLog->AddLine("  http://www.impulseadventure.com/photo/");
-  m_pDocLog->AddLine("  -------------------------------------");
-  m_pDocLog->AddLine("");
-  m_pDocLog->AddLine(QString("  Filename: [%1]").arg(m_currentFile));
-  m_pDocLog->AddLine(QString("  Filesize: [%1] bytes").arg(m_lFileSize));
+  // (Shared with File > Batch Process, whose logs are this report)
+  addReportHeader(m_pDocLog, m_currentFile, m_lFileSize);
 
   // A File Overlay changes what is decoded, so say so first. (Windows only
   // listed it in the scan section, which isn't there with Decode Image off.)
@@ -1201,34 +1202,10 @@ void MainWindow::printPreview(QPrinter *printer)
 // Tools > Export JPEG: copy the JPEG at the start offset to its own file, or
 // with Extract All, every JPEG in the file (master's DoGuiExtractEmbeddedJPEG)
 
-// Extract All's names: the name chosen, without its extension, then the
+// Extract All's names (numberedExportName() and existingNumberedExports(),
+// in batchprocess.cpp) are the name chosen, without its extension, then the
 // JPEG's number (from 1, in 6 digits as master: a 60 fps video's frames for
-// over 4.5 hours), then ".jpg"
-static QString numberedExportName(const QString &strOut, uint32_t nNum)
-{
-  const QFileInfo fiOut(strOut);
-  return QDir(fiOut.path()).filePath(QString("%1.%2.jpg").arg(fiOut.completeBaseName()).arg(nNum, 6, 10, QChar('0')));
-}
-
-// The files already named as Extract All would name its exports. (Without
-// the case: macOS disks usually ignore it, so "x.000001.JPG" would be
-// replaced too.)
-static QStringList existingNumberedExports(const QString &strOut)
-{
-  const QFileInfo fiOut(strOut);
-  const QRegularExpression reNumbered(QString("^%1\\.[0-9]{6,}\\.jpg$").arg(QRegularExpression::escape(fiOut.completeBaseName())),
-                                      QRegularExpression::CaseInsensitiveOption);
-  QStringList astrExisting;
-  const QStringList astrNames = QDir(fiOut.path()).entryList(QDir::Files | QDir::Hidden, QDir::Name);
-
-  for(const QString &strName : astrNames)
-  {
-    if(reNumbered.match(strName).hasMatch())
-      astrExisting << strName;
-  }
-
-  return astrExisting;
-}
+// over 4.5 hours), then ".jpg".
 
 void MainWindow::onExportJpeg()
 {
@@ -1398,76 +1375,24 @@ bool MainWindow::exportJpeg(const QString &strOut, const ExportJpegSettings &sSe
 // start, to <strOut without extension>.000001.jpg, .000002.jpg, ...,
 // replacing any files of those names (onExportJpeg() asks first). Then
 // show the file's report, from the start offset as before, followed by a
-// list of what was exported.
-//
-// Master left the report of the last place it looked and moved the start
-// offset there. Each place is analyzed with the report and message boxes
-// off, as a video can have thousands of frames.
+// list of what was exported. (The loop is extractAllJpegs(), shared with
+// File > Batch Process.)
 //
 // PRE:
 // - AnalyzeOpen()
 //
 bool MainWindow::exportAllJpegs(const QString &strOut, const ExportJpegSettings &sSettings)
 {
-  const uint32_t nStartSaved = m_pAppConfig->startPos();
+  const ExtractAllResult sResult = extractAllJpegs(
+    m_pWBuf, m_pJfifDec, m_pAppConfig, m_pDocLog, m_pFile, m_currentFile, strOut, sSettings,
+    [this]() { emit ImgSrcChanged(); },
+    [this](uint32_t nExported) { m_StatusBar->showMessage(tr("Exporting all JPEGs: %1 exported...").arg(nExported)); });
+  const QStringList &astrResults = sResult.astrResults;
+  const QList<bool> &abResultOk = sResult.abResultOk;
+  const uint32_t nExported = sResult.nExported;
+  const bool bWriteOk = sResult.bWriteOk;
+  const QString &strWriteError = sResult.strWriteError;
   const bool bInteractiveSaved = m_pAppConfig->interactive();
-
-  QStringList astrResults;
-  QList<bool> abResultOk;
-  uint32_t nPos = 0;
-  uint32_t nExported = 0;
-  bool bWriteOk = true;
-  QString strWriteError;
-
-  m_pDocLog->Disable();
-  m_pAppConfig->setInteractive(false);
-
-  for(bool bMore = true; bMore;)
-  {
-    m_StatusBar->showMessage(tr("Exporting all JPEGs: %1 exported...").arg(nExported));
-
-    // Reload the buffer as AnalyzeOpen() does: reading past the end of the
-    // file (as the last analysis or search may have) leaves it marked bad,
-    // and the next scan then stops at once ("Ran out of buffer")
-    m_pWBuf->BufLoadWindow(nPos);
-    m_pAppConfig->setStartPos(nPos);
-    emit ImgSrcChanged();
-    m_pJfifDec->ProcessFile(m_pFile);
-
-    const QString strPos = QString("0x%1").arg(nPos, 8, 16, QChar('0'));
-
-    if(!m_pJfifDec->ExportJpegPrepare(m_currentFile, sSettings.bForceSoi, sSettings.bForceEoi, sSettings.bIgnoreEoi))
-    {
-      astrResults << QString("  [%1] Not exported: %2").arg(strPos, m_pJfifDec->GetExportError());
-      abResultOk << false;
-    }
-    else
-    {
-      const QString strName = numberedExportName(strOut, nExported + 1);
-
-      if(!m_pJfifDec->ExportJpegDo(m_currentFile, strName, static_cast<uint32_t>(m_lFileSize), sSettings.bOverlayEn,
-                                   sSettings.bDhtAviInsert, sSettings.bForceSoi, sSettings.bForceEoi))
-      {
-        // The next would fail the same way
-        strWriteError = m_pJfifDec->GetExportError();
-        astrResults << QString("  [%1] %2").arg(strPos, strWriteError);
-        abResultOk << false;
-        bWriteOk = false;
-        break;
-      }
-
-      nExported++;
-      astrResults << QString("  [%1] Exported to [%2]").arg(strPos, strName);
-      abResultOk << true;
-    }
-
-    // The next SOI after this one (the search starts after nPos)
-    bMore = m_pWBuf->BufSearch(nPos, 0xFFD8FF, 3, true, nPos);
-  }
-
-  m_pAppConfig->setInteractive(bInteractiveSaved);
-  m_pAppConfig->setStartPos(nStartSaved);
-  m_pDocLog->Enable();
 
   // The file as it was shown before, then what was exported
   m_pWBuf->BufLoadWindow(0);
@@ -1824,6 +1749,285 @@ void MainWindow::setCurrentOverlay(const QByteArray &abData, uint32_t nStart)
 }
 
 //-----------------------------------------------------------------------------
+// File > Batch Process: analyze each image in a folder (and optionally its
+// subfolders), saving each one's report as a log in an output folder, and
+// optionally extracting every JPEG in each file (master's
+// CJPEGsnoopDoc::DoBatchProcess). It needs no file open. The batch has its
+// own decoders, as on Windows, so the file shown stays as it was: the report
+// then lists what the batch did, and File > Reprocess shows the file's again.
+void MainWindow::onBatchProcess()
+{
+  CBatchDialog dlg(m_pAppConfig->batchLastInput(), m_pAppConfig->batchLastOutput(), this);
+
+  if(dlg.exec() != QDialog::Accepted)
+  {
+    return;
+  }
+
+  const BatchSettings sBatch = dlg.settings();
+  m_pAppConfig->setBatchFolders(sBatch.strInput, sBatch.strOutput);
+
+  const BatchList list = batchFileList(sBatch);
+  const QList<BatchFile> &files = list.files;
+
+  // Master said it was done, having done nothing (also when it couldn't
+  // read the folders)
+  if(files.isEmpty())
+  {
+    if(!list.folderErrors.isEmpty())
+    {
+      const BatchFolderError &sFirst = list.folderErrors.first();
+      const QString strFirst = QDir::toNativeSeparators(sFirst.strFolder);
+      QMessageBox msgNone(QMessageBox::Warning, "JPEGsnoop",
+                          sBatch.bExtractAll ? tr("There are no files to process in the folders that could be read.")
+                                             : tr("There are no .jpg or .jpeg files in the folders that could be read."),
+                          QMessageBox::Ok, this);
+      msgNone.setInformativeText(
+        (list.folderErrors.size() == 1)
+          ? tr("Couldn't read \"%1\": %2.").arg(strFirst, sFirst.strError)
+          : tr("Couldn't read %1 folders, such as \"%2\": %3.").arg(list.folderErrors.size()).arg(strFirst, sFirst.strError));
+      msgNone.exec();
+      return;
+    }
+
+    const QString strIn = QDir::toNativeSeparators(sBatch.strInput);
+    QString strNone = sBatch.bExtractAll ? tr("There are no files to process in \"%1\"").arg(strIn)
+                                         : tr("There are no .jpg or .jpeg files in \"%1\"").arg(strIn);
+    strNone += sBatch.bSubfolders ? tr(" or its subfolders.") : tr(".");
+    QMessageBox::information(this, "JPEGsnoop", strNone);
+    return;
+  }
+
+  // Master replaced them without asking
+  const QStringList astrExisting = batchExistingOutputs(sBatch, files);
+
+  if(!astrExisting.isEmpty())
+  {
+    const QString strFound =
+      (astrExisting.size() == 1)
+        ? tr("A file the batch writes already exists: \"%1\".").arg(astrExisting.first())
+        : tr("%1 files the batch writes already exist, such as \"%2\".").arg(astrExisting.size()).arg(astrExisting.first());
+    QMessageBox msgReplace(QMessageBox::Warning, "JPEGsnoop",
+                           strFound + " " + tr("Each one the batch writes again is replaced."), QMessageBox::Cancel, this);
+    msgReplace.setInformativeText(tr("Replace them?"));
+    QPushButton *pReplace = msgReplace.addButton(tr("Replace"), QMessageBox::DestructiveRole);
+    msgReplace.setDefaultButton(QMessageBox::Cancel);
+    msgReplace.exec();
+
+    if(msgReplace.clickedButton() != pReplace)
+    {
+      return;
+    }
+  }
+
+  if(!QDir().mkpath(sBatch.strOutput))
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("Couldn't create the output folder \"%1\".").arg(QDir::toNativeSeparators(sBatch.strOutput)));
+    return;
+  }
+
+  runBatch(sBatch, list);
+}
+
+// "1 file", "2 files"
+static QString countOf(qsizetype nCount, const QString &strThing)
+{
+  return QString("%1 %2%3").arg(nCount).arg(strThing, (nCount == 1) ? "" : "s");
+}
+
+// Process the files with the progress shown, then list what was done in the
+// report (in place of the file's, as on Windows) and say so. Cancel, or
+// closing the window, stops it after the file it is on. (Master showed only
+// a wait cursor, and couldn't be stopped.)
+void MainWindow::runBatch(const BatchSettings &sBatch, const BatchList &list)
+{
+  const QList<BatchFile> &files = list.files;
+  const qsizetype nFiles = files.size();
+  const qsizetype nFolderErrors = list.folderErrors.size();
+  CBatchProcess batch(m_pAppConfig, m_pDbSigs);
+  QList<CBatchProcess::Result> results;
+
+  {
+    QProgressDialog progress(this);
+    progress.setObjectName("batchProgress");
+    progress.setWindowTitle(tr("Batch Processing"));
+    progress.setCancelButtonText(tr("Cancel"));
+    progress.setRange(0, static_cast<int>(nFiles));
+    progress.setWindowModality(Qt::ApplicationModal);
+    progress.setAutoReset(false);
+    progress.setAutoClose(false);
+    progress.setMinimumDuration(0);
+    progress.setMinimumWidth(fontMetrics().horizontalAdvance(QLatin1Char('x')) * 50);
+    progress.show();
+    m_pBatchProgress = &progress;
+    const auto clearProgress = qScopeGuard([this]() { m_pBatchProgress = nullptr; });
+
+    for(qsizetype nInd = 0; nInd < nFiles; nInd++)
+    {
+      const QString strName = QFileInfo(files.at(nInd).strSrc).fileName();
+      progress.setLabelText(tr("Batch processing file %1 of %2:\n%3").arg(nInd + 1).arg(nFiles).arg(strName));
+      progress.setValue(static_cast<int>(nInd));
+      QCoreApplication::processEvents();
+
+      if(progress.wasCanceled())
+      {
+        break;
+      }
+
+      results << batch.process(files.at(nInd), sBatch.bExtractAll);
+    }
+
+    if(!progress.wasCanceled())
+    {
+      progress.setValue(static_cast<int>(nFiles));
+    }
+  }
+
+  const bool bStopped = (results.size() < nFiles);
+  qsizetype nLogs = 0;
+  qsizetype nErrors = 0;
+  uint32_t nExported = 0;
+
+  m_pDocLog->Clear();
+  m_pDocLog->AddLine("");
+  m_pDocLog->AddLineHdr("*** Batch Processing ***");
+  m_pDocLog->AddLine(QString("  Input folder:       [%1]").arg(QDir::toNativeSeparators(sBatch.strInput)));
+  m_pDocLog->AddLine(QString("  Output folder:      [%1]").arg(QDir::toNativeSeparators(sBatch.strOutput)));
+  m_pDocLog->AddLine(QString("  Process subfolders: [%1]").arg(sBatch.bSubfolders ? "Yes" : "No"));
+  m_pDocLog->AddLine(QString("  Extract all JPEGs:  [%1]").arg(sBatch.bExtractAll ? "Yes" : "No"));
+  m_pDocLog->AddLine("");
+
+  // The files in these weren't processed
+  if(nFolderErrors > 0)
+  {
+    for(const BatchFolderError &sError : list.folderErrors)
+    {
+      m_pDocLog->AddLineErr(QString("  ERROR: Couldn't read the folder [%1]: %2")
+                              .arg(QDir::toNativeSeparators(sError.strFolder), sError.strError));
+    }
+    m_pDocLog->AddLine("");
+  }
+
+  for(qsizetype nInd = 0; nInd < results.size(); nInd++)
+  {
+    const BatchFile &sFile = files.at(nInd);
+    const CBatchProcess::Result &sResult = results.at(nInd);
+
+    // Master's progress line for each file
+    m_pDocLog->AddLine(QString("  Batch processing file %1 of %2 (%3 %): [%4]")
+                         .arg(nInd + 1, 6)
+                         .arg(nFiles, 6)
+                         .arg(100.0 * static_cast<double>(nInd + 1) / static_cast<double>(nFiles), 6, 'f', 2)
+                         .arg(QDir::toNativeSeparators(sFile.strSrc)));
+
+    if(sResult.bLogWritten)
+    {
+      nLogs++;
+      m_pDocLog->AddLine(QString("    Log written to [%1]").arg(QDir::toNativeSeparators(sFile.strLog)));
+    }
+
+    if(!sResult.strError.isEmpty())
+    {
+      m_pDocLog->AddLineErr("    ERROR: " + sResult.strError);
+    }
+
+    if(sResult.bExtracted)
+    {
+      const ExtractAllResult &sExtract = sResult.sExtract;
+
+      for(qsizetype nPlace = 0; nPlace < sExtract.astrResults.size(); nPlace++)
+      {
+        if(sExtract.abResultOk.at(nPlace))
+          m_pDocLog->AddLine("  " + sExtract.astrResults.at(nPlace));
+        else
+          m_pDocLog->AddLineWarn("  " + sExtract.astrResults.at(nPlace));
+      }
+
+      m_pDocLog->AddLine("    Exported " + countOf(sExtract.nExported, "JPEG"));
+      nExported += sExtract.nExported;
+    }
+
+    if(!sResult.strError.isEmpty() || !sResult.sExtract.bWriteOk)
+    {
+      nErrors++;
+    }
+  }
+
+  m_pDocLog->AddLine("");
+
+  if(bStopped)
+  {
+    m_pDocLog->AddLineWarn(QString("  Batch processing stopped after %1 of %2").arg(results.size()).arg(countOf(nFiles, "file")));
+  }
+  else
+  {
+    m_pDocLog->AddLineGood(QString("  Batch processing complete: %1").arg(countOf(nFiles, "file")));
+  }
+
+  m_pDocLog->AddLine(QString("  Logs written:      %1").arg(nLogs));
+
+  if(sBatch.bExtractAll)
+  {
+    m_pDocLog->AddLine(QString("  JPEGs exported:    %1").arg(nExported));
+  }
+
+  if(nErrors > 0)
+  {
+    m_pDocLog->AddLineWarn(QString("  Files with errors: %1").arg(nErrors));
+  }
+  else
+  {
+    m_pDocLog->AddLine(QString("  Files with errors: %1").arg(nErrors));
+  }
+
+  if(nFolderErrors > 0)
+  {
+    m_pDocLog->AddLineWarn(QString("  Folders not read:  %1").arg(nFolderErrors));
+  }
+
+  if(!m_currentFile.isEmpty())
+  {
+    m_pDocLog->AddLine("");
+    m_pDocLog->AddLine(QString("  File > Reprocess shows the report of [%1] again").arg(m_currentFile));
+  }
+
+  QString strDone = bStopped ? tr("Batch processing stopped.") : tr("Batch processing complete.");
+  QString strCounts = tr("%1 of %2 processed: %3 written").arg(results.size()).arg(countOf(nFiles, tr("file")),
+                                                                                    countOf(nLogs, tr("log")));
+  if(sBatch.bExtractAll)
+  {
+    strCounts += tr(", %1 exported").arg(countOf(nExported, tr("JPEG")));
+  }
+  strCounts += ".";
+  if((nErrors > 0) && (nFolderErrors > 0))
+  {
+    strCounts += " " + tr("%1 had errors and %2 couldn't be read; the report lists them.")
+                         .arg(countOf(nErrors, tr("file")), countOf(nFolderErrors, tr("folder")));
+  }
+  else if(nErrors > 0)
+  {
+    strCounts += " " + tr("%1 had errors; the report lists them.").arg(countOf(nErrors, tr("file")));
+  }
+  else if(nFolderErrors > 0)
+  {
+    strCounts += " " + ((nFolderErrors == 1) ? tr("1 folder couldn't be read; the report lists it.")
+                                             : tr("%1 folders couldn't be read; the report lists them.").arg(nFolderErrors));
+  }
+
+  m_StatusBar->showMessage(strDone);
+
+  // Master said "Batch Processing Complete!"
+  if(m_pAppConfig->interactive())
+  {
+    QMessageBox msgDone(((nErrors > 0) || (nFolderErrors > 0)) ? QMessageBox::Warning : QMessageBox::Information,
+                        "JPEGsnoop", strDone, QMessageBox::Ok, this);
+    msgDone.setInformativeText(strCounts);
+    msgDone.exec();
+  }
+}
+
+//-----------------------------------------------------------------------------
 
 void MainWindow::onDetailedDecode()
 {
@@ -1881,7 +2085,16 @@ bool MainWindow::eventFilter(QObject *pObj, QEvent *pEvent)
 
 //-----------------------------------------------------------------------------
 
-void MainWindow::closeEvent(QCloseEvent *)
+void MainWindow::closeEvent(QCloseEvent *pEvent)
 {
+  // A batch in progress stops after the file it is on; the window stays open
+  // to show what was done
+  if(m_pBatchProgress)
+  {
+    m_pBatchProgress->cancel();
+    pEvent->ignore();
+    return;
+  }
+
   m_pAppConfig->RegistryStore();
 }

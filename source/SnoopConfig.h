@@ -61,6 +61,9 @@ public:
 
   uint32_t startPos() { return nPosStart; }
 
+  QString batchLastInput() { return strBatchLastInput; }
+  QString batchLastOutput() { return strBatchLastOutput; }
+
   bool autoReprocess() { return bReprocessAuto; }
   bool clipStats() { return bStatClipEn; }
   bool coachIdct() { return bCoachDecodeIdct; }
@@ -89,6 +92,13 @@ public:
   void setMaxErrors(int32_t errors) { nErrMaxDecodeScan = errors; }
   void setStartPos(uint32_t start) { nPosStart = start; }
   void setCoachIdct(bool b) { bCoachDecodeIdct = b; }
+  // The folders File > Batch Process used last (saved with the settings)
+  void setBatchFolders(const QString &strInput, const QString &strOutput)
+  {
+    strBatchLastInput = strInput;
+    strBatchLastOutput = strOutput;
+    bDirty = true;
+  }
 
   // Debug Log
   // - Used if DEBUG_LOG_OUT
