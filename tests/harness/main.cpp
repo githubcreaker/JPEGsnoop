@@ -136,6 +136,22 @@
 //     the report summary after apply, after the last step and after File >
 //     Reprocess.
 //
+// gui ... --offset STEPS
+//     For each file, print a "harness: offset file N" summary of the report
+//     and preview: the start offset, whether an SOI was found there and the
+//     scan decoded, the signature section's offset, the assessment, and the
+//     preview's size and MD5, with ref=same if it is the image a separate
+//     decode from that offset gives. After the first file (or file N with
+//     --offset-at N; 0 is before any file), print File > Offset's place in
+//     the menu, choose it and answer its dialog with STEPS, a comma-separated
+//     list of hex and dec (click those), value=TEXT (replace the field's
+//     text by typing TEXT, percent-encoded), type=TEXT (type it as the field
+//     is), fields, ok, cancel, return and escape; "+" chooses the menu item
+//     again for the steps after it. Print the dialog's fields (base, text,
+//     focus and selection) each time it shows, after hex and dec, and at the
+//     end, and the summary after each opening and after File > Reprocess.
+//     The batch mode takes --offset too, for the file opened first.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -225,6 +241,7 @@ static void usage()
           "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
           "                          [--auto-reprocess] [--no-decode-image]] [--about]\n"
           "                         [--edit STEPS [--edit-before]] [--overlay STEPS [--overlay-at N]]\n"
+          "                         [--offset STEPS [--offset-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -234,7 +251,7 @@ static void usage()
           "                         [--batch-unreadable REL]... [--batch-mode OCTAL:REL]...\n"
           "                         [--batch-link sym|hard:NAME=TARGET]... [--batch-compare] [--batch-open-missing]\n"
           "                         [--batch-cancel-after N] [--batch-close-after N] [--replace]\n"
-          "                         [--no-decode-image] [--overlay STEPS]\n"
+          "                         [--no-decode-image] [--overlay STEPS] [--offset STEPS]\n"
           "       any mode: [--scale F]\n");
 }
 
@@ -309,16 +326,22 @@ static QString withoutDetail(const QString &strLog)
   return astrKept.join('\n');
 }
 
-static QString previewMd5(CimgDecode &img)
+// An MD5 of an image's pixels (of no data for a null image)
+static QString imageMd5(const QImage &img)
 {
   QCryptographicHash hash(QCryptographicHash::Md5);
-  if(img.m_bDibTempReady && img.m_pDibTemp)
+  if(!img.isNull())
   {
-    const QImage imgRgb = img.m_pDibTemp->convertToFormat(QImage::Format_RGB32);
+    const QImage imgRgb = img.convertToFormat(QImage::Format_RGB32);
     for(int nY = 0; nY < imgRgb.height(); nY++)
       hash.addData(QByteArrayView(reinterpret_cast<const char *>(imgRgb.constScanLine(nY)), imgRgb.width() * 4));
   }
   return QString::fromLatin1(hash.result().toHex());
+}
+
+static QString previewMd5(CimgDecode &img)
+{
+  return imageMd5((img.m_bDibTempReady && img.m_pDibTemp) ? *img.m_pDibTemp : QImage());
 }
 
 // Decode strFile in non-interactive mode with the detailed decode as given
@@ -922,6 +945,8 @@ struct GuiOptions
   bool bEditBefore = false;       // --edit-before
   QString strOverlay;             // --overlay STEPS
   int nOverlayAt = 1;             // --overlay-at N
+  QString strOffset;              // --offset STEPS
+  int nOffsetAt = 1;              // --offset-at N
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -1382,6 +1407,194 @@ static void overlayMenu(MainWindow &window, const QString &strSteps, QTextStream
   window.reprocess();
   QCoreApplication::processEvents();
   out << "harness: overlay after reprocess: " << overlayReport(window) << "\n";
+  out.flush();
+}
+
+// What the report and preview show of the start offset (see --offset
+// above): the report's start offset, whether it found an SOI there and
+// decoded the scan, the signature section's offset, the assessment, and the
+// preview's size and MD5 and whether it is the image a separate decode of
+// strFile from that offset gives
+static QString offsetReport(MainWindow &window, const QString &strFile, const QString &strDbDir)
+{
+  const QString strLog = window.textEdit->toPlainText();
+  const QRegularExpressionMatch mStart =
+    QRegularExpression(QStringLiteral("^Start Offset: 0x([0-9a-fA-F]+)$"), QRegularExpression::MultilineOption)
+      .match(strLog);
+  const QRegularExpressionMatch mSig =
+    QRegularExpression(QStringLiteral("^  File Offset: +(\\d+) bytes$"), QRegularExpression::MultilineOption)
+      .match(strLog);
+  QString strAssess = QStringLiteral("-");
+  if(strLog.contains(QLatin1String("  ASSESSMENT not done as file offset non-zero")))
+    strAssess = QStringLiteral("skipped");
+  else if(strLog.contains(QLatin1String("  ASSESSMENT: ")))
+    strAssess = QStringLiteral("done");
+
+  Q_Viewer *pViewer = findViewer();
+  PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+  const QImage img = (pCanvas && pViewer->isVisible()) ? pCanvas->image() : QImage();
+  QString strRef = QStringLiteral("-");
+  if(mStart.hasMatch())
+  {
+    QString strRefLog;
+    QString strRefMd5;
+    if(decodeForDetail(strFile, false, mStart.captured(1).toUInt(nullptr, 16), QString(), strDbDir, strRefLog,
+                       strRefMd5))
+      strRef = (strRefMd5 == imageMd5(img)) ? QStringLiteral("same") : QStringLiteral("differs");
+  }
+
+  return QString("start=%1 soi=%2 scan=%3 sig=%4 assessment=%5 preview=%6 md5=%7 ref=%8")
+           .arg(mStart.hasMatch() ? ("0x" + mStart.captured(1).toUpper()) : QStringLiteral("-"))
+           .arg(strLog.contains(QLatin1String("*** Marker: SOI (xFFD8) ***")) ? 1 : 0)
+           .arg(strLog.contains(QLatin1String("  Compression stats:")) ? 1 : 0)
+           .arg(mSig.hasMatch() ? mSig.captured(1) : QStringLiteral("-"), strAssess,
+                img.isNull() ? QStringLiteral("none") : QString("%1x%2").arg(img.width()).arg(img.height()),
+                img.isNull() ? QStringLiteral("-") : imageMd5(img).left(8), strRef);
+}
+
+// File > Offset as a user chooses it (see --offset above). The dialog is
+// found by name, so the driver also builds with versions without it.
+static void offsetMenu(MainWindow &window, const QString &strSteps, const QString &strFile, const QString &strDbDir,
+                       QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("Offset..."));
+  if(!pAction)
+  {
+    out << "harness: menu Offset unavailable\n";
+    return;
+  }
+
+  // Where it is: the menu's title, the item before it and whether a
+  // separator is between them
+  {
+    QString strMenu = "-";
+    QString strBefore = "-";
+    bool bSeparator = false;
+    const QList<QObject *> objects = pAction->associatedObjects();
+    for(QObject *pObj : objects)
+    {
+      QMenu *pMenu = qobject_cast<QMenu *>(pObj);
+      if(!pMenu)
+        continue;
+      strMenu = pMenu->title();
+      const QList<QAction *> actions = pMenu->actions();
+      for(qsizetype nInd = actions.indexOf(pAction) - 1; nInd >= 0; nInd--)
+      {
+        if(!actions.at(nInd)->isSeparator())
+        {
+          strBefore = actions.at(nInd)->text();
+          break;
+        }
+        bSeparator = true;
+      }
+    }
+    out << "harness: offset menu=" << strMenu << " after=\"" << strBefore << "\" separator=" << (bSeparator ? 1 : 0)
+        << " enabled=" << (pAction->isEnabled() ? 1 : 0) << " tip=\"" << pAction->statusTip() << "\"\n";
+  }
+  if(!pAction->isEnabled())
+  {
+    out << "harness: menu Offset unavailable\n";
+    return;
+  }
+
+  const QStringList astrOpenings = strSteps.split('+');
+  QStringList astrSteps;
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QDialog *pDlg = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if(!pDlg || (pDlg->objectName() != QLatin1String("fileOffsetDialog")))
+      return;
+    // The offscreen platform activates a window a little after it shows:
+    // wait for that, as a user would. (It doesn't activate the dialog again
+    // after a message box, so focus then shows as none and inactive.)
+    if(!pDlg->property("harnessShown").toBool())
+    {
+      pDlg->setProperty("harnessShown", true);
+      static_cast<void>(QTest::qWaitFor([pDlg]() { return QApplication::activeWindow() == pDlg; }, 1000));
+    }
+    QLineEdit *pValue = pDlg->findChild<QLineEdit *>("offsetValue");
+    QRadioButton *pHex = pDlg->findChild<QRadioButton *>("baseHex");
+    QRadioButton *pDec = pDlg->findChild<QRadioButton *>("baseDecimal");
+    QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+    if(!pValue || !pHex || !pDec || !pButtons)
+    {
+      out << "harness: offset dialog widgets not found\n";
+      pDlg->reject();
+      return;
+    }
+
+    auto fields = [&]() {
+      QString strSel = QStringLiteral("none");
+      if(pValue->hasSelectedText())
+        strSel = (pValue->selectedText() == pValue->text()) ? QStringLiteral("all") : QStringLiteral("part");
+      const QWidget *pFocus = QApplication::focusWidget();
+      QString strFocus = !pFocus ? QStringLiteral("none")
+                                 : ((pFocus == pValue) ? QStringLiteral("value")
+                                                       : (pFocus->objectName().isEmpty()
+                                                            ? QString::fromLatin1(pFocus->metaObject()->className())
+                                                            : pFocus->objectName()));
+      if(QApplication::activeWindow() != pDlg)
+        strFocus += QStringLiteral("(inactive)");
+      return QString("base=%1 value=\"%2\" focus=%3 selected=%4")
+               .arg(pHex->isChecked() ? (pDec->isChecked() ? "both" : "hex") : (pDec->isChecked() ? "dec" : "none"),
+                    pValue->text(), strFocus, strSel);
+    };
+    out << "harness: offset dialog: " << pDlg->windowTitle() << " (" << fields() << ")\n";
+
+    while(!astrSteps.isEmpty())
+    {
+      const QString strStep = astrSteps.takeFirst();
+      if((strStep == "hex") || (strStep == "dec"))
+      {
+        // A refused change shows a message box, closed and printed
+        ((strStep == "hex") ? pHex : pDec)->click();
+        QCoreApplication::processEvents();
+        out << "harness: offset clicked " << strStep << " (" << fields() << ")\n";
+      }
+      else if(strStep.startsWith("value="))
+      {
+        pValue->clear();
+        QTest::keyClicks(pValue, QUrl::fromPercentEncoding(strStep.mid(6).toUtf8()));
+      }
+      else if(strStep.startsWith("type="))
+        QTest::keyClicks(pValue, QUrl::fromPercentEncoding(strStep.mid(5).toUtf8()));
+      else if(strStep == "fields")
+        out << "harness: offset fields (" << fields() << ")\n";
+      else if((strStep == "ok") || (strStep == "cancel") || (strStep == "return") || (strStep == "escape"))
+      {
+        out << "harness: offset dialog " << strStep << " (" << fields() << ")\n";
+        out.flush();
+        // A refused OK shows a message box: the steps left carry on after it
+        if(strStep == "return")
+          QTest::keyClick(pValue, Qt::Key_Return);
+        else if(strStep == "escape")
+          QTest::keyClick(pValue, Qt::Key_Escape);
+        else
+          pButtons->button((strStep == "ok") ? QDialogButtonBox::Ok : QDialogButtonBox::Cancel)->click();
+        return;
+      }
+      else
+        out << "harness: unknown offset step " << strStep << "\n";
+    }
+
+    out << "harness: offset dialog still open: cancelled\n";
+    pDlg->reject();
+  });
+  timer.start(50);
+
+  for(const QString &strOpening : astrOpenings)
+  {
+    astrSteps = strOpening.split(',', Qt::SkipEmptyParts);
+    pAction->trigger();
+    QCoreApplication::processEvents();
+    out << "harness: offset now: " << offsetReport(window, strFile, strDbDir) << "\n";
+  }
+  timer.stop();
+
+  window.reprocess();
+  QCoreApplication::processEvents();
+  out << "harness: offset after reprocess: " << offsetReport(window, strFile, strDbDir) << "\n";
   out.flush();
 }
 
@@ -1850,6 +2063,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     editSteps(window, opts.strEdit, out);
   }
 
+  // File > Offset before any file has been opened (--offset-at 0)
+  if(!opts.strOffset.isEmpty() && (opts.nOffsetAt == 0))
+  {
+    out << "harness: offset before any file\n";
+    offsetMenu(window, opts.strOffset, QString(), strSettingsDir, out);
+  }
+
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
   if(opts.bReprocessFirst)
@@ -1885,6 +2105,15 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
         out << "harness: overlay file " << nFileInd << ": " << overlayReport(window) << "\n";
         if(nFileInd == opts.nOverlayAt)
           overlayMenu(window, opts.strOverlay, out);
+      }
+
+      if((nRound == 0) && !opts.strOffset.isEmpty())
+      {
+        out << "harness: offset file " << nFileInd << ": " << offsetReport(window, strFile, strSettingsDir) << "\n";
+        if(nFileInd == opts.nOffsetAt)
+          offsetMenu(window, opts.strOffset, strFile, strSettingsDir, out);
+        if(!opts.strOverlay.isEmpty())
+          out << "harness: overlay with offset: " << overlayReport(window) << "\n";
       }
 
       if(nRound == 0)
@@ -2406,6 +2635,8 @@ static int runBatchMode(const QString &strFolder, const QStringList &astrOpen, c
   }
   if(!astrOpen.isEmpty() && !guiOpts.strOverlay.isEmpty())
     overlayMenu(window, guiOpts.strOverlay, out);
+  if(!astrOpen.isEmpty() && !guiOpts.strOffset.isEmpty())
+    offsetMenu(window, guiOpts.strOffset, astrOpen.last(), strTmpDir, out);
 
   QAction *pAction = findAction(window, QStringLiteral("Batch Process..."));
   if(!pAction)
@@ -2650,6 +2881,8 @@ static int runBatchMode(const QString &strFolder, const QStringList &astrOpen, c
         << " scan=" << (window.textEdit->toPlainText().contains("*** Decoding SCAN Data ***") ? 1 : 0) << "\n";
     if(!guiOpts.strOverlay.isEmpty())
       out << "harness: batch after reprocess overlay: " << overlayReport(window) << "\n";
+    if(!guiOpts.strOffset.isEmpty())
+      out << "harness: batch after reprocess offset: " << offsetReport(window, astrOpen.last(), strTmpDir) << "\n";
   }
 
   // Each log is the report File > Open shows for its file
@@ -2799,7 +3032,7 @@ int main(int argc, char **argv)
   QString strFormat;
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
-                             "--edit", "--overlay", "--batch" })
+                             "--edit", "--overlay", "--offset", "--batch" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -2827,6 +3060,8 @@ int main(int argc, char **argv)
       guiOpts.strEdit = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--overlay"))
       guiOpts.strOverlay = exportOpts.strOverlay = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--offset"))
+      guiOpts.strOffset = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--batch"))
       batchOpts.strSteps = args.at(nInd + 1);
     args.remove(nInd, 2);
@@ -2835,7 +3070,7 @@ int main(int argc, char **argv)
   // Options with a numeric value
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
-                             "--batch-cancel-after", "--batch-close-after" })
+                             "--offset-at", "--batch-cancel-after", "--batch-close-after" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -2858,6 +3093,8 @@ int main(int argc, char **argv)
       guiOpts.nDetailDlgAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--overlay-at"))
       guiOpts.nOverlayAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--offset-at"))
+      guiOpts.nOffsetAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

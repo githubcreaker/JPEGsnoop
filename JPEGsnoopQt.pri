@@ -81,6 +81,7 @@ SOURCES += \
     $$PWD/source/batchdialog.cpp \
     $$PWD/source/batchprocess.cpp \
     $$PWD/source/finddialog.cpp \
+    $$PWD/source/offsetdialog.cpp \
     $$PWD/source/overlaydialog.cpp \
     $$PWD/source/q_decodedetaildlg.cpp \
     $$PWD/source/reportview.cpp \
@@ -107,6 +108,7 @@ HEADERS += \
     $$PWD/source/batchdialog.h \
     $$PWD/source/batchprocess.h \
     $$PWD/source/finddialog.h \
+    $$PWD/source/offsetdialog.h \
     $$PWD/source/overlaydialog.h \
     $$PWD/source/q_decodedetaildlg.h \
     $$PWD/source/reportview.h \

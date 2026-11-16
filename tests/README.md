@@ -106,6 +106,20 @@ when it is installed, so Pillow needn't be installed separately).
       `cancel`, and the summary after `apply`, after the dialog closes and
       after File > Reprocess. `--export-menus` also says whether Export JPEG's
       Enable Overlays box is available.
+    - `--offset STEPS` prints a `harness: offset file N` summary of each file's
+      report and preview: the start offset, whether an SOI was found there and
+      the scan decoded, the signature section's offset, the assessment, and the
+      preview's size and MD5, with `ref=same` if it is the image a separate
+      decode from that offset gives. After the first file (or file N with
+      `--offset-at N`; `0` is before any file) it prints File > Offset's place
+      in the menu, chooses it and answers the dialog with STEPS: `hex` and `dec`
+      (click those), `value=TEXT` (replace the field's text by typing TEXT,
+      percent-encoded), `type=TEXT` (type it as the field is), `fields`, `ok`,
+      `cancel`, `return` and `escape`, with `+` to choose the menu item again.
+      It prints the dialog's fields (base, text, focus and selection) when it
+      shows and after `hex` and `dec`, and the summary after each opening and
+      after File > Reprocess. (The offscreen platform doesn't activate the
+      dialog again after a message box, so focus then shows as none.)
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -126,8 +140,9 @@ when it is installed, so Pillow needn't be installed separately).
     (`harness: tiff ... check=ok`);
   - `batch <folder> [<file>...] --batch STEPS` copies the folder to a
     temporary `batch/in`, so a batch can write beside its files. It opens any
-    files given (answering `--overlay`'s steps for the last), then chooses
-    File > Batch Process and answers its dialog with STEPS:
+    files given (answering `--overlay`'s and `--offset`'s steps for the
+    last), then chooses File > Batch Process and answers its dialog with
+    STEPS:
     - `in=PATH` and `out=PATH` type a folder: a path below the temporary
       `batch` folder, `/...` or `~...` as given, `raw:` then text typed as
       it is, or `-` for nothing;
@@ -154,6 +169,8 @@ when it is installed, so Pillow needn't be installed separately).
     - `--batch-cancel-after N` and `--batch-close-after N` click Cancel, or
       close the window, when the progress reaches N files.
     - `--batch-open-missing` opens a missing file afterwards.
+    - With `--overlay` or `--offset`, that summary is printed again once File
+      > Reprocess shows the file after the batch.
 
     It also prints the menu item's place, the progress dialog and its
     labels, the folders saved in the settings, and with a file open, the
@@ -184,8 +201,8 @@ GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F
 are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
 in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
 section, `A` in its "About" section, `T` in its "Select All and Copy"
-section, `FN` in its "Find" section, `OV` in its "File Overlay" section, and
-`BP` in its "Batch Process" section);
+section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
+`BP` in its "Batch Process" section, and `FO` in its "File > Offset" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

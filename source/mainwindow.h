@@ -90,6 +90,7 @@ private slots:
   void onDetailedDecode();
   void onFileOverlay();
   void onBatchProcess();
+  void onFileOffset();
   void onAbout();
 
 private:

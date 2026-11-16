@@ -1204,6 +1204,117 @@ The hard-linked export passes without the fix too: it was already renamed into p
 items not yet ported, such as File > Offset, Tools > Image Search, Lookup MCU Offset,
 Search Executable for DQT, and the signature database items.
 
+### File > Offset
+
+File > Offset did nothing: the menu item had no handler. On Windows it decodes the file
+from an offset, such as where a JPEG embedded in it starts. Now, as there:
+- **The menu item** ("Offset...") is in the File menu, between separators after Batch
+  Process.
+- **The dialog** ("Starting File Offset") has Offset (Bytes), Hex or Decimal, and the
+  offset. It opens in hex with the offset in use (`0x00000000` for a file just opened),
+  selected so typing replaces it. Hex and Decimal change the offset typed to that base.
+- **OK decodes the file from the offset:**
+  - the report starts there ("Start Offset: 0x0000062c");
+  - the preview shows the image found there;
+  - the signature section gives the offset, and the assessment is skipped, as master
+    does for any offset but 0.
+- **The offset applies until another file is opened,** which starts from 0 again:
+  - Reprocess keeps it;
+  - Export JPEG exports the JPEG at the offset, and its dialog shows it;
+  - a File Overlay stays in place;
+  - Batch Process decodes its files from their start, and leaves it in place.
+
+The dialog is `COffsetDialog` (`source/offsetdialog.cpp`).
+
+**Found and fixed** (all as on Windows 1.8.0):
+- **The scan at the new offset wasn't decoded:** master decoded the file again and only
+  then marked the image source changed. The scan decoder skips a scan when the source
+  is unchanged, so once a scan had been decoded (as when the file starts with a JPEG),
+  the decode from the new offset skipped its scan. The report lacked the scan's
+  decode, and the preview kept the image from before (from the code); the next
+  Reprocess put it right. The source is now marked changed first. With master's order,
+  the port's report from the new offset has no scan decode and no preview.
+- **Hex or Decimal lost the offset typed:** with text that wasn't a number in its base,
+  master said "Invalid hex string" (or decimal) and changed the offset to 0. Its code
+  noted that it should keep the choice instead. Now the choice goes back and the text
+  stays, with a message saying why. Text that is a number in the base clicked, such as
+  0x62C typed with Decimal chosen, is kept as it is.
+- **Offsets that can't be used:** master took an empty field as 0, and a number over 32
+  bits as 0xFFFFFFFF (from the code). It decoded past the end of the file as if 0x00
+  bytes were there: the report said "Expected marker 0xFF, got 0x00 @ offset
+  0x00001388" for a 2,747-byte file. OK now refuses each of these, and says why:
+  - an empty field;
+  - text that isn't a number in the base chosen;
+  - an offset at or past the end of the file (the message gives its size).
+
+  The dialog stays open.
+- **The menu item was always on:** with no file analyzed it did nothing, and its code
+  noted that it should be disabled. It is now on once a file has been opened, like the
+  Tools items. After a file that couldn't be opened, or was empty, it says why.
+
+**Changes from Windows:** spaces around the offset are ignored (master refused them).
+
+**Unchanged from Windows:** the dialog always opens in hex, and the offset isn't saved
+with the settings.
+
+**Also fixed:** `CimgDecode`'s constructor called `Reset()`, which reads
+`m_bScanErrorsDisable`, before `ResetState()` set it, as in master. When the flag read as
+set, `Reset()` also left the count of scan warnings unset. UBSan reported a load of 254
+in a decoder on the stack: the test driver's separate decode, for `ref=`. The app's
+decoders are on the heap, and no test had seen it there. The constructor now sets the
+flag, the count and the restart interval (copied by `Reset()` before a SOF sets it)
+first. Without this, 3 cases fail under UBSan.
+
+**Tests:** 39 new cases, 37 `FO` and 2 `BP` (493 in all). `gui --offset STEPS` prints
+the menu item's place. It answers the dialog with these steps: Hex, Decimal, text
+typed, OK, Cancel, Return and Escape. It prints:
+- the dialog's fields: base, text, focus and selection;
+- a summary of the report and preview: the start offset, whether an SOI was found
+  there and the scan decoded, the signature section's offset and the assessment;
+- the preview's size and MD5, with `ref=same` when it is the image a separate decode
+  from that offset gives.
+
+The summary is printed for each file, after each OK, and after File > Reprocess. The
+batch mode takes `--offset` for the file shown. The cases cover:
+- **The menu item:** off with no file or after a failed first open, and the message
+  after a missing or empty file.
+- **The offset:** in hex, with or without 0x, or in decimal, and with spaces around it.
+- **The keys:** OK, Return, Cancel and Escape.
+- **Two JPEGs in one file:** each one decoded, and the last byte.
+- **The scan decoded first:** a file that starts with a JPEG.
+- **Hex and Decimal:** switching both ways, and refusals.
+- **Each refused offset.**
+- **Where the offset applies:** kept by Reprocess and Export JPEG, reset by the next
+  file, alongside a File Overlay, and with Batch Process.
+
+On the previous commit 37 fail. The other two check what held because the offset never
+changed: the next file starts from 0, and a batch decodes its files from their start.
+Six deliberate breaks each fail their own cases:
+- **Master's order** (the source marked changed after the decode): the case with a
+  scan decoded first fails.
+- **Not starting the next file from 0:** the next-file case fails.
+- **The menu item always on:** the two cases with no file fail.
+- **Not checking that the file was analyzed:** the missing and empty file cases fail.
+- **Not checking the file's size:** the 3 cases past the end fail.
+- **Master's Hex and Decimal:** 4 cases fail.
+
+A seventh break, not selecting the offset when the dialog opens, failed nothing. A
+dialog selects its first field's text when it shows, as tabbing into it does, so the
+call that did it was taken out.
+
+**Checks:**
+- **All 493 pass** with and without ASan/UBSan.
+- **The layout:** the dialog was rendered offscreen at 1x and 2x and looked at.
+- **Not checked:**
+  - the dialog on the macOS platform;
+  - focus there after a message box (the offscreen platform doesn't activate the
+    dialog again).
+
+**Still open:** Developer ID signing and notarization (M5); latent code; the other menu
+items not yet ported, such as Tools > Image Search Fwd and Rev (which also set the
+offset), Lookup MCU Offset, Search Executable for DQT, and the signature database
+items.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

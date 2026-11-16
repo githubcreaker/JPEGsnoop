@@ -33,6 +33,7 @@
 #include "batchdialog.h"
 #include "batchprocess.h"
 #include "finddialog.h"
+#include "offsetdialog.h"
 #include "overlaydialog.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
@@ -242,7 +243,10 @@ void MainWindow::createActions(void)
   batchProcessAct = new QAction(tr("Batch Process..."), this);
   batchProcessAct->setStatusTip(tr("Start batch processing"));
   connect(batchProcessAct, &QAction::triggered, this, &MainWindow::onBatchProcess);
-  OffsetAct = new QAction(tr("Offset"), this);
+  OffsetAct = new QAction(tr("Offset..."), this);
+  OffsetAct->setStatusTip(tr("Start processing at an offset"));
+  OffsetAct->setEnabled(false);
+  connect(OffsetAct, &QAction::triggered, this, &MainWindow::onFileOffset);
 
   const QIcon printIcon = QIcon::fromTheme("document-print", QIcon(rsrcPath + "/fileprint.png"));
   printAct = new QAction(printIcon, tr("&Print..."), this);
@@ -702,6 +706,10 @@ void MainWindow::openFile(const QString &strPath)
 {
   m_currentFile = strPath;
 
+  // A new file is decoded from its start: File > Offset applies to the file
+  // it was chosen for, as on Windows (Reprocess and Export JPEG keep it)
+  m_pAppConfig->setStartPos(0);
+
   // A File Overlay is a change to try on the file it was made for (on
   // Windows it stayed in place for the next file opened, which was then
   // decoded with those bytes replaced). Reprocess keeps it.
@@ -952,6 +960,7 @@ void MainWindow::enableMenus()
 {
   saveLogAct->setEnabled(true);
   reprocessAct->setEnabled(true);
+  OffsetAct->setEnabled(true);
   imgSearchFwdAct->setEnabled(true);
   imgSearchRevAct->setEnabled(true);
   lookupMcuOffAct->setEnabled(true);
@@ -1746,6 +1755,41 @@ void MainWindow::setCurrentOverlay(const QByteArray &abData, uint32_t nStart)
     m_pWBuf->OverlayInstall(0, reinterpret_cast<unsigned char *>(abCopy.data()), static_cast<uint32_t>(abCopy.size()),
                             nStart, 0, 0, 0, 0, 0, 0, 0);
   }
+}
+
+//-----------------------------------------------------------------------------
+// File > Offset: decode the file from an offset, such as where a JPEG
+// embedded in it starts (master's CJPEGsnoopDoc::OnFileOffset). The offset
+// applies to the file shown: Reprocess and Export JPEG keep it, and opening
+// a file starts from 0 again. A File Overlay stays in place.
+//
+// Master marked the image source changed only after decoding the file again,
+// so once a scan had been decoded (from a file that starts with a JPEG, say)
+// the decode from the new offset skipped its scan: the report lacked it and
+// the preview kept the old image (from the code). reprocess() marks it first.
+void MainWindow::onFileOffset()
+{
+  if(m_currentFile.isEmpty())
+  {
+    return;
+  }
+
+  // The menu stays enabled after a file that couldn't be opened
+  if(!m_bFileAnalyzed)
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("The file shown couldn't be analyzed, so it can't be decoded from an offset."));
+    return;
+  }
+
+  COffsetDialog dlg(m_pAppConfig->startPos(), static_cast<quint64>(m_lFileSize), this);
+  if(dlg.exec() != QDialog::Accepted)
+  {
+    return;
+  }
+
+  m_pAppConfig->setStartPos(dlg.offset());
+  reprocess();
 }
 
 //-----------------------------------------------------------------------------

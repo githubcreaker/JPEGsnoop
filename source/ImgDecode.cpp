@@ -132,6 +132,13 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
   m_pPixValCb = 0;
   m_pPixValCr = 0;
 
+  // Read or copied by Reset() before anything else sets them: master read
+  // m_bScanErrorsDisable before ResetState() set it (UBSan saw a value of
+  // 254 in a decoder on the stack), and then left m_nWarnBadScanNum unset
+  m_bScanErrorsDisable = false;
+  m_nWarnBadScanNum = 0;
+  m_nRestartInterval = 0;
+
   // Reset the image decoding state
   Reset();
 

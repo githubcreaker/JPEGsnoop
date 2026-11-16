@@ -2069,6 +2069,113 @@ batch_case("BP_overlay_not_used", BP_RUN, "^harness: cat:   version    = \\[1\\.
 batch_case("BP_overlay_kept", BP_RUN, "harness: batch after reprocess overlay: " + OVL_VERSION, names=BP_OPEN,
            extra="--overlay on,offset=0B,value=0102,ok")
 
+# --- FO: File > Offset ----------------------------------------------------------------
+# It did nothing. As on Windows, its dialog takes the offset to decode the file
+# from, in hex or decimal, and OK decodes the file again from there. gui
+# --offset answers the dialog and prints its fields, then a summary of the
+# report and preview: the start offset, whether an SOI was found there and the
+# scan decoded, the signature section's offset, the assessment, and the
+# preview's size and MD5, with ref=same if it is the image a separate decode
+# from that offset gives. e_two.jpg is 100 junk bytes, a 4:4:4 JPEG at 0x64, 100
+# more, a 4:2:0 JPEG at 0x62C (1067 bytes) and 100 more: 2747 bytes (0xABB).
+def offset_case(cid, steps, expect, names=("e_two.jpg",), extra="", forbid="-"):
+    case(cid, "FO", "gui", list(names), ("--offset " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+FO_SECOND = "start=0x0000062C soi=1 scan=1 sig=1580 assessment=skipped preview=64x48 md5=[0-9a-f]{8} ref=same$"
+FO_START = "start=0x00000000 soi=0 scan=0 sig=- assessment=- preview=none md5=- ref=same$"
+FO_DIALOG = "harness: offset dialog: Starting File Offset \\("
+
+# The menu item, where Windows has it; off until a file is open
+offset_case("FO_menu", "cancel",
+            'harness: offset menu=&File after="Batch Process\\.\\.\\." separator=1 enabled=1 '
+            'tip="Start processing at an offset"$')
+offset_case("FO_off_no_file", "cancel", "harness: offset menu=&File .* enabled=0 ", extra="--offset-at 0")
+offset_case("FO_off_failed_open", "cancel", "harness: offset menu=&File .* enabled=0 ", names=("f4_no_such_file.jpg",))
+# The menu stays on after a file that couldn't be opened, or was empty
+for cid, name in (("FO_not_analyzed", "f4_no_such_file.jpg"), ("FO_not_analyzed_empty", "f4_empty.jpg")):
+    offset_case(cid, "cancel",
+                "harness: message box: The file shown couldn't be analyzed, so it can't be decoded from an offset\\.$",
+                names=("e_two.jpg", name), extra="--offset-at 2")
+
+# The dialog: as on Windows it opens in hex with the offset in use, which is
+# selected so typing replaces it
+offset_case("FO_dialog_opens", "cancel", FO_DIALOG + 'base=hex value="0x00000000" focus=value selected=all\\)$')
+offset_case("FO_dialog_shows_offset", "value=62C,ok+cancel", FO_DIALOG + 'base=hex value="0x0000062C" ')
+offset_case("FO_typing_replaces", "type=62C,ok", "harness: offset now: " + FO_SECOND)
+
+# OK decodes the file from the offset, in hex (with or without 0x) or decimal
+offset_case("FO_hex", "value=62C,ok", "harness: offset now: " + FO_SECOND)
+offset_case("FO_hex_prefix", "value=0x62c,ok", "harness: offset now: " + FO_SECOND)
+offset_case("FO_decimal", "dec,value=1580,ok", "harness: offset now: " + FO_SECOND)
+offset_case("FO_spaces", "value=%20%2062C%20,ok", "harness: offset now: " + FO_SECOND)
+offset_case("FO_return", "value=62C,return", "harness: offset now: " + FO_SECOND)
+offset_case("FO_cancel", "value=62C,cancel", "harness: offset now: " + FO_START)
+offset_case("FO_escape", "value=62C,escape", "harness: offset now: " + FO_START)
+# Master decoded the file again without first marking the image source
+# changed (only after), so once a scan had been decoded, as when the file
+# starts with a JPEG, the scan at the new offset wasn't: the report had no scan
+# decode and the preview kept the old image. fo_start_two.jpg is a 4:4:4 JPEG
+# (1380 bytes), 100 junk bytes, then a 4:2:0 JPEG at 0x5C8.
+write("fo_start_two.jpg", c444 + junk + c420)
+offset_case("FO_after_scan_decoded", "value=5C8,ok",
+            "harness: offset now: start=0x000005C8 soi=1 scan=1 sig=1480 assessment=skipped preview=64x48 "
+            "md5=[0-9a-f]{8} ref=same$", names=("fo_start_two.jpg",))
+offset_case("FO_new_offset_decoded", "value=64,ok+value=62C,ok", "harness: offset now: " + FO_SECOND)
+offset_case("FO_first_offset_decoded", "value=64,ok",
+            "harness: offset now: start=0x00000064 soi=1 scan=1 sig=100 assessment=skipped preview=64x48 "
+            "md5=[0-9a-f]{8} ref=same$")
+offset_case("FO_back_to_start", "value=64,ok+value=0,ok", "harness: offset now: " + FO_START)
+# The last byte is the last offset
+offset_case("FO_last_byte", "value=ABA,ok",
+            "harness: offset now: start=0x00000ABA soi=0 scan=0 sig=- assessment=- preview=none md5=- ref=same$")
+
+# Hex and Decimal change the offset typed to that base, as on Windows
+offset_case("FO_to_decimal", "value=62C,dec,cancel", 'harness: offset clicked dec \\(base=dec value="1580" ')
+offset_case("FO_to_hex", "dec,value=1580,hex,cancel", 'harness: offset clicked hex \\(base=hex value="0x0000062C" ')
+# A number in the base clicked but not the one it was typed in is kept
+offset_case("FO_typed_in_other_base", "dec,value=0x62C,hex,ok", "harness: offset now: " + FO_SECOND)
+# Windows said "Invalid hex string" and changed the offset to 0; the choice
+# now goes back, keeping the text
+offset_case("FO_switch_refused", "value=zz,dec,cancel",
+            'harness: message box: "zz" isn\'t a hex or decimal number\\.$')
+offset_case("FO_switch_refused_keeps", "value=zz,dec,cancel", 'harness: offset clicked dec \\(base=hex value="zz" ')
+offset_case("FO_switch_too_large", "value=FFFFFFFFFFFFFFFFFFFF,dec,cancel",
+            'harness: message box: "FFFFFFFFFFFFFFFFFFFF" is too large for an offset\\.$')
+
+# OK refuses an offset it can't use, saying why, and the dialog stays open.
+# Windows took any 32-bit number, and decoded past the end of the file as if
+# 0x00 bytes were there.
+for cid, steps, message in (
+        ("FO_empty", "value=,ok", "Type the offset to decode the file from\\."),
+        ("FO_bad_hex", "value=0x1G,ok", '"0x1G" isn\'t a hex number\\. Type digits 0-9 and A-F, with or without 0x\\.'),
+        ("FO_bad_decimal", "dec,value=1.5,ok", '"1\\.5" isn\'t a decimal number\\. Type digits 0-9 only\\.'),
+        ("FO_past_end", "value=ABB,ok", "The offset must be less than the file's size, 2747 bytes \\(0x00000ABB\\)\\."),
+        ("FO_past_32_bits", "value=100000000,ok",
+         "The offset must be less than the file's size, 2747 bytes \\(0x00000ABB\\)\\.")):
+    offset_case(cid, steps, "harness: message box: " + message + "$")
+offset_case("FO_refused_stays_open", "value=ABB,ok,value=62C,ok", "harness: offset now: " + FO_SECOND)
+
+# The offset lasts until another file is opened, as on Windows: Reprocess and
+# Export JPEG use it
+offset_case("FO_reprocess_keeps", "value=62C,ok", "harness: offset after reprocess: " + FO_SECOND)
+offset_case("FO_next_file_resets", "value=62C,ok", "harness: offset file 2: start=0x00000000 soi=0 ",
+            names=("e_two.jpg", "e_two.jpg"))
+offset_case("FO_export_dialog", "value=62C,ok",
+            "harness: dialog: Export JPEG Settings \\(Source file start offset: 0x0000062c, ", extra="--export-menus")
+offset_case("FO_export_second", "value=62C,ok", "harness: menu Export JPEG\\.\\.\\. wrote=1 size=1067$",
+            extra="--export-menus")
+# A File Overlay stays in place (here on the second JPEG's APP0 version)
+offset_case("FO_overlay_kept", "value=62C,ok",
+            "harness: overlay with offset: version=\\[1\\.2\\] overlays=1 len=2 offset=0x00000637 "
+            "header=2@0x00000637$", extra="--overlay on,offset=637,value=0102,ok")
+# A batch decodes its files from their start, and leaves the offset in place
+batch_case("BP_offset_not_used", BP_RUN, "^harness: cat: Start Offset: 0x00000000$", names=("bp_tree", "e_two.jpg"),
+           extra="--offset value=62C,ok --batch-cat out/a.jpg.txt")
+batch_case("BP_offset_kept", BP_RUN, "harness: batch after reprocess offset: " + FO_SECOND,
+           names=("bp_tree", "e_two.jpg"), extra="--offset value=62C,ok")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")
