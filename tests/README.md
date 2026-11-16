@@ -82,6 +82,20 @@ when it is installed, so Pillow needn't be installed separately).
       After a copy it also prints the clipboard's formats, the colours and
       fonts in its HTML, and the report's own colours.
 
+      Edit > Find's steps: `find` and `findnext` (choose Edit > Find or Find
+      Next), `key:find` and `key:findnext` (Cmd+F, Cmd+G), and in the Find
+      dialog `what:TEXT` (type TEXT, percent-encoded, in place of its text),
+      `case`, `word`, `up`, `down` (click those options), `next` (click Find
+      Next), `return`, `escape` and `cancel`. `select:TEXT` selects the first
+      TEXT in the report, `line:N` and `line:end` put the caret at the start of
+      line N or at the end, `cover` moves the dialog over the selection, `top`
+      moves the main window to the top of the screen, and `activate` brings it
+      to the front. With any of these, each step also prints a `harness: find`
+      line: which Find items are enabled, the dialog and its fields, the
+      selection's line, length and text and which match of the dialog's text it
+      is, where the dialog is (`over` it, `above`, `below` or `beside`), and
+      the status bar's message.
+
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
   - `export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
@@ -121,8 +135,8 @@ Case ids start with the finding they cover in
 GUI behaviour, `L` leaks, `M` macOS; `XP` covers the UTF-16 EXIF tags; `F1`–`F10`
 are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
 in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
-section, `A` in its "About" section, and `T` in its "Select All and Copy"
-section);
+section, `A` in its "About" section, `T` in its "Select All and Copy"
+section, and `FN` in its "Find" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

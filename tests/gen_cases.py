@@ -1553,6 +1553,98 @@ edit_case("T_next_file_clears", "state,selectall",
           "harness: edit state: selected=none chars=[0-9]+ copy=0 ", names=("ok_444.jpg", "ok_420.jpg"),
           forbid="harness: edit state: selected=(all|part)|harness: edit state: selected=none chars=[0-9]+ copy=1")
 
+# --- FN: Edit > Find and Find Next (the report) ----------------------------------
+# Neither item did anything. As on Windows (MFC's rich edit view), Find shows a
+# modeless dialog and Find Next repeats its last search. gui --edit's Find steps
+# also print a "harness: find" line after each step: the Find items enabled, the
+# dialog and its fields, the selection and which match it is, where the dialog
+# is and the status bar's message. ok_444.jpg's report has "Precision" on lines
+# 25, 42 and 57, "SOF" four times (once as "SOF0") and "Calvin" once, on line 1;
+# loading a file leaves the caret at the end of the report.
+def find_case(cid, steps, expect, names=("ok_444.jpg",), extra="", forbid="-"):
+    case(cid, "FN", "gui", list(names), ("--edit " + steps + " " + extra).strip(), timeout=30,
+         expect=expect, forbid=forbid)
+
+
+FIND_MSG = 'status="(Cannot find|Reached)'
+find_case("FN_find_off_before_file", "find", "harness: find find: find=0 findnext=0 dialog=hidden ",
+          extra="--edit-before")
+find_case("FN_dialog_opens", "find",
+          'harness: find find: find=1 findnext=0 dialog=active what="" button=0 case=0 word=0 dir=down sel=none ')
+# Find is on while the report has text, as Select All: also for an error
+for cid, name in (("FN_find_empty_file", "s_empty.jpg"), ("FN_find_failed_open", "f4_no_such_file.jpg")):
+    find_case(cid, "find", "harness: find find: find=1 findnext=0 dialog=active ", names=(name,))
+# The dialog's Find Next is off while its text is empty; Edit > Find Next is
+# off until a search has been made
+find_case("FN_button_off_when_empty", "find,what:x,what:", 'harness: find what:: .* what="" button=0 ')
+find_case("FN_next_off_until_search", "find,what:Precision",
+          'harness: find what:Precision: find=1 findnext=0 dialog=active what="Precision" button=1 ')
+# The first search goes on from the top when nothing follows the caret (at the
+# report's end after loading), without a message
+find_case("FN_first_search_wraps", "find,what:Precision,next",
+          'harness: find next: find=1 findnext=1 dialog=active .* sel=L25\\+9 "Precision" match=1/3 ',
+          forbid=FIND_MSG)
+find_case("FN_return_finds", "find,what:Precision,return", 'harness: find return: .* match=1/3 ')
+find_case("FN_next_goes_on", "line:1,find,what:Precision,next,next,next",
+          'harness: find next: .* sel=L57\\+9 "Precision" match=3/3 ', forbid=FIND_MSG)
+# After the last match the search stops once, with a beep and a message, and
+# the next one goes on from the top (Windows only beeps)
+find_case("FN_end_stops", "line:1,find,what:Precision,next,next,next,next",
+          'harness: find next: .* match=3/3 dialog-at=[a-z]+ '
+          'status="Reached the end of the report: Find Next goes on from the top"$')
+find_case("FN_end_then_top", "line:1,find,what:Precision,next,next,next,next,next",
+          'harness: find next: .* match=1/3 dialog-at=[a-z]+ status=""$')
+find_case("FN_up", "line:end,find,what:Precision,up,next,next", 'harness: find next: .* dir=up .* match=2/3 ',
+          forbid=FIND_MSG)
+find_case("FN_up_start_stops", "line:end,find,what:Precision,up,next,next,next,next",
+          'harness: find next: .* match=1/3 dialog-at=[a-z]+ '
+          'status="Reached the start of the report: Find Next goes on from the bottom"$')
+find_case("FN_up_then_bottom", "line:end,find,what:Precision,up,next,next,next,next,next",
+          'harness: find next: .* match=3/3 dialog-at=[a-z]+ status=""$')
+find_case("FN_not_found", "find,what:nosuchtext,next",
+          'harness: find next: .* sel=none match=0/0 dialog-at=- status="Cannot find "nosuchtext""$')
+find_case("FN_ignores_case", "find,what:precision,next", 'harness: find next: .* sel=L25\\+9 "Precision" match=1/3 ')
+find_case("FN_match_case", "find,what:precision,case,next", 'harness: find next: .* status="Cannot find "precision""$')
+find_case("FN_part_of_word", "find,what:SOF,next", 'harness: find next: .* sel=L54\\+3 "SOF" match=1/4 ')
+find_case("FN_whole_word", "find,what:SOF,word,next", 'harness: find next: .* status="Cannot find "SOF""$')
+# A search starts after the selection's start, or at the caret
+find_case("FN_from_selection", "select:Precision,find,next", 'harness: find next: .* match=2/3 ', forbid=FIND_MSG)
+find_case("FN_from_caret", "line:40,find,what:Precision,next", 'harness: find next: .* match=2/3 ', forbid=FIND_MSG)
+# With one match, selected, a new search finds it again rather than nothing
+find_case("FN_only_match_again", "select:SOF0,find,next", 'harness: find next: .* sel=L54\\+4 "SOF0" match=1/1 ',
+          forbid=FIND_MSG)
+# Edit > Find Next (and Cmd+G) repeats the last search, from the selection
+find_case("FN_menu_find_next", "find,what:Precision,next,cancel,activate,findnext",
+          'harness: find findnext: find=1 findnext=1 dialog=hidden .* match=2/3 ')
+find_case("FN_find_next_from_caret", "find,what:Precision,next,cancel,activate,line:50,findnext",
+          'harness: find findnext: .* match=3/3 ')
+find_case("FN_key_find", "key:find", 'harness: find key:find: find=1 findnext=0 dialog=active ')
+find_case("FN_key_find_next", "key:find,what:Precision,return,escape,activate,key:findnext",
+          'harness: find key:findnext: find=1 findnext=1 dialog=hidden .* match=2/3 ')
+find_case("FN_cancel_closes", "find,cancel", 'harness: find cancel: find=1 findnext=0 dialog=hidden ')
+find_case("FN_escape_closes", "find,escape", 'harness: find escape: find=1 findnext=0 dialog=hidden ')
+# The dialog holds the selected text when it is on one line, otherwise the
+# last text searched for, and the last search's options; while it is open,
+# Find only brings it to the front
+find_case("FN_text_from_selection", "select:Huffman,find", 'harness: find find: .* what="Huffman" button=1 ')
+find_case("FN_text_kept_for_lines", "find,what:Precision,next,cancel,selectall,find",
+          'harness: find find: find=1 findnext=1 dialog=active what="Precision" ')
+find_case("FN_options_kept", "find,what:precision,case,up,next,cancel,line:1,find",
+          'harness: find find: find=1 findnext=1 dialog=active what="precision" button=1 case=1 word=0 dir=up ')
+find_case("FN_open_dialog_kept", "find,what:abc,find", 'harness: find find: .* what="abc" ')
+# The dialog moves off the text found when it covers it: above it, or below it
+# when there's no room above (as on Windows)
+find_case("FN_dialog_moves_up", "select:SOF0,find,cover,next", 'harness: find next: .* match=1/1 dialog-at=above ')
+find_case("FN_dialog_moves_down", "top,select:Calvin,find,cover,next",
+          'harness: find next: .* match=1/1 dialog-at=below ')
+# Searching doesn't change the report
+find_case("FN_report_unchanged", "find,what:Precision,next,next,return,escape",
+          "harness: edit escape: .* report=same ", forbid="report=changed")
+# The last search lasts into the next file, where it starts afresh at the
+# caret (at the end, so it goes on from the top). File 1's Find Next is off.
+find_case("FN_next_file", "findnext,find,what:Precision,next,next,next,cancel,activate",
+          'harness: find findnext: find=1 findnext=1 dialog=hidden .* match=1/3 ', names=("ok_444.jpg", "ok_444.jpg"))
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

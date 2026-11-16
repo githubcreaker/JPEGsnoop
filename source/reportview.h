@@ -35,10 +35,27 @@ class CReportView : public QPlainTextEdit
 public:
   explicit CReportView(QWidget *pParent = nullptr);
 
+  // Edit > Find and Find Next: selects the next match of strFind after the
+  // selection's start (or before it, with bDown false) and returns true, or
+  // returns false if there is none. As in MFC's rich edit view on Windows,
+  // the first search that finds nothing goes on from the other end of the
+  // report, as far as where the search started; after that, reaching the end
+  // returns false once and the next search goes round again.
+  bool findText(const QString &strFind, bool bDown, bool bCase, bool bWord);
+
+  // Starts a new search from the selection: Find... does this, and so does a
+  // change to the report
+  void startNewSearch() { m_bFirstSearch = true; }
+
 protected:
   // The selection as plain text and HTML, the HTML with the coloured lines in
   // their colours for a light background
   QMimeData *createMimeDataFromSelection() const override;
+
+private:
+  bool m_bFirstSearch = true;     // the next search starts a new one
+  bool m_bWrapAllowed = false;    // it may go on from the other end
+  int m_nSearchStart = 0;         // where the search started
 };
 
 #endif // REPORTVIEW_H

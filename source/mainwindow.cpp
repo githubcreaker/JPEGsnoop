@@ -29,6 +29,7 @@
 #include "DbSigs.h"
 #include "General.h"
 #include "aboutdialog.h"
+#include "finddialog.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
@@ -265,10 +266,11 @@ void MainWindow::createActions(void)
   undoAct->setShortcuts(QKeySequence::Undo);
   undoAct->setEnabled(false);
 
-  // Edit > Copy and Select All act on the report, as on Windows. Copy is
-  // enabled while part of the report is selected, and Select All while the
-  // report has any text: also when it only holds the error for a file that
-  // couldn't be opened or was empty. (isEmpty() takes constant time.)
+  // Edit > Copy, Select All, Find and Find Next act on the report, as on
+  // Windows. Copy is enabled while part of the report is selected; Select All
+  // and Find while the report has any text (also when it only holds the error
+  // for a file that couldn't be opened or was empty); and Find Next while it
+  // has text and there has been a search. See updateTextActions().
   copyAct = new QAction(tr("&Copy"), this);
   copyAct->setShortcuts(QKeySequence::Copy);
   copyAct->setEnabled(false);
@@ -279,16 +281,18 @@ void MainWindow::createActions(void)
   selectAllAct->setShortcuts(QKeySequence::SelectAll);
   selectAllAct->setEnabled(false);
   connect(selectAllAct, &QAction::triggered, this, &MainWindow::onSelectAll);
-  connect(textEdit, &QPlainTextEdit::textChanged, this,
-          [this]() { selectAllAct->setEnabled(!textEdit->document()->isEmpty()); });
 
   findAct = new QAction(tr("Find..."), this);
   findAct->setShortcuts(QKeySequence::Find);
   findAct->setEnabled(false);
+  connect(findAct, &QAction::triggered, this, &MainWindow::onFind);
 
   findNextAct = new QAction(tr("Find Next"), this);
   findNextAct->setShortcuts(QKeySequence::FindNext);
   findNextAct->setEnabled(false);
+  connect(findNextAct, &QAction::triggered, this, &MainWindow::onFindNext);
+
+  connect(textEdit, &QPlainTextEdit::textChanged, this, &MainWindow::updateTextActions);
 
   adjustAct = new QAction(tr("Adjust..."), this);
   adjustAct->setEnabled(false);
@@ -927,7 +931,6 @@ void MainWindow::enableMenus()
 {
   saveLogAct->setEnabled(true);
   reprocessAct->setEnabled(true);
-  findAct->setEnabled(true);
   imgSearchFwdAct->setEnabled(true);
   imgSearchRevAct->setEnabled(true);
   lookupMcuOffAct->setEnabled(true);
@@ -947,6 +950,143 @@ void MainWindow::onSelectAll()
   // as active and the keyboard can extend it
   textEdit->setFocus(Qt::OtherFocusReason);
   textEdit->selectAll();
+}
+
+//-----------------------------------------------------------------------------
+
+// The Edit items that depend on the report's text (isEmpty() takes constant
+// time; this runs for each line the decoder adds)
+void MainWindow::updateTextActions()
+{
+  const bool bText = !textEdit->document()->isEmpty();
+  selectAllAct->setEnabled(bText);
+  findAct->setEnabled(bText);
+  findNextAct->setEnabled(bText && !m_strFind.isEmpty());
+}
+
+//-----------------------------------------------------------------------------
+
+// Edit > Find: shows the Find dialog, which stays open while searching, as on
+// Windows. Shown afresh, it holds the selected text if that is on one line,
+// otherwise the last text searched for, and the last search's options; if it
+// is already open it is only brought to the front. Either way the next search
+// starts from the selection.
+void MainWindow::onFind()
+{
+  textEdit->startNewSearch();
+
+  if(!m_pFindDlg)
+  {
+    m_pFindDlg = new CFindDialog(this);
+    connect(m_pFindDlg, &CFindDialog::findNext, this, &MainWindow::findFromDialog);
+  }
+
+  if(!m_pFindDlg->isVisible())
+  {
+    QString strFind = m_strFind;
+    const QTextCursor cursor = textEdit->textCursor();
+    const QTextDocument *pDoc = textEdit->document();
+    if(cursor.hasSelection() &&
+       (pDoc->findBlock(cursor.selectionStart()) == pDoc->findBlock(cursor.selectionEnd())))
+    {
+      const QString strSel = cursor.selectedText();
+      if(!strSel.contains(QLatin1Char('\n')) && !strSel.contains(QLatin1Char('\r')) &&
+         !strSel.contains(QChar::LineSeparator))
+        strFind = strSel;
+    }
+    m_pFindDlg->setOptions(strFind, m_bFindDown, m_bFindCase, m_bFindWord);
+  }
+
+  m_pFindDlg->show();
+  m_pFindDlg->raise();
+  m_pFindDlg->activateWindow();
+}
+
+//-----------------------------------------------------------------------------
+
+// Edit > Find Next: the last search again
+void MainWindow::onFindNext()
+{
+  findInReport();
+}
+
+//-----------------------------------------------------------------------------
+
+// The Find dialog's Find Next: becomes the search Find Next repeats. If the
+// text found is under the dialog, the dialog moves out of its way.
+void MainWindow::findFromDialog(const QString &strFind, bool bDown, bool bCase, bool bWord)
+{
+  m_strFind = strFind;
+  m_bFindDown = bDown;
+  m_bFindCase = bCase;
+  m_bFindWord = bWord;
+  updateTextActions();
+
+  if(findInReport())
+    moveFindDialogOffSelection();
+}
+
+//-----------------------------------------------------------------------------
+
+// Searches the report for the last text searched for. When it finds nothing,
+// Windows only beeps; this also says why in the status bar, which a search
+// that finds something clears.
+bool MainWindow::findInReport()
+{
+  if(textEdit->findText(m_strFind, m_bFindDown, m_bFindCase, m_bFindWord))
+  {
+    if(!m_strFindStatus.isEmpty() && (m_StatusBar->currentMessage() == m_strFindStatus))
+      m_StatusBar->clearMessage();
+    m_strFindStatus.clear();
+    return true;
+  }
+
+  QApplication::beep();
+
+  QTextDocument::FindFlags eFlags;
+  if(m_bFindCase)
+    eFlags |= QTextDocument::FindCaseSensitively;
+  if(m_bFindWord)
+    eFlags |= QTextDocument::FindWholeWords;
+  if(m_strFind.isEmpty() || textEdit->document()->find(m_strFind, 0, eFlags).isNull())
+    m_strFindStatus = tr("Cannot find \"%1\"").arg(m_strFind);
+  else if(m_bFindDown)
+    m_strFindStatus = tr("Reached the end of the report: Find Next goes on from the top");
+  else
+    m_strFindStatus = tr("Reached the start of the report: Find Next goes on from the bottom");
+  m_StatusBar->showMessage(m_strFindStatus);
+  return false;
+}
+
+//-----------------------------------------------------------------------------
+
+// As on Windows: when the Find dialog covers the text found, it moves above
+// it, or below it if there isn't room above
+void MainWindow::moveFindDialogOffSelection()
+{
+  if(!m_pFindDlg || !m_pFindDlg->isVisible())
+    return;
+
+  const QTextCursor cursor = textEdit->textCursor();
+  QTextCursor start(cursor);
+  start.setPosition(cursor.selectionStart());
+  QTextCursor end(cursor);
+  end.setPosition(cursor.selectionEnd());
+  const QRect rectSel = textEdit->cursorRect(start).united(textEdit->cursorRect(end));
+  const QRect rectFound(textEdit->viewport()->mapToGlobal(rectSel.topLeft()), rectSel.size());
+  const QRect rectDlg = m_pFindDlg->frameGeometry();
+  if(!rectDlg.intersects(rectFound))
+    return;
+
+  const QScreen *pScreen = m_pFindDlg->screen();
+  const QRect rectScreen = pScreen ? pScreen->availableGeometry() : QRect();
+  const int nGap = 20;
+  const int nAbove = rectFound.top() - nGap - rectDlg.height();
+  const int nBelow = rectFound.bottom() + 1 + nGap;
+  if(rectScreen.isNull() || (nAbove >= rectScreen.top()))
+    m_pFindDlg->move(rectDlg.left(), nAbove);
+  else if(nBelow + rectDlg.height() <= rectScreen.bottom() + 1)
+    m_pFindDlg->move(rectDlg.left(), nBelow);
 }
 
 //-----------------------------------------------------------------------------

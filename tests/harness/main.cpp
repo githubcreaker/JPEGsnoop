@@ -103,6 +103,21 @@
 //     whether the report has changed and what the clipboard holds; after a
 //     copy, also the clipboard's formats, the colours and fonts in its HTML,
 //     and the report's own colours.
+//     Edit > Find's steps: find and findnext (choose Edit > Find or Find
+//     Next), key:find and key:findnext (press Cmd+F, Cmd+G), and in the Find
+//     dialog what:TEXT (type TEXT, percent-encoded, in place of the field's
+//     text), case, word (click Match case, Match whole word only), up, down,
+//     next (click Find Next), return, escape (press them in the field) and
+//     cancel (click Cancel); and select:TEXT (select the first TEXT in the
+//     report, as with the mouse), line:N or line:end (put the caret at the
+//     start of line N or at the end), cover (move the dialog over the
+//     selection), top (move the main window to the top of the screen) and
+//     activate (bring the main window to the front). With any
+//     of them, each step also prints a "harness: find" line: which Find items
+//     are enabled, the dialog's state and fields, the selection (line, length
+//     and text) and which of the dialog text's matches it is, where the
+//     dialog is (over it, above, below or beside it), and the status bar's
+//     message.
 //
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
@@ -127,6 +142,9 @@
 #include <QPalette>
 #include <QPixmap>
 #include <QPushButton>
+#include <QRadioButton>
+#include <QStatusBar>
+#include <QUrl>
 #include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QPointingDevice>
@@ -1316,6 +1334,110 @@ static QString editState(MainWindow &window, const QString &strBefore)
            .arg(strFocus, (strText == strBefore) ? QStringLiteral("same") : QStringLiteral("changed"), strClipWhat);
 }
 
+// The selection in the report as a rectangle on the screen
+static QRect selectionOnScreen(const QPlainTextEdit *pReport)
+{
+  const QTextCursor cursor = pReport->textCursor();
+  QTextCursor start(cursor);
+  start.setPosition(cursor.selectionStart());
+  QTextCursor end(cursor);
+  end.setPosition(cursor.selectionEnd());
+  const QRect rect = pReport->cursorRect(start).united(pReport->cursorRect(end));
+  return QRect(pReport->viewport()->mapToGlobal(rect.topLeft()), rect.size());
+}
+
+// The Find dialog, once Edit > Find has made it (found by name, so the driver
+// also builds with versions that haven't got it)
+static QDialog *findDialog(MainWindow &window)
+{
+  return window.findChild<QDialog *>(QStringLiteral("findDialog"));
+}
+
+// Edit > Find's state as gui --edit prints it after each step: the Find items
+// enabled; the dialog (hidden, shown or active), its text, whether Find Next
+// is on, its options; the selection (its line, length and text, cut to 40
+// characters) and which match of the dialog's text, with its options, it is
+// (0 if none); where the dialog is (over the selection, above, below or
+// beside it); and the status bar's message
+static QString findState(MainWindow &window)
+{
+  const QPlainTextEdit *pReport = window.textEdit;
+  auto enabled = [&window](const char *pszText) {
+    const QAction *pAction = findAction(window, QLatin1String(pszText));
+    return pAction ? QString::number(pAction->isEnabled() ? 1 : 0) : QStringLiteral("?");
+  };
+
+  const QDialog *pDlg = findDialog(window);
+  const bool bShown = pDlg && pDlg->isVisible();
+  QString strWhat = QStringLiteral("-");
+  QString strOptions = QStringLiteral("button=- case=- word=- dir=-");
+  QTextDocument::FindFlags eFlags;
+  if(pDlg)
+  {
+    const QLineEdit *pWhat = pDlg->findChild<QLineEdit *>(QStringLiteral("findWhat"));
+    const auto checked = [pDlg](const char *pszName) {
+      const QAbstractButton *pButton = pDlg->findChild<QAbstractButton *>(QLatin1String(pszName));
+      return pButton && pButton->isChecked();
+    };
+    const QAbstractButton *pNext = pDlg->findChild<QAbstractButton *>(QStringLiteral("findNext"));
+    strWhat = pWhat ? pWhat->text() : QStringLiteral("?");
+    strOptions = QString("button=%1 case=%2 word=%3 dir=%4")
+                   .arg((pNext && pNext->isEnabled()) ? 1 : 0)
+                   .arg(checked("matchCase") ? 1 : 0)
+                   .arg(checked("matchWholeWord") ? 1 : 0)
+                   .arg(checked("directionUp") ? QStringLiteral("up")
+                                               : (checked("directionDown") ? QStringLiteral("down") : QStringLiteral("none")));
+    if(checked("matchCase"))
+      eFlags |= QTextDocument::FindCaseSensitively;
+    if(checked("matchWholeWord"))
+      eFlags |= QTextDocument::FindWholeWords;
+  }
+
+  const QTextCursor cursor = pReport->textCursor();
+  QString strSel = QStringLiteral("none");
+  if(cursor.hasSelection())
+  {
+    QString strText = cursor.selectedText();
+    strText.replace(QChar::ParagraphSeparator, QLatin1Char('|'));
+    if(strText.size() > 40)
+      strText = strText.left(40) + QStringLiteral("...");
+    strSel = QString("L%1+%2 \"").arg(pReport->document()->findBlock(cursor.selectionStart()).blockNumber() + 1)
+                                 .arg(cursor.selectionEnd() - cursor.selectionStart()) + strText + QStringLiteral("\"");
+  }
+
+  // Each match, including those overlapping the one before (as Find Next finds them)
+  int nMatch = 0;
+  int nMatches = 0;
+  if(pDlg && (strWhat != QStringLiteral("?")) && !strWhat.isEmpty())
+  {
+    for(QTextCursor found = pReport->document()->find(strWhat, 0, eFlags); !found.isNull();
+        found = pReport->document()->find(strWhat, found.selectionStart() + 1, eFlags))
+    {
+      ++nMatches;
+      if((found.selectionStart() == cursor.selectionStart()) && (found.selectionEnd() == cursor.selectionEnd()))
+        nMatch = nMatches;
+    }
+  }
+
+  // Where the dialog is: over the selection, or above, below or beside it
+  QString strPlace = QStringLiteral("-");
+  if(bShown && cursor.hasSelection())
+  {
+    const QRect rectDlg = pDlg->frameGeometry();
+    const QRect rectSel = selectionOnScreen(pReport);
+    strPlace = rectDlg.intersects(rectSel) ? QStringLiteral("over")
+             : (rectDlg.bottom() < rectSel.top()) ? QStringLiteral("above")
+             : (rectDlg.top() > rectSel.bottom()) ? QStringLiteral("below") : QStringLiteral("beside");
+  }
+
+  return QStringLiteral("find=") + enabled("Find...") + QStringLiteral(" findnext=") + enabled("Find Next")
+         + QStringLiteral(" dialog=") + (!bShown ? QStringLiteral("hidden")
+                                                 : ((QApplication::activeWindow() == pDlg) ? QStringLiteral("active") : QStringLiteral("shown")))
+         + QStringLiteral(" what=\"") + strWhat + QStringLiteral("\" ") + strOptions
+         + QStringLiteral(" sel=") + strSel + QString(" match=%1/%2 dialog-at=%3").arg(nMatch).arg(nMatches).arg(strPlace)
+         + QStringLiteral(" status=\"") + window.statusBar()->currentMessage() + QStringLiteral("\"");
+}
+
 // gui --edit STEPS (see above)
 static void editSteps(MainWindow &window, const QString &strSteps, QTextStream &out)
 {
@@ -1337,12 +1459,110 @@ static void editSteps(MainWindow &window, const QString &strSteps, QTextStream &
     return aKeys.isEmpty() ? QKeyCombination() : aKeys.first()[0];
   };
 
+  static const QRegularExpression reFindStep(
+    QStringLiteral("(^|,)(find|findnext|key:find|key:findnext|what:[^,]*|case|word|up|down|next|return|escape|cancel"
+                   "|select:[^,]*|line:[^,]*|cover|top|activate)(,|$)"));
+  const bool bFindSteps = reFindStep.match(strSteps).hasMatch();
+
   for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
   {
     QWidget *pTarget = QApplication::focusWidget() ? QApplication::focusWidget() : static_cast<QWidget *>(&window);
+    QDialog *pDlg = findDialog(window);
+    auto dlgChild = [pDlg](const char *pszName) {
+      return pDlg ? pDlg->findChild<QWidget *>(QLatin1String(pszName)) : nullptr;
+    };
+    auto clickDlgButton = [&dlgChild](const char *pszName) {
+      QAbstractButton *pButton = qobject_cast<QAbstractButton *>(dlgChild(pszName));
+      if(pButton)
+        pButton->click();    // does nothing while disabled, as a click
+      return pButton != nullptr;
+    };
 
     if(strStep == "state")
     {
+    }
+    else if((strStep == "find") || (strStep == "findnext"))
+    {
+      QAction *pAction = findAction(window, (strStep == "find") ? QStringLiteral("Find...") : QStringLiteral("Find Next"));
+      if(pAction)
+        pAction->trigger();    // does nothing while disabled, as the menu
+    }
+    else if(strStep.startsWith("what:"))
+    {
+      QLineEdit *pWhat = qobject_cast<QLineEdit *>(dlgChild("findWhat"));
+      if(!pWhat)
+      {
+        out << "harness: edit: no Find dialog for " << strStep << "\n";
+        continue;
+      }
+      pWhat->setFocus(Qt::OtherFocusReason);
+      pWhat->selectAll();
+      QTest::keyClick(pWhat, Qt::Key_Delete);
+      QTest::keyClicks(pWhat, QUrl::fromPercentEncoding(strStep.mid(5).toUtf8()));
+    }
+    else if((strStep == "case") || (strStep == "word") || (strStep == "up") || (strStep == "down") ||
+            (strStep == "next") || (strStep == "cancel"))
+    {
+      const char *pszName = (strStep == "case") ? "matchCase"
+                          : (strStep == "word") ? "matchWholeWord"
+                          : (strStep == "up") ? "directionUp"
+                          : (strStep == "down") ? "directionDown"
+                          : (strStep == "next") ? "findNext" : "cancel";
+      if(!clickDlgButton(pszName))
+      {
+        out << "harness: edit: no Find dialog for " << strStep << "\n";
+        continue;
+      }
+    }
+    else if((strStep == "return") || (strStep == "escape"))
+    {
+      QWidget *pWhat = dlgChild("findWhat");
+      if(!pWhat)
+      {
+        out << "harness: edit: no Find dialog for " << strStep << "\n";
+        continue;
+      }
+      QTest::keyClick(pWhat, (strStep == "return") ? Qt::Key_Return : Qt::Key_Escape);
+    }
+    else if(strStep.startsWith("select:"))
+    {
+      const QTextCursor found = pReport->document()->find(QUrl::fromPercentEncoding(strStep.mid(7).toUtf8()), 0,
+                                                          QTextDocument::FindCaseSensitively);
+      if(found.isNull())
+      {
+        out << "harness: edit: not in the report: " << strStep << "\n";
+        continue;
+      }
+      pReport->setTextCursor(found);
+    }
+    else if(strStep.startsWith("line:"))
+    {
+      QTextCursor cursor(pReport->document());
+      if(strStep == "line:end")
+        cursor.movePosition(QTextCursor::End);
+      else
+        cursor.setPosition(pReport->document()->findBlockByNumber(strStep.mid(5).toInt() - 1).position());
+      pReport->setTextCursor(cursor);
+    }
+    else if(strStep == "cover")
+    {
+      if(!pDlg || !pReport->textCursor().hasSelection())
+      {
+        out << "harness: edit: nothing to cover\n";
+        continue;
+      }
+      const QRect rectDlg = pDlg->frameGeometry();
+      pDlg->move(selectionOnScreen(pReport).center() - QPoint(rectDlg.width() / 2, rectDlg.height() / 2));
+    }
+    else if(strStep == "top")
+    {
+      window.move(window.screen()->availableGeometry().topLeft());
+    }
+    else if(strStep == "activate")
+    {
+      window.activateWindow();
+      if(!QTest::qWaitFor([&window]() { return QApplication::activeWindow() == &window; }, 2000))
+        out << "harness: edit: main window not active\n";
     }
     else if((strStep == "selectall") || (strStep == "copy"))
     {
@@ -1356,6 +1576,10 @@ static void editSteps(MainWindow &window, const QString &strSteps, QTextStream &
       QKeyCombination key;
       if(strKey == "selectall")
         key = standardKey(QKeySequence::SelectAll);
+      else if(strKey == "find")
+        key = standardKey(QKeySequence::Find);
+      else if(strKey == "findnext")
+        key = standardKey(QKeySequence::FindNext);
       else if(strKey == "copy")
         key = standardKey(QKeySequence::Copy);
       else if(strKey == "cut")
@@ -1394,7 +1618,13 @@ static void editSteps(MainWindow &window, const QString &strSteps, QTextStream &
       continue;
     }
     QCoreApplication::processEvents();
+    // The Find dialog takes a moment to become the active window
+    if(strStep.endsWith("find") && findDialog(window) && findDialog(window)->isVisible() &&
+       !QTest::qWaitFor([&window]() { return QApplication::activeWindow() == findDialog(window); }, 1000))
+      out << "harness: edit: Find dialog not active\n";
     out << "harness: edit " << strStep << ": " << editState(window, strBefore) << "\n";
+    if(bFindSteps)
+      out << "harness: find " << strStep << ": " << findState(window) << "\n";
 
     // What a copy put on the clipboard: its formats, and the text colours and
     // fonts in its HTML (what a rich-text app pastes); and the colours of the

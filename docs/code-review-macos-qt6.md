@@ -899,6 +899,77 @@ Before the second check's fix, only its two new cases fail.
 **Still open:** Developer ID signing and notarization (M5); latent code; Find, File
 Overlay and Batch Process.
 
+### Find
+
+Edit > Find and Find Next did nothing: Find was enabled once a file opened, and Find
+Next never was. On Windows both come with the report view, from MFC's rich edit view
+(MFC 11: the Windows version is built with Visual Studio 2012). Now, as there:
+- **Find** opens the Find dialog: Find what, Match whole word only, Match case, Up or
+  Down, Find Next and Cancel. It stays open while searching.
+  - **Its text:** the selected text if that is on one line, otherwise the last text
+    searched for. The options are the last search's.
+  - **Already open:** Find only brings it to the front.
+- **Find Next** in the dialog (or Return) selects the next match and scrolls to it.
+  Edit > Find Next repeats the last search, also with the dialog closed.
+- **Where a search starts:** going down, at the character after the selection's start,
+  or at the caret. Going up, it finds the last match that starts before that point.
+  (Going up, MFC hands Rich Edit a starting point whose exact effect isn't documented;
+  the port mirrors the rule for going down.)
+- **Going round:** the first search after Find (or after one that found nothing) goes
+  on from the other end of the report if it finds nothing, as far as where it started.
+  After that, reaching the end stops the search once, and the next one goes on from the
+  top (from the bottom, going up). Loading a file leaves the caret at the end of the
+  report, so the first search finds the first match.
+- **The dialog moves out of the way:** when it covers the text found, it moves above it,
+  or below it if there isn't room above.
+- **When they're on:** Find whenever the report has text, like Select All. Find Next
+  when the report has text and there has been a search. The last search lasts until the
+  app quits.
+- **Shortcuts:** Cmd+F and Cmd+G.
+
+The search is `CReportView::findText`, with the same rules as MFC 11's
+`CRichEditView::FindTextSimple`. That code is the same from MFC 10 through 14.24; MFC 9
+used different rules. The dialog is `CFindDialog` (`source/finddialog.cpp`).
+
+**Changes from Windows:**
+- **Status bar:** when nothing is found, Windows only beeps. The port also beeps, and
+  says why in the status bar: `Cannot find "X"`, or that it reached the end (or start)
+  of the report and Find Next goes on from the top (or bottom). The next search that
+  finds something clears it.
+- **A new report starts a new search.** On Windows a search under way carried on into
+  the next file's report: if it had found something, a search that found nothing after
+  the caret stopped there, and only the one after went round.
+
+**Tests:** 36 new `FN` cases (315 in all). New `gui --edit` steps:
+- choose Find and Find Next, or press Cmd+F and Cmd+G;
+- fill in and click the dialog's fields and buttons, and press Return or Escape;
+- select text in the report, or put the caret on a line;
+- move the dialog over the selection, or the main window to the top of the screen.
+
+After each step a `harness: find` line prints:
+- which Find items are enabled, and the dialog's fields;
+- the selection, and which match of the dialog's text it is;
+- where the dialog is (over the selection, above or below it), and the status bar's
+  message.
+
+On the old code 35 fail. The other one checks that Find is off before a file, which it
+already was. Three deliberate breaks each fail their own cases:
+- **No new search for a new report:** the next-file case fails.
+- **The dialog not moving:** both moving cases fail.
+- **No going round:** 12 cases fail.
+
+**Checks:**
+- **All 315 pass** with and without ASan/UBSan.
+- **Layout:** rendered offscreen, the dialog has the Windows Find dialog's layout.
+- **Not checked:**
+  - with the macOS platform: the dialog's look, Cmd+F and Cmd+G through the menu bar,
+    and the beep;
+  - Cmd+G while the Find dialog is in front. Offscreen, the main window's shortcuts
+    don't reach the dialog; on macOS the menu bar should handle it.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; File Overlay
+and Batch Process.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

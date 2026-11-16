@@ -27,9 +27,11 @@
 #include <QPainter>
 
 #include "exportdialogs.h"
+#include "reportview.h"
 
 class QPrinter;
 
+class CFindDialog;
 class SnoopConfigDialog;
 class Q_Viewer;
 class CjfifDecode;
@@ -47,7 +49,7 @@ public:
   explicit MainWindow(QWidget *parent = 0);
   ~MainWindow();
 
-  QPlainTextEdit *textEdit;
+  CReportView *textEdit;
 
   // Tools > Export JPEG and Export TIFF without their dialogs (as the test
   // driver uses them). Both act on the file shown; Export JPEG analyzes it
@@ -73,6 +75,9 @@ private slots:
   void open();
   void saveLog();
   void onSelectAll();
+  void onFind();
+  void onFindNext();
+  void findFromDialog(const QString &strFind, bool bDown, bool bCase, bool bWord);
   void onConfig();
   void filePrint();
   void filePrintPreview();
@@ -89,6 +94,9 @@ private:
   void createActions(void);
   void createMenus(void);
   void enableMenus();
+  void updateTextActions();
+  bool findInReport();
+  void moveFindDialogOffSelection();
   void clearImageViews();
   void AnalyzeFile();
   bool AnalyzeOpen();
@@ -226,6 +234,15 @@ private:
   // Coach Messages
   QString strLoRes;
   QString strHiRes;
+
+  // Edit > Find's dialog (made when first shown) and the last search, which
+  // Find Next repeats. As on Windows they last until the app quits.
+  CFindDialog *m_pFindDlg = nullptr;
+  QString m_strFind;
+  bool m_bFindDown = true;
+  bool m_bFindCase = false;
+  bool m_bFindWord = false;
+  QString m_strFindStatus;      // what the status bar shows after a search found nothing
 };
 
 #endif // MAINWINDOW_H

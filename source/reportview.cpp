@@ -104,6 +104,76 @@ CReportView::CReportView(QWidget *pParent) :
   setReadOnly(true);
   setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
   setUndoRedoEnabled(false);
+
+  // A new report gets a new search (on Windows a search went on into the
+  // next file's report, where its starting point meant nothing)
+  connect(this, &QPlainTextEdit::textChanged, this, &CReportView::startNewSearch);
+}
+
+// CRichEditView::FindTextSimple in MFC 11 (Visual Studio 2012, which the
+// Windows version is built with), with the same rules:
+// - A search starts at the selection: forwards, at the character after the
+//   selection's start (so the next match can overlap the one selected), or
+//   at the caret; backwards, at the last match that starts before it. (MFC
+//   asks Rich Edit to search backwards from the character before the
+//   selection, and Rich Edit doesn't document which matches that includes;
+//   this mirrors the forward rule.)
+// - If the first search after Find... (or after one that found nothing)
+//   finds nothing, it goes on from the other end of the report as far as
+//   where it started, so it can find the match the search started on.
+// - Otherwise a search that finds nothing returns false (Windows beeps), and
+//   the next one starts again from the selection, so it goes round.
+// QTextDocument's search, like Rich Edit's, stays within a line.
+bool CReportView::findText(const QString &strFind, bool bDown, bool bCase, bool bWord)
+{
+  QTextDocument *pDoc = document();
+  const QTextCursor cursor = textCursor();
+  const int nSelStart = cursor.selectionStart();
+  const int nEnd = pDoc->characterCount() - 1;
+
+  if(m_bFirstSearch)
+  {
+    m_nSearchStart = nSelStart;
+    m_bFirstSearch = false;
+    m_bWrapAllowed = true;
+  }
+
+  QTextDocument::FindFlags eFlags;
+  if(bCase)
+    eFlags |= QTextDocument::FindCaseSensitively;
+  if(bWord)
+    eFlags |= QTextDocument::FindWholeWords;
+  if(!bDown)
+    eFlags |= QTextDocument::FindBackward;
+
+  QTextCursor found;
+  if(!strFind.isEmpty())
+  {
+    // Backwards, find() returns the last match that starts before the position
+    if(bDown)
+      found = pDoc->find(strFind, cursor.hasSelection() ? qMin(nSelStart + 1, nEnd) : nSelStart, eFlags);
+    else
+      found = pDoc->find(strFind, nSelStart, eFlags);
+
+    if(found.isNull() && m_bWrapAllowed)
+    {
+      found = pDoc->find(strFind, bDown ? 0 : nEnd, eFlags);
+      if(!found.isNull() && (bDown ? (found.selectionStart() > m_nSearchStart)
+                                   : (found.selectionStart() < m_nSearchStart)))
+        found = QTextCursor();
+    }
+  }
+  m_bWrapAllowed = false;
+
+  if(found.isNull())
+  {
+    m_bFirstSearch = true;
+    return false;
+  }
+
+  setTextCursor(found);
+  ensureCursorVisible();
+  return true;
 }
 
 QMimeData *CReportView::createMimeDataFromSelection() const
