@@ -93,6 +93,7 @@ private slots:
   void onFileOffset();
   void onImageSearchFwd();
   void onImageSearchRev();
+  void onLookupMcuOffset();
   void onAbout();
 
 private:

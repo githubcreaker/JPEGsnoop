@@ -129,6 +129,17 @@ when it is installed, so Pillow needn't be installed separately).
       front first: offscreen, its shortcuts don't reach the image window) and
       `gone` (move the file away for the next step, then put it back). It
       prints the summary after each step and after File > Reprocess.
+    - `--lookup STEPS` chooses Tools > Lookup MCU Offset after the first file
+      (or file N with `--lookup-at N`; `0` is before any file, and with
+      `--offset` or `--search`, after their steps), printing the menu item's
+      place first, and answers the dialog with STEPS: `x=TEXT` and `y=TEXT`
+      (type TEXT over the field, percent-encoded), `recalc`, `return`,
+      `escape`, `close` and `fields`, with `+` to choose the menu item again.
+      It prints the dialog's fields (the ranges, X and Y, the MCU and file
+      offset shown, and the focus) when it shows and after each step.
+      `--hover X,Y[/X,Y...]` then moves the mouse over the preview to each
+      image pixel and prints the image window's status bar (MCU, file offset
+      and YCC).
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -196,6 +207,9 @@ when it is installed, so Pillow needn't be installed separately).
   hand-made segments, so no third-party images are needed. Files that Pillow
   can't write, such as unusual sampling factors or levels outside 0..255, come
   from `dc_only_jpeg()`, a small encoder for images made of flat 8×8 blocks.
+  It can add restart markers (with fill bytes before them), and it returns
+  where it wrote each MCU, which the Lookup MCU Offset cases check the offsets
+  against.
   Photoshop files come from `psd()`, which writes raw or PackBits image data,
   and layers from `psd_layers()` (one) or `psd_layer_section()` (any, with
   masks and tagged blocks). Folders for the `batch` mode come from `tree()`.
@@ -211,8 +225,9 @@ are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
 in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
 section, `A` in its "About" section, `T` in its "Select All and Copy"
 section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
-`BP` in its "Batch Process" section, `FO` in its "File > Offset" section, and `IS`
-in its "Tools > Image Search Fwd and Rev" section);
+`BP` in its "Batch Process" section, `FO` in its "File > Offset" section, `IS`
+in its "Tools > Image Search Fwd and Rev" section, and `LM` in its "Tools > Lookup MCU
+Offset" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

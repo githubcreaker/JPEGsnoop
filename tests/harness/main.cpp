@@ -162,6 +162,22 @@
 //     away for the next step, then put it back). Print the summary after each
 //     step and after File > Reprocess.
 //
+// gui ... --lookup STEPS
+//     After the first file (or file N with --lookup-at N; 0 is before any
+//     file, and with --offset or --search, after their steps), print the
+//     place of Tools > Lookup MCU Offset in the menu, choose it and answer its
+//     dialog with STEPS, a comma-separated list of x=TEXT and y=TEXT (replace
+//     the field's text by typing TEXT, percent-encoded), recalc (click it),
+//     return, escape, close and fields; "+" chooses the menu item again for
+//     the steps after it. Print the dialog's fields (the ranges, X and Y, the
+//     MCU and file offset shown, and the focus) when it shows, after recalc
+//     and return, at fields, escape and close, and after X and Y are typed.
+//
+// gui ... --hover X,Y[/X,Y...]
+//     With --lookup, after its steps, move the mouse over the image window's
+//     preview to each image pixel and print the window's status bar (the MCU,
+//     file offset and YCC labels).
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -252,6 +268,7 @@ static void usage()
           "                          [--auto-reprocess] [--no-decode-image]] [--about]\n"
           "                         [--edit STEPS [--edit-before]] [--overlay STEPS [--overlay-at N]]\n"
           "                         [--offset STEPS [--offset-at N]] [--search STEPS [--search-at N]]\n"
+          "                         [--lookup STEPS [--lookup-at N] [--hover X,Y[/X,Y...]]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -959,6 +976,9 @@ struct GuiOptions
   int nOffsetAt = 1;              // --offset-at N
   QString strSearch;              // --search STEPS
   int nSearchAt = 1;              // --search-at N
+  QString strLookup;              // --lookup STEPS
+  int nLookupAt = 1;              // --lookup-at N
+  QString strHover;               // --hover X,Y[/X,Y...]
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -1697,6 +1717,198 @@ static void searchMenu(MainWindow &window, const QString &strSteps, const QStrin
   out.flush();
 }
 
+// Tools > Lookup MCU Offset as a user chooses it (see --lookup above). The
+// dialog is found by name, so the driver also builds with versions without
+// it. A message box it shows is printed and closed as it opens.
+static void lookupMenu(MainWindow &window, const QString &strSteps, QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("Lookup MCU Offset..."));
+  if(!pAction)
+  {
+    out << "harness: menu Lookup MCU Offset unavailable\n";
+    return;
+  }
+
+  out << "harness: lookup " << menuPlace(pAction) << "\n";
+  if(!pAction->isEnabled())
+  {
+    out << "harness: menu Lookup MCU Offset unavailable\n";
+    return;
+  }
+
+  const QStringList astrOpenings = strSteps.split('+');
+  QStringList astrSteps;
+  bool bBusy = false;
+  bool bShown = false;
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QDialog *pDlg = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    // (A message box's event loop can run this again while a step waits)
+    if(bBusy || !pDlg || (pDlg->objectName() != QLatin1String("lookupMcuDialog")))
+      return;
+    bBusy = true;
+    bShown = true;
+    // The offscreen platform activates a window a little after it shows:
+    // wait for that, as a user would. (It doesn't activate the dialog again
+    // after a message box, so focus then shows as none and inactive.)
+    if(!pDlg->property("harnessShown").toBool())
+    {
+      pDlg->setProperty("harnessShown", true);
+      static_cast<void>(QTest::qWaitFor([pDlg]() { return QApplication::activeWindow() == pDlg; }, 1000));
+    }
+    QLineEdit *pX = pDlg->findChild<QLineEdit *>("pixelX");
+    QLineEdit *pY = pDlg->findChild<QLineEdit *>("pixelY");
+    QLabel *pRangeX = pDlg->findChild<QLabel *>("rangeX");
+    QLabel *pRangeY = pDlg->findChild<QLabel *>("rangeY");
+    QLabel *pMcu = pDlg->findChild<QLabel *>("mcuValue");
+    QLabel *pOffset = pDlg->findChild<QLabel *>("offsetValue");
+    QPushButton *pRecalc = pDlg->findChild<QPushButton *>("recalcButton");
+    QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+    if(!pX || !pY || !pRangeX || !pRangeY || !pMcu || !pOffset || !pRecalc || !pButtons ||
+       !pButtons->button(QDialogButtonBox::Close))
+    {
+      out << "harness: lookup dialog widgets not found\n";
+      pDlg->reject();
+      bBusy = false;
+      return;
+    }
+
+    auto fields = [&]() {
+      const QWidget *pFocus = QApplication::focusWidget();
+      QString strFocus = !pFocus ? QStringLiteral("none")
+                                 : ((pFocus == pX) ? QStringLiteral("x")
+                                                   : ((pFocus == pY) ? QStringLiteral("y")
+                                                                     : (pFocus->objectName().isEmpty()
+                                                                          ? QString::fromLatin1(
+                                                                              pFocus->metaObject()->className())
+                                                                          : pFocus->objectName())));
+      if(const QLineEdit *pEdit = qobject_cast<const QLineEdit *>(pFocus))
+      {
+        if(pEdit->hasSelectedText())
+          strFocus += (pEdit->selectedText() == pEdit->text()) ? QStringLiteral("(all selected)")
+                                                               : QStringLiteral("(part selected)");
+      }
+      if(QApplication::activeWindow() != pDlg)
+        strFocus += QStringLiteral("(inactive)");
+      return QString("range=%1x%2 x=\"%3\" y=\"%4\" mcu=\"%5\" offset=\"%6\" focus=%7")
+               .arg(pRangeX->text(), pRangeY->text(), pX->text(), pY->text(), pMcu->text(), pOffset->text(),
+                    strFocus);
+    };
+    out << "harness: lookup dialog: " << pDlg->windowTitle() << " (" << fields() << ")\n";
+
+    while(!astrSteps.isEmpty())
+    {
+      const QString strStep = astrSteps.takeFirst();
+      if(strStep.startsWith("x=") || strStep.startsWith("y="))
+      {
+        QLineEdit *pField = strStep.startsWith("x=") ? pX : pY;
+        pField->setFocus();
+        pField->selectAll();
+        const QString strText = QUrl::fromPercentEncoding(strStep.mid(2).toUtf8());
+        if(strText.isEmpty())
+          QTest::keyClick(pField, Qt::Key_Backspace);
+        else
+          QTest::keyClicks(pField, strText);
+        out << "harness: lookup typed " << strStep << " (" << fields() << ")\n";
+      }
+      else if((strStep == "recalc") || (strStep == "return"))
+      {
+        // A refused field shows a message box, printed and closed; the steps
+        // left carry on after it
+        if(strStep == "recalc")
+          pRecalc->click();
+        else
+        {
+          QWidget *pTarget = QApplication::focusWidget();
+          if(!pTarget || (pTarget->window() != pDlg))
+            pTarget = pX;
+          QTest::keyClick(pTarget, Qt::Key_Return);
+        }
+        QCoreApplication::processEvents();
+        if(!pDlg->isVisible())
+        {
+          out << "harness: lookup " << strStep << " closed the dialog\n";
+          astrSteps.clear();
+          bBusy = false;
+          return;
+        }
+        out << "harness: lookup " << strStep << " (" << fields() << ")\n";
+      }
+      else if(strStep == "fields")
+        out << "harness: lookup fields (" << fields() << ")\n";
+      else if((strStep == "close") || (strStep == "escape"))
+      {
+        out << "harness: lookup dialog " << strStep << " (" << fields() << ")\n";
+        out.flush();
+        if(strStep == "escape")
+        {
+          QWidget *pTarget = QApplication::focusWidget();
+          QTest::keyClick((pTarget && (pTarget->window() == pDlg)) ? pTarget : pX, Qt::Key_Escape);
+        }
+        else
+          pButtons->button(QDialogButtonBox::Close)->click();
+        if(pDlg->isVisible())
+        {
+          out << "harness: lookup dialog didn't close\n";
+          pDlg->reject();
+        }
+        bBusy = false;
+        return;
+      }
+      else
+        out << "harness: unknown lookup step " << strStep << "\n";
+    }
+
+    out << "harness: lookup dialog still open: closed\n";
+    pDlg->reject();
+    bBusy = false;
+  });
+  timer.start(50);
+
+  for(const QString &strOpening : astrOpenings)
+  {
+    astrSteps = strOpening.split(',', Qt::SkipEmptyParts);
+    bShown = false;
+    pAction->trigger();
+    QCoreApplication::processEvents();
+    if(!bShown)
+      out << "harness: lookup dialog not shown\n";
+  }
+  timer.stop();
+  out.flush();
+}
+
+// The mouse over the image window's preview at each image pixel (see --hover
+// above), as markPositions() moves it, and what the window's status bar says
+static void hoverPositions(const QString &strPoints, QTextStream &out)
+{
+  Q_Viewer *pViewer = findViewer();
+  PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+  QLabel *pMcu = pViewer ? pViewer->findChild<QLabel *>("mcuLabel") : nullptr;
+  QLabel *pFile = pViewer ? pViewer->findChild<QLabel *>("fileLabel") : nullptr;
+  QLabel *pYcc = pViewer ? pViewer->findChild<QLabel *>("yccLabel") : nullptr;
+  if(!pCanvas || pCanvas->image().isNull() || !pMcu || !pFile || !pYcc)
+  {
+    out << "harness: hover: no image\n";
+    return;
+  }
+
+  const double dScale = static_cast<double>(pCanvas->width()) / pCanvas->image().width();
+  const QStringList astrPoints = strPoints.split('/', Qt::SkipEmptyParts);
+  for(const QString &strPoint : astrPoints)
+  {
+    const QStringList astrXy = strPoint.split(',');
+    if(astrXy.size() != 2)
+      continue;
+    const QPointF pt((astrXy.at(0).toInt() + 0.5) * dScale, (astrXy.at(1).toInt() + 0.5) * dScale);
+    sendMouse(pCanvas, QEvent::MouseMove, pt);
+    QCoreApplication::processEvents();
+    out << "harness: hover " << strPoint << ": \"" << pMcu->text() << "\" \"" << pFile->text() << "\" \""
+        << pYcc->text() << "\"\n";
+  }
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -2176,6 +2388,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     searchMenu(window, opts.strSearch, QString(), strSettingsDir, out);
   }
 
+  // Tools > Lookup MCU Offset before any file has been opened (--lookup-at 0)
+  if(!opts.strLookup.isEmpty() && (opts.nLookupAt == 0))
+  {
+    out << "harness: lookup before any file\n";
+    lookupMenu(window, opts.strLookup, out);
+  }
+
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
   if(opts.bReprocessFirst)
@@ -2229,6 +2448,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           searchMenu(window, opts.strSearch, strFile, strSettingsDir, out);
         if(!opts.strOverlay.isEmpty())
           out << "harness: overlay with search: " << overlayReport(window) << "\n";
+      }
+
+      if((nRound == 0) && !opts.strLookup.isEmpty() && (nFileInd == opts.nLookupAt))
+      {
+        lookupMenu(window, opts.strLookup, out);
+        if(!opts.strHover.isEmpty())
+          hoverPositions(opts.strHover, out);
       }
 
       if(nRound == 0)
@@ -3147,7 +3373,7 @@ int main(int argc, char **argv)
   QString strFormat;
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
-                             "--edit", "--overlay", "--offset", "--search", "--batch" })
+                             "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--batch" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3179,6 +3405,10 @@ int main(int argc, char **argv)
       guiOpts.strOffset = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--search"))
       guiOpts.strSearch = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--lookup"))
+      guiOpts.strLookup = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--hover"))
+      guiOpts.strHover = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--batch"))
       batchOpts.strSteps = args.at(nInd + 1);
     args.remove(nInd, 2);
@@ -3187,7 +3417,8 @@ int main(int argc, char **argv)
   // Options with a numeric value
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
-                             "--offset-at", "--search-at", "--batch-cancel-after", "--batch-close-after" })
+                             "--offset-at", "--search-at", "--lookup-at", "--batch-cancel-after",
+                             "--batch-close-after" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3214,6 +3445,8 @@ int main(int argc, char **argv)
       guiOpts.nOffsetAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--search-at"))
       guiOpts.nSearchAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--lookup-at"))
+      guiOpts.nLookupAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

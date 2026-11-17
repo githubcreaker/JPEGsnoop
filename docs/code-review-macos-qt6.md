@@ -1407,6 +1407,141 @@ starts from 0. Nine deliberate breaks each fail their own cases:
 items not yet ported, such as Lookup MCU Offset, Search Executable for DQT, and the
 signature database items.
 
+### Tools > Lookup MCU Offset
+
+Tools > Lookup MCU Offset did nothing: the menu item had no handler. On Windows it says
+where in the file the MCU holding a pixel starts, for tracing damage in an image back to
+the file's bytes (to change them with File Overlay, say). Now, as there:
+- **The menu item** comes after Image Search Rev and a separator. Its status tip is
+  "Calculate file offset for an MCU".
+- **The dialog,** "Lookup File Offset of MCU", takes a pixel's X and Y, with their
+  ranges above them. Recalc shows where the scan data of the MCU holding that pixel
+  starts in the file, as a hex byte offset and a bit ("0x0000026F : 0").
+- **It reads the decoder's map** of where each MCU started, made when the scan was
+  decoded, so the file isn't read again. The offsets are the file's: after File > Offset
+  or Image Search they include the offset decoded from. The dialog is modal, so the
+  image can't change while it is open.
+- **The menu item is on once a file has been opened.** After a file that couldn't be
+  opened, or was empty, it says why.
+
+**Found and fixed** (all as on Windows 1.8.0):
+- **With no scan decoded,** Windows still showed the dialog, with ranges of 0 to
+  4294967295 (0 − 1), and Recalc read a map that wasn't there. That happens with
+  Options > Scan Segment > Decode Image off, a progressive JPEG, a Photoshop file's
+  image, or a file with no image. It now says that no image was decoded, and names the
+  option when that is off.
+- **After a restart marker** (DRI), each MCU that starts a restart interval was given
+  the position where the previous MCU's bits ended, before the padding and the RSTn
+  marker: 0x000000B1 : 4 for an MCU that starts at 0x000000B4 : 0. The decoder deals
+  with the marker when it reads the MCU's first code, and the position was taken before
+  that. It is now taken when the first code is read, as Detailed Decode's positions
+  already were. The image window's status bar and the report's clipping notes ("Y
+  Overflow @ Offset"), which use the same map, were wrong in the same way.
+- **More than 256 MB into a file** the offsets wrapped around: the map kept them in
+  32 bits, 28 of them for the byte. For a JPEG 0x10000100 into a video, an MCU at
+  0x1000019F showed as 0x0000019F. The map now holds 64 bits per MCU.
+- **When the scan stops early** (in a truncated or corrupt file), the MCUs the decoder
+  didn't reach showed 0x00000000 : 0. The first MCU of each later row showed where the
+  decoder was after the data ran out: past the end of the file, at the EOI marker, or in
+  the 0xFF fill bytes that may come before a marker (T.81 B.1.1.2). They now show "Not
+  decoded", and so does the image window's status bar ("File: not decoded"). The MCU in
+  which the data ran out keeps its offset. The scan's data ends at the end of the file,
+  or at its first marker other than RSTn, less the fill bytes before it. A 0xFF in scan
+  data is followed by 0x00, so the 0xFF bytes just before a marker can only be fill.
+- **At the end of a file of 0xFFFFFFFF bytes,** the largest the app opens, the decoder's
+  position after the end wrapped around to 0. It then decoded the following rows from
+  the start of the file, so the preview showed that data and the lookup gave offsets
+  such as 0x00000001 : 4. The position now stops at the end.
+
+**Changes from Windows:**
+- **The dialog shows the MCU** the pixel is in, such as [1,1]: the coordinates Detailed
+  Decode takes.
+- **Return calculates.** On Windows, OK was the default button, so Return closed the
+  dialog without calculating. OK and Cancel, which both only closed it, are now one Close
+  button.
+- **Changing X or Y clears the result.** On Windows it stayed until the next Recalc, next
+  to the new coordinates.
+- **The messages:** "X must be a whole number from 0 to 39." Windows said "Pixel X
+  coord out of range". For text that wasn't a number, MFC said so and Windows then
+  calculated from the last number.
+- **The results can be selected and copied.**
+
+**Unchanged from Windows:** the ranges are the decoded image's size, padded to whole
+MCUs as the preview is: a 36 × 20 image takes X 0..39 and Y 0..23. A pixel in the
+padding is in the last MCU of its row or column.
+
+**Tests:** 63 new `LM` cases (587 in all). `gui --lookup STEPS` chooses the menu item
+and answers its dialog: it types X and Y, clicks Recalc or Close, and presses Return or
+Escape. It prints the dialog's fields each time. `--hover X,Y` moves the mouse over the
+preview and prints the image window's status bar. The test files come from
+`dc_only_jpeg()`, which records where it writes each MCU and can now write restart
+markers, with fill bytes before them. So every offset is checked against the file as
+written. The cases cover:
+- **The menu item:** its place and tip; off with no file; and the message after a
+  missing or empty file.
+- **No scan decoded:** Decode Image off, a progressive JPEG, a Photoshop file, and a
+  progressive JPEG after a decoded one.
+- **The dialog:** its fields when it opens, and the ranges.
+- **The offsets:**
+  - MCUs at the start, middle and end of rows, and at a bit other than 0;
+  - a pixel in the padding;
+  - MCUs of 8×8, 16×16 and 16×8 pixels.
+- **Restart markers:** the MCUs after RST0 and RST1, one starting a row, and one between
+  markers. Also with Detailed Decode on, which decodes its MCUs separately, and with fill
+  bytes before each marker.
+- **A scan cut short:** with no EOI after the cut, with one, and with fill bytes before
+  it. The cases check the MCU the scan ends in, the one after, and the first of the next
+  row, and the image window's status bar.
+- **Offsets in the file:**
+  - after File > Offset;
+  - more than 256 MB in, and a scan cut short at the end of a file of 0xFFFFFFFF bytes
+    (both sparse files);
+  - in the second file opened.
+- **What can be typed:**
+  - rejected: out of range, not a number, empty, negative, too large for 64 bits, and
+    hex;
+  - accepted: spaces around the number, and the largest X and Y.
+- **The dialog's buttons and keys:**
+  - Return, Escape and Close;
+  - a changed field clearing the result;
+  - a fresh dialog each time.
+
+On the previous commit 62 fail. The other checks that the menu item is off with no file,
+which it already was. Thirteen deliberate breaks each fail their own cases:
+- **Recording each MCU's position as before,** where its decode starts: 13 cases fail.
+  These are the restart-marker cases (with and without fill bytes), the Detailed
+  Decode one, and the cases for MCUs the decoder goes on to after a cut.
+- **Not checking where the scan data ends:** 7 cases fail. These are the MCUs at the EOI
+  marker or in its fill bytes, and the first MCU of the next row in each cut file.
+- **MCUs not reached left at 0,** as before: 9 cases fail.
+- **32-bit map entries,** as before: the 3 cases past 256 MB fail.
+- **Ending the scan data at the marker, not its fill bytes:** the 2 fill-byte cases for
+  MCUs after the cut fail.
+- **The position after the end wrapping around:** the 2 cases for the next row in the
+  0xFFFFFFFF-byte file fail.
+- **Not recording positions in Detailed Decode's decode:** 1 case fails.
+- **Not checking that a scan was decoded:** 4 cases fail.
+- **Return doing nothing:** 1 case fails.
+- **Return closing the dialog,** as on Windows: 2 cases fail.
+- **Not clearing the result when a field changes:** 1 case fails.
+- **No range check:** 3 cases fail.
+- **The image window ignoring "not decoded":** 2 cases fail.
+
+**Checks:**
+- **All 587 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **Not checked:**
+  - on the macOS platform: the dialog's look, and Return in it;
+  - a real camera file with restart markers, and a real video over 256 MB.
+
+**Still open:**
+- Developer ID signing and notarization (M5); latent code.
+- The menu items not yet ported: Search Executable for DQT and the signature database
+  items.
+- **Fill bytes before an RST marker** (found while testing): the report's marker list
+  takes the first 0xFF of the fill as the end of the scan. It then says "Restart
+  marker [0xFFd0] detected outside scan". The scan's decode, and the lookup, are right.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

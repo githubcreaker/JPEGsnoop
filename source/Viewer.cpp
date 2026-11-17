@@ -183,17 +183,21 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
 
   statusBar = new QStatusBar(this);
 
+  // (Object names for the test driver)
   mcuLabel = new QLabel(statusBar);
+  mcuLabel->setObjectName(QStringLiteral("mcuLabel"));
   mcuLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
   mcuLabel->setFont(font);
   statusBar->addPermanentWidget(mcuLabel);
 
   fileLabel = new QLabel(statusBar);
+  fileLabel->setObjectName(QStringLiteral("fileLabel"));
   fileLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
   fileLabel->setFont(font);
   statusBar->addPermanentWidget(fileLabel);
 
   yccLabel = new QLabel(statusBar);
+  yccLabel->setObjectName(QStringLiteral("yccLabel"));
   yccLabel->setFrameStyle(QFrame::Panel | QFrame::Sunken);
   yccLabel->setFont(font);
   statusBar->addPermanentWidget(yccLabel);
@@ -271,10 +275,13 @@ void Q_Viewer::onCanvasMoved(QPoint ptImg, bool bInside)
   mcuLabel->setText(QString("MCU [%1,%2]")
                     .arg(p.x(), 4, 10, QChar('0'))
                     .arg(p.y(), 4, 10, QChar('0')));
-  m_pImgDecoder->LookupFilePosMcu(p, nByte, nBit);
+  // An MCU after the scan stopped has no position (it showed 0x00000000:0)
+  if(m_pImgDecoder->LookupFilePosMcu(p, nByte, nBit))
+    fileLabel->setText(QString("File 0x%1:%2").arg(nByte, 8, 16, QChar('0')).arg(nBit));
+  else
+    fileLabel->setText(tr("File: not decoded"));
   p = m_pImgDecoder->PixelToBlk(ptImg);
   m_pImgDecoder->LookupBlkYCC(p, nY, nCb, nCr);
-  fileLabel->setText(QString("File 0x%1:%2").arg(nByte, 8, 16, QChar('0')).arg(nBit));
   yccLabel->setText(QString("YCC DC=[%1,%2,%3]")
                     .arg(nY, 5, 10, QChar('0'))
                     .arg(nCb, 5, 10, QChar('0'))

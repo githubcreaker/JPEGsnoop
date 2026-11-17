@@ -485,19 +485,31 @@ class Bits:
             self.put((1 << (8 - self.n)) - 1, 8 - self.n)
         return bytes(self.out)
 
+    def restart(self, k, fill=0):
+        """Pad to a byte with 1 bits, then fill bytes and RSTk (mod 8)."""
+        self.flush()
+        self.out += b"\xff" * fill + bytes([0xFF, 0xD0 + k % 8])
 
-def dc_only_jpeg(width, height, comps, level):
+
+def dc_only_jpeg(width, height, comps, level, restart=0, fill=0):
     """Baseline JPEG made of flat 8x8 blocks (DC only, quantiser 1), with any
     sampling factors and any level, even outside 0..255, which Pillow can't
     write. comps: [(id, h, v)]; level(comp_index, x, y) is the component's
-    level for the block whose top-left image pixel is (x, y).
+    level for the block whose top-left image pixel is (x, y). restart: a DRI
+    interval in MCUs, with an RST marker after each interval but the last,
+    and fill 0xFF fill bytes before each (T.81 B.1.1.2).
     Returns (file, offset of the scan data, [(byte, bit) where each MCU starts
     in the scan data])."""
     hmax, vmax = max(c[1] for c in comps), max(c[2] for c in comps)
+    mcus_x = -(-width // (8 * hmax))
     dc = huff_codes(DC_COUNTS, DC_VALUES)
     bits, pred, mcu_pos = Bits(), [0] * len(comps), []
     for my in range(-(-height // (8 * vmax))):
-        for mx in range(-(-width // (8 * hmax))):
+        for mx in range(mcus_x):
+            mcu = my * mcus_x + mx
+            if restart and mcu and mcu % restart == 0:
+                bits.restart(mcu // restart - 1, fill)
+                pred = [0] * len(comps)
             mcu_pos.append(bits.pos())
             for ci, (_, h, v) in enumerate(comps):
                 for by in range(v):
@@ -516,6 +528,7 @@ def dc_only_jpeg(width, height, comps, level):
                   + b"".join(bytes([cid, (h << 4) | v, 0]) for cid, h, v in comps))
             + seg(0xC4, bytes([0x00] + DC_COUNTS + DC_VALUES))
             + seg(0xC4, bytes([0x10, 1] + [0] * 15 + [0x00]))
+            + (seg(0xDD, struct.pack(">H", restart)) if restart else b"")
             + seg(0xDA, bytes([len(comps)]) + b"".join(bytes([cid, 0x00]) for cid, _, _ in comps)
                   + bytes([0, 63, 0])))
     return head + bits.flush() + b"\xff\xd9", len(head), mcu_pos
@@ -2265,6 +2278,205 @@ write("is_far.jpg", junk * 655 + junk[:36] + c444 + junk * 655 + junk[:36] + c42
 search_case("IS_far_fwd", "fwd,fwd", "harness: search fwd: start=0x00020564 soi=1 scan=1 ", names=("is_far.jpg",))
 search_case("IS_far_first", "fwd", "harness: search fwd: start=0x00010000 soi=1 scan=1 ", names=("is_far.jpg",))
 search_case("IS_far_rev", "fwd,fwd,rev", "harness: search rev: start=0x00010000 soi=1 scan=1 ", names=("is_far.jpg",))
+
+
+# --- LM: Tools > Lookup MCU Offset ---------------------------------------------
+# gui --lookup chooses the menu item and answers its dialog: x=TEXT and y=TEXT
+# (typed over the field), recalc, return, escape, close and fields, with "+"
+# to choose it again. --hover moves the mouse over the preview and prints the
+# image window's status bar. Files come from dc_only_jpeg(), which says where
+# each MCU starts, so the offsets shown can be checked against it.
+def lookup_case(cid, steps, expect, names=("lm_444.jpg",), extra="", forbid="-"):
+    case(cid, "LM", "gui", list(names), ("--lookup " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+def lm_level(c, x, y):
+    """A different level in each block, so MCUs differ in length"""
+    return (40 + 37 * (x // 8) + 23 * (y // 8) + 50 * c) % 250
+
+
+def lm_file(name, *args, base=0, **kw):
+    """Write a dc_only_jpeg() and return each MCU's position in the file as
+    (offset, bit), for the JPEG put at offset base"""
+    data, scan_off, mcu_pos = dc_only_jpeg(*args, lm_level, **kw)
+    write(name, data)
+    return data, [(base + scan_off + byte, bit) for byte, bit in mcu_pos]
+
+
+def lm_want(x, y, mcu, pos, rng=r"\(0\.\.39\)x\(0\.\.23\)", step="recalc"):
+    """The dialog's fields after a calculation: pos is (offset, bit), or None
+    for an MCU that wasn't decoded"""
+    off = "Not decoded" if pos is None else f"0x{pos[0]:08X} : {pos[1]}"
+    return (f'harness: lookup {step} \\(range={rng} x="{x}" y="{y}" mcu="\\[{mcu[0]},{mcu[1]}\\]" '
+            f'offset="{off}" focus=')
+
+
+LM_Y3 = [(1, 1, 1), (2, 1, 1), (3, 1, 1)]
+# 36x20, so 5x3 MCUs of 8x8 and a decoded image of 40x24 (padded to whole MCUs)
+lm444, LM444 = lm_file("lm_444.jpg", 36, 20, LM_Y3)
+# 4:2:0, MCUs of 16x16: 4x3 of them, 64x48
+_, LM420 = lm_file("lm_420.jpg", 50, 34, [(1, 2, 2), (2, 1, 1), (3, 1, 1)])
+# Y 2x1, MCUs of 16x8 (wider than high): 3x3 of them, 48x24
+_, LMH2 = lm_file("lm_h2.jpg", 40, 24, [(1, 2, 1), (2, 1, 1), (3, 1, 1)])
+# A restart interval of 2 MCUs: RST0 before MCU 2, RST1 before MCU 4, ...
+_, LMRST = lm_file("lm_rst.jpg", 40, 24, LM_Y3, restart=2)
+# And with two 0xFF fill bytes before each RST marker
+_, LMRSTFILL = lm_file("lm_rst_fill.jpg", 40, 24, LM_Y3, restart=2, fill=2)
+# Cut short in MCU [2,1] (MCU 7), without an EOI and with one after the cut
+lm_cut = LM444[7][0] + 1
+write("lm_trunc.jpg", lm444[:lm_cut])
+write("lm_trunc_eoi.jpg", lm444[:lm_cut] + b"\xff\xd9")
+# And with fill bytes before that EOI (T.81 B.1.1.2)
+write("lm_trunc_fill.jpg", lm444[:lm_cut] + b"\xff\xff\xd9")
+# Cut short at the end of a file of 0xFFFFFFFF bytes (the largest opened),
+# which starts with other data. Sparse, as lm_big.bin is.
+LM_HUGE = 0xFFFFFFFF - lm_cut
+with open(files_dir / "lm_huge.bin", "wb") as f:
+    f.write(bytes(random.Random(5).randrange(256) for _ in range(4096)))
+    f.seek(LM_HUGE)
+    f.write(lm444[:lm_cut])
+# After another JPEG, for File > Offset: offsets are the file's, not the JPEG's
+write("lm_two.jpg", c444 + lm444)
+LM_TWO = [(len(c444) + off, bit) for off, bit in LM444]
+# More than 256 MB in, where the decoder's 32-bit map of MCU positions kept
+# only 28 bits of the offset. A sparse file: little is written to disk.
+LM_BIG = 0x10000100
+with open(files_dir / "lm_big.bin", "wb") as f:
+    f.seek(LM_BIG)
+    f.write(lm444)
+LM_BIG_POS = [(LM_BIG + off, bit) for off, bit in LM444]
+LM_ALL = ",".join(f"x={mx * 8 + 3},y={my * 8 + 5},recalc" for my in range(3) for mx in range(5)) + ",close"
+LM_ALL_H2 = ",".join(f"x={mx * 16 + 9},y={my * 8 + 2},recalc" for my in range(3) for mx in range(3)) + ",close"
+NOT_CALC = 'mcu="Not Calculated" offset="Not Calculated"'
+
+# The menu item, where Windows has it; off until a file is open
+lookup_case("LM_menu", "close", 'harness: lookup menu=&Tools after="Image Search Rev" separator=1 enabled=1 '
+            'tip="Calculate file offset for an MCU"$')
+lookup_case("LM_off_no_file", "close", "harness: menu Lookup MCU Offset unavailable$", extra="--lookup-at 0")
+# It stays on after a file that couldn't be opened, or was empty
+for cid, name in (("LM_not_analyzed", "f4_no_such_file.jpg"), ("LM_not_analyzed_empty", "f4_empty.jpg")):
+    lookup_case(cid, "close", "harness: message box: The file shown couldn't be analyzed, so it has no MCUs to look "
+                "up\\.$", names=("lm_444.jpg", name), extra="--lookup-at 2")
+# With no scan decoded, Windows offered the dialog with a range of 0 to
+# 4294967295 and read a null map
+LM_NO_SCAN = ("harness: message box: No JPEG image was decoded in the file shown, so there are no MCUs to look up\\. "
+              "The report says why\\.$")
+lookup_case("LM_no_decode_image", "close", "harness: message box: No image was decoded, so there are no MCUs to look "
+            "up: Options > Scan Segment > Decode Image is off\\.$", extra="--no-decode-image")
+lookup_case("LM_progressive", "close", LM_NO_SCAN, names=("ok_progressive.jpg",))
+lookup_case("LM_psd", "close", LM_NO_SCAN, names=("psd_rgb_rle.psd",))
+# Nor after a file that was decoded
+lookup_case("LM_progressive_after_decoded", "close", LM_NO_SCAN, names=("lm_444.jpg", "ok_progressive.jpg"),
+            extra="--lookup-at 2", forbid="harness: lookup dialog:")
+
+# The dialog: Windows' fields, the range being the decoded image's (padded
+# to whole MCUs, as the preview is), with the MCU added
+lookup_case("LM_dialog", "close", 'harness: lookup dialog: Lookup File Offset of MCU \\(range=\\(0\\.\\.39\\)x'
+            '\\(0\\.\\.23\\) x="0" y="0" ' + NOT_CALC + ' focus=x\\(all selected\\)\\)$')
+lookup_case("LM_range_420", "close", 'harness: lookup dialog: .*range=\\(0\\.\\.63\\)x\\(0\\.\\.47\\) ',
+            names=("lm_420.jpg",))
+
+# Each MCU at the position dc_only_jpeg() wrote it, from a pixel inside it
+for cid, ind in (("LM_first", 0), ("LM_bit", 1), ("LM_row_end", 4), ("LM_row_next", 5), ("LM_middle", 7),
+                 ("LM_last", 14)):
+    mx, my = ind % 5, ind // 5
+    lookup_case(cid, LM_ALL, lm_want(mx * 8 + 3, my * 8 + 5, (mx, my), LM444[ind]))
+# A pixel in the padding is in the last MCU
+lookup_case("LM_padding", "x=39,y=23,recalc,close", lm_want(39, 23, (4, 2), LM444[14]))
+lookup_case("LM_mcu_edges", "x=7,y=8,recalc,close", lm_want(7, 8, (0, 1), LM444[5]))
+# MCUs of 16x16, and of 16x8 (so X and Y can't be mixed up)
+lookup_case("LM_420", "x=17,y=15,recalc,close", lm_want(17, 15, (1, 0), LM420[1], r"\(0\.\.63\)x\(0\.\.47\)"),
+            names=("lm_420.jpg",))
+lookup_case("LM_420_last", "x=63,y=47,recalc,close", lm_want(63, 47, (3, 2), LM420[11], r"\(0\.\.63\)x\(0\.\.47\)"),
+            names=("lm_420.jpg",))
+for cid, ind in (("LM_h2_across", 1), ("LM_h2_down", 3), ("LM_h2_last", 8)):
+    mx, my = ind % 3, ind // 3
+    lookup_case(cid, LM_ALL_H2, lm_want(mx * 16 + 9, my * 8 + 2, (mx, my), LMH2[ind], r"\(0\.\.47\)x\(0\.\.23\)"),
+                names=("lm_h2.jpg",))
+
+# After a restart marker, the MCU starts after the marker. (On Windows too,
+# the position recorded was before it, where the previous MCU's bits ended.)
+for cid, ind in (("LM_rst_first", 2), ("LM_rst_second", 4), ("LM_rst_row", 10), ("LM_rst_between", 3)):
+    mx, my = ind % 5, ind // 5
+    lookup_case(cid, LM_ALL, lm_want(mx * 8 + 3, my * 8 + 5, (mx, my), LMRST[ind]), names=("lm_rst.jpg",))
+# Also with Detailed Decode, which decodes the MCUs it reports separately
+lookup_case("LM_rst_detail", LM_ALL, lm_want(19, 5, (2, 0), LMRST[2]), names=("lm_rst.jpg", "lm_rst.jpg"),
+            extra="--lookup-at 2 --detail-dlg on,x=0,y=0,len=15,ok --detail-dlg-at 1")
+
+# A scan cut short: the MCU it ends in starts where it did, and the ones after
+# aren't decoded. (They said 0x00000000 : 0, as the hover did, and the first
+# of each later row the decoder's position after the end: past the end of the
+# file, or at the EOI marker.)
+lookup_case("LM_trunc_last", LM_ALL, lm_want(19, 13, (2, 1), LM444[7]), names=("lm_trunc.jpg",))
+lookup_case("LM_trunc_after", LM_ALL, lm_want(27, 13, (3, 1), None), names=("lm_trunc.jpg",))
+lookup_case("LM_trunc_next_row", LM_ALL, lm_want(3, 21, (0, 2), None), names=("lm_trunc.jpg",))
+lookup_case("LM_trunc_eoi_marker", LM_ALL, lm_want(27, 13, (3, 1), None), names=("lm_trunc_eoi.jpg",))
+lookup_case("LM_trunc_eoi_next_row", LM_ALL, lm_want(3, 21, (0, 2), None), names=("lm_trunc_eoi.jpg",))
+# Fill bytes before the EOI aren't scan data either: the decoder reads them
+# as data, and the MCUs after the cut started in them
+lookup_case("LM_trunc_fill_last", LM_ALL, lm_want(19, 13, (2, 1), LM444[7]), names=("lm_trunc_fill.jpg",))
+lookup_case("LM_trunc_fill_after", LM_ALL, lm_want(27, 13, (3, 1), None), names=("lm_trunc_fill.jpg",))
+lookup_case("LM_trunc_fill_next_row", LM_ALL, lm_want(3, 21, (0, 2), None), names=("lm_trunc_fill.jpg",))
+# Fill bytes before RST markers, then an EOI without them: the end of the scan
+# data is still the EOI
+lookup_case("LM_rst_fill_after", LM_ALL, lm_want(19, 5, (2, 0), LMRSTFILL[2]), names=("lm_rst_fill.jpg",))
+lookup_case("LM_rst_fill_last", LM_ALL, lm_want(35, 21, (4, 2), LMRSTFILL[14]), names=("lm_rst_fill.jpg",))
+# At the end of a file of 0xFFFFFFFF bytes, the scan's position after the end
+# wrapped around to 0: the decoder read the next row from the start of the
+# file, and its first MCU showed 0x00000001 : 4
+LM_HUGE_STEPS = f"--offset value={LM_HUGE:X},ok"
+lookup_case("LM_huge_last", LM_ALL, lm_want(19, 13, (2, 1), (LM_HUGE + LM444[7][0], LM444[7][1])),
+            names=("lm_huge.bin",), extra=LM_HUGE_STEPS)
+lookup_case("LM_huge_next_row", LM_ALL, lm_want(3, 21, (0, 2), None), names=("lm_huge.bin",), extra=LM_HUGE_STEPS)
+lookup_case("LM_huge_hover", "close", 'harness: hover 3,21: "MCU \\[0000,0002\\]" "File: not decoded" ',
+            names=("lm_huge.bin",), extra=LM_HUGE_STEPS + " --hover 3,21")
+# The image window's status bar says so too, and agrees with the dialog
+lookup_case("LM_hover_not_decoded", "close", 'harness: hover 27,13: "MCU \\[0003,0001\\]" "File: not decoded" ',
+            names=("lm_trunc.jpg",), extra="--hover 3,5/27,13")
+lookup_case("LM_hover_same", "close", f'harness: hover 13,10: "MCU \\[0001,0001\\]" "File 0x{LM444[6][0]:08x}:'
+            f'{LM444[6][1]}" ', extra="--hover 13,10")
+
+# Offsets in the file, with the JPEG decoded from an offset (File > Offset)
+lookup_case("LM_offset", "x=13,y=10,recalc,close", lm_want(13, 10, (1, 1), LM_TWO[6]), names=("lm_two.jpg",),
+            extra=f"--offset value={len(c444):X},ok")
+# More than 256 MB into the file (the offsets wrapped around)
+lookup_case("LM_big", "x=13,y=10,recalc,close", lm_want(13, 10, (1, 1), LM_BIG_POS[6]), names=("lm_big.bin",),
+            extra=f"--offset value={LM_BIG:X},ok")
+lookup_case("LM_big_hover", "close", f'harness: hover 39,23: "MCU \\[0004,0002\\]" "File 0x{LM_BIG_POS[14][0]:08x}:'
+            f'{LM_BIG_POS[14][1]}" ', names=("lm_big.bin",), extra=f"--offset value={LM_BIG:X},ok --hover 39,23")
+# The file opened last, not the one before
+lookup_case("LM_second_file", "x=17,y=15,recalc,close",
+            lm_want(17, 15, (1, 0), LM420[1], r"\(0\.\.63\)x\(0\.\.47\)"), names=("lm_444.jpg", "lm_420.jpg"),
+            extra="--lookup-at 2")
+
+# What can be typed: a whole number in the range, spaces around it allowed.
+# (Windows said "Pixel X coord out of range", and for text that wasn't a
+# number, calculated from the last number.)
+LM_X_RANGE = "harness: message box: X must be a whole number from 0 to 39\\.$"
+for cid, text in (("LM_x_too_large", "40"), ("LM_x_not_number", "abc"), ("LM_x_empty", ""), ("LM_x_negative", "-1"),
+                  ("LM_x_huge", "99999999999999999999"), ("LM_x_hex", "0x10")):
+    lookup_case(cid, f"x={text},recalc,close", LM_X_RANGE)
+lookup_case("LM_y_too_large", "y=24,recalc,close", "harness: message box: Y must be a whole number from 0 to 23\\.$")
+lookup_case("LM_refused_no_result", "x=40,recalc,close", 'harness: lookup recalc \\(.* x="40" y="0" ' + NOT_CALC)
+lookup_case("LM_spaces", "x=%2013%20,y=10,recalc,close", lm_want("%2013%20".replace("%20", " "), 10, (1, 1), LM444[6]))
+lookup_case("LM_largest", "x=39,y=23,recalc,close", lm_want(39, 23, (4, 2), LM444[14]), forbid="message box")
+
+# Return calculates (on Windows it closed the dialog, as OK); Escape and
+# Close close it
+lookup_case("LM_return", "x=13,y=10,return,close", lm_want(13, 10, (1, 1), LM444[6], step="return"))
+lookup_case("LM_return_stays", "x=13,y=10,return,close", "harness: lookup dialog close ",
+            forbid="closed the dialog")
+lookup_case("LM_escape", "escape+close", "harness: lookup dialog: .*focus=x\\(all selected\\)\\)$",
+            forbid="didn't close|not shown|still open")
+lookup_case("LM_close", "close+close", "harness: lookup dialog close ", forbid="didn't close|not shown|still open")
+# A result shown is for the pixel in the fields: changing one clears it (on
+# Windows it stayed until Recalc)
+lookup_case("LM_edit_clears", "x=13,y=10,recalc,x=14,close", 'harness: lookup typed x=14 \\(.* x="14" y="10" '
+            + NOT_CALC)
+# The dialog opens afresh each time
+lookup_case("LM_reopen", "x=13,y=10,recalc,close+close", 'harness: lookup dialog close \\(.* x="0" y="0" '
+            + NOT_CALC)
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

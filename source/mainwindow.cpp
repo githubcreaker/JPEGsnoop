@@ -33,6 +33,7 @@
 #include "batchdialog.h"
 #include "batchprocess.h"
 #include "finddialog.h"
+#include "lookupdialog.h"
 #include "offsetdialog.h"
 #include "overlaydialog.h"
 #include "ImgDecode.h"
@@ -456,7 +457,9 @@ void MainWindow::createActions(void)
   connect(imgSearchRevAct, &QAction::triggered, this, &MainWindow::onImageSearchRev);
 
   lookupMcuOffAct = new QAction(tr("Lookup MCU Offset..."), this);
+  lookupMcuOffAct->setStatusTip(tr("Calculate file offset for an MCU"));
   lookupMcuOffAct->setEnabled(false);
+  connect(lookupMcuOffAct, &QAction::triggered, this, &MainWindow::onLookupMcuOffset);
 
   fileOverlayAct = new QAction(tr("File Overlay..."), this);
   fileOverlayAct->setEnabled(false);
@@ -1876,6 +1879,55 @@ void MainWindow::imageSearch(bool bForward)
                                 "from its start.")
                                .arg(strStart));
   }
+}
+
+//-----------------------------------------------------------------------------
+// Tools > Lookup MCU Offset: where the MCU holding a pixel of the decoded
+// image starts in the file (master's CJPEGsnoopDoc::OnToolsLookupmcuoffset).
+// As there, it reads the decoder's map of MCU positions, filled when the scan
+// was decoded, so the file isn't read again. The dialog is modal, so the image
+// can't change while it is open.
+void MainWindow::onLookupMcuOffset()
+{
+  if(m_currentFile.isEmpty())
+  {
+    return;
+  }
+
+  // The menu stays enabled after a file that couldn't be opened
+  if(!m_bFileAnalyzed)
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("The file shown couldn't be analyzed, so it has no MCUs to look up."));
+    return;
+  }
+
+  // Windows offered the dialog with no scan decoded (with Decode Image off, or
+  // for a progressive JPEG), with a range of 0 to 4294967295, and read a null
+  // map
+  if(!m_pImgDec->IsImgDecoded() || !m_pImgDec->IsPreviewReady())
+  {
+    if(!m_pAppConfig->decodeImage())
+      QMessageBox::information(this, "JPEGsnoop",
+                               tr("No image was decoded, so there are no MCUs to look up: Options > Scan Segment > "
+                                  "Decode Image is off."));
+    else
+      QMessageBox::information(this, "JPEGsnoop",
+                               tr("No JPEG image was decoded in the file shown, so there are no MCUs to look up. "
+                                  "The report says why."));
+    return;
+  }
+
+  uint32_t nSizeX = 0;
+  uint32_t nSizeY = 0;
+  m_pImgDec->GetImageSize(nSizeX, nSizeY);
+  CLookupDialog dlg(nSizeX, nSizeY,
+                    [this](QPoint ptPix, QPoint &ptMcu, uint32_t &nByte, uint32_t &nBit) {
+                      ptMcu = m_pImgDec->PixelToMcu(ptPix);
+                      return m_pImgDec->LookupFilePosPix(ptPix, nByte, nBit);
+                    },
+                    this);
+  dlg.exec();
 }
 
 //-----------------------------------------------------------------------------

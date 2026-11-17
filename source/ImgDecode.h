@@ -367,8 +367,10 @@ public:
   void SetPreviewOverlayMcuGridToggle();
 
   // Utilities
-  void LookupFilePosPix(QPoint p, uint32_t &nByte, uint32_t &nBit);
-  void LookupFilePosMcu(QPoint p, uint32_t &nByte, uint32_t &nBit);
+  // Where an MCU's scan data starts in the file: false (and 0) if the point
+  // is outside the image or the decode didn't reach that MCU
+  bool LookupFilePosPix(QPoint p, uint32_t &nByte, uint32_t &nBit);
+  bool LookupFilePosMcu(QPoint p, uint32_t &nByte, uint32_t &nBit);
   void LookupBlkYCC(QPoint p, int32_t &nY, int32_t &nCb, int32_t &nCr);
 
   void SetMarkerBlk(QPoint p);
@@ -400,8 +402,8 @@ public:
   void ScanErrorsDisable();
   void ScanErrorsEnable();
 
-  uint32_t PackFileOffset(uint32_t nByte, uint32_t nBit);
-  void UnpackFileOffset(uint32_t nPacked, uint32_t & nByte, uint32_t & nBit);
+  uint64_t PackFileOffset(uint32_t nByte, uint32_t nBit);
+  void UnpackFileOffset(uint64_t nPacked, uint32_t & nByte, uint32_t & nBit);
 
   void GetBitmapPtr(uint8_t * &pBitmap);
 
@@ -453,6 +455,8 @@ private:
   QString GetScanBufPos();
   QString GetScanBufPos(uint32_t pos, uint32_t align);
   QString GetMcuFilePos(uint32_t nMcuX, uint32_t nMcuY);
+  void RecordMcuPos(uint32_t nPos, uint32_t nAlign);
+  void ScanBuffPtrAdvance(uint32_t nBytes);
 
   void ConvertYCCtoRGB(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix);
   void ConvertYCCtoRGBFastFloat(PixelCc & sPix);
@@ -505,7 +509,17 @@ private:
 
   QMessageBox msgBox;
 
-  uint32_t *m_pMcuFileMap;
+  // Where each MCU starts in the file (PackFileOffset()), or kMcuNotDecoded.
+  // (32-bit entries kept only 28 bits of the byte, so in a file over 256 MB
+  // the offsets wrapped around.)
+  static constexpr uint64_t kMcuNotDecoded = UINT64_MAX;
+  uint64_t *m_pMcuFileMap;
+  // The MCU (index in m_pMcuFileMap) whose position the next code read
+  // records (RecordMcuPos()), or -1
+  int64_t m_nMcuPosPending;
+  // Where the scan's data ends: its first marker other than RSTn (or the
+  // fill bytes before it), or the end of the file (UINT32_MAX until seen)
+  uint32_t m_nScanDataEnd;
   int32_t m_nMcuWidth;         // Width (pix) of MCU (e.g. 8,16)
   int32_t m_nMcuHeight;        // Height (pix) of MCU (e.g. 8,16)
   int32_t m_nMcuXMax;          // Number of MCUs across

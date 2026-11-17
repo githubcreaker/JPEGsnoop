@@ -125,6 +125,8 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
   m_bStatClipEn = false;        // UNUSED
 
   m_pMcuFileMap = 0;
+  m_nMcuPosPending = -1;
+  m_nScanDataEnd = UINT32_MAX;
   m_pBlkDcValY = 0;
   m_pBlkDcValCb = 0;
   m_pBlkDcValCr = 0;
@@ -1268,6 +1270,19 @@ inline uint32_t CimgDecode::ExtractBits(uint32_t nWord, uint32_t nBits)
   return nVal;
 }
 
+// Move the scan buffer's file pointer on by nBytes, stopping at the last
+// position, which is past the end of any file. (In a file of 0xFFFFFFFF
+// bytes, the position after the end wrapped around to 0, and the decoder went
+// on to read the start of the file as scan data.)
+//
+// POST:
+// - m_nScanBuffPtr
+//
+inline void CimgDecode::ScanBuffPtrAdvance(uint32_t nBytes)
+{
+  m_nScanBuffPtr = (m_nScanBuffPtr > UINT32_MAX - nBytes) ? UINT32_MAX : (m_nScanBuffPtr + nBytes);
+}
+
 // Removes bits from the holding buffer
 // - Discard the leftmost "nNumBits" of m_nScanBuff
 // - And then realign file position pointers
@@ -1823,8 +1838,9 @@ uint32_t CimgDecode::BuffAddByte()
   // after EOI, and never use those bytes.)
   if(m_nScanBuffPtr >= m_pWBuf->GetPosEof())
   {
+    m_nScanDataEnd = qMin(m_nScanDataEnd, m_pWBuf->GetPosEof());
     ScanBuffAddErr(0x00, m_nScanBuffPtr, SCANBUF_EOF);
-    m_nScanBuffPtr += 1;
+    ScanBuffPtrAdvance(1);
     return 0;
   }
 
@@ -1923,7 +1939,7 @@ uint32_t CimgDecode::BuffAddByte()
   {
     // Add byte to m_nScanBuff & record file position
     ScanBuffAdd(nBuf0, m_nScanBuffPtr);
-    m_nScanBuffPtr += 2;
+    ScanBuffPtrAdvance(2);
   }
   else if((nBuf0 == 0xFF) && (nBuf1 == 0xFF))
   {
@@ -1965,7 +1981,7 @@ uint32_t CimgDecode::BuffAddByte()
     // routine figure out when we're at the end, etc.
 
     ScanBuffAdd(nBuf0, m_nScanBuffPtr);
-    m_nScanBuffPtr += 1;
+    ScanBuffPtrAdvance(1);
   }
   else if((nBuf0 == 0xFF) && (nMarker != 0x00))
   {
@@ -1973,6 +1989,20 @@ uint32_t CimgDecode::BuffAddByte()
     // always happen at the end of the scan segment. Therefore, we will
     // assume this marker is valid (ie. not bit error in scan stream)
     // and mark the end of the scan segment.
+
+    // The decoder reads on through the marker and the bytes after it, but
+    // an MCU that starts there has no data in this scan. Nor does one that
+    // starts in the marker's fill bytes (T.81 B.1.1.2), the 0xFF bytes just
+    // before it, which the branch above added as data: in scan data a 0xFF is
+    // followed by 0x00.
+    uint32_t nDataEnd = m_nScanBuffPtr;
+
+    while((nDataEnd > m_nScanBuffPtr_first) && (m_pWBuf->Buf(nDataEnd - 1) == 0xFF))
+    {
+      nDataEnd--;
+    }
+
+    m_nScanDataEnd = qMin(m_nScanDataEnd, nDataEnd);
 
     if(m_nWarnBadScanNum < m_nScanErrMax)
     {
@@ -2005,7 +2035,7 @@ uint32_t CimgDecode::BuffAddByte()
     // Add byte to m_nScanBuff & record file position
     ScanBuffAddErr(nBuf0, m_nScanBuffPtr, SCANBUF_BADMARK);
 
-    m_nScanBuffPtr += 1;
+    ScanBuffPtrAdvance(1);
 #endif
   }
   else
@@ -2014,7 +2044,7 @@ uint32_t CimgDecode::BuffAddByte()
     // Add byte to m_nScanBuff & record file position
     ScanBuffAdd(nBuf0, m_nScanBuffPtr);
 
-    m_nScanBuffPtr += 1;
+    ScanBuffPtrAdvance(1);
   }
 
   return 0;
@@ -2111,7 +2141,7 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
       DecodeRestartDcState();
 
       // Step 2
-      m_nScanBuffPtr += 2;
+      ScanBuffPtrAdvance(2);
 
       // Step 3
       DecodeRestartScanBuf(m_nScanBuffPtr, true);
@@ -2132,6 +2162,12 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
       // markers in a row!
       eRsvRet = ReadScanVal(bDC ? 0 : 1, bDC ? nTblDhtDc : nTblDhtAc, nZrl, nVal);
       Q_ASSERT(eRsvRet != RSV_RST_TERM);
+    }
+
+    // The MCU's first code: where the MCU starts
+    if(m_nMcuPosPending >= 0)
+    {
+      RecordMcuPos(nSavedBufPos, nSavedBufAlign);
     }
 
     // In case we encountered a restart marker or bad scan marker
@@ -2457,7 +2493,7 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
       DecodeRestartDcState();
 
       // Step 2
-      m_nScanBuffPtr += 2;
+      ScanBuffPtrAdvance(2);
 
       // Step 3
       DecodeRestartScanBuf(m_nScanBuffPtr, true);
@@ -2478,6 +2514,12 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
       // markers in a row!
       eRsvRet = ReadScanVal(bDC ? 0 : 1, bDC ? nTblDhtDc : nTblDhtAc, nZrl, nVal);
       Q_ASSERT(eRsvRet != RSV_RST_TERM);
+    }
+
+    // The MCU's first code: where the MCU starts
+    if(m_nMcuPosPending >= 0)
+    {
+      RecordMcuPos(nSavedBufPos, nSavedBufAlign);
     }
 
     // In case we encountered a restart marker or bad scan marker
@@ -3620,7 +3662,7 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
 
   // Allocate the MCU File Map
   Q_ASSERT(m_pMcuFileMap == 0);
-  m_pMcuFileMap = new uint32_t[m_nMcuYMax * m_nMcuXMax];
+  m_pMcuFileMap = new uint64_t[m_nMcuYMax * m_nMcuXMax];
 
   if(!m_pMcuFileMap)
   {
@@ -3636,7 +3678,9 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
     return;
   }
   
-  memset(m_pMcuFileMap, 0, (m_nMcuYMax * m_nMcuXMax * sizeof(int32_t)));
+  // An MCU the decode doesn't reach (after the scan stopped in its row) has
+  // no position. (They were 0, which looked like the start of the file.)
+  std::fill_n(m_pMcuFileMap, m_nMcuYMax * m_nMcuXMax, kMcuNotDecoded);
 
   // Allocate the 8x8 Block DC Map
   m_pBlkDcValY = new int16_t[m_nBlkYMax * m_nBlkXMax];
@@ -4039,8 +4083,11 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
       // Precalculate MCU matrix index
       uint32_t nMcuXY = nMcuY * m_nMcuXMax + nMcuX;
 
-      // Mark the start of the MCU in the file map
-      m_pMcuFileMap[nMcuXY] = PackFileOffset(m_anScanBuffPtr_pos[0], m_nScanBuffPtr_align);
+      // Mark the start of the MCU in the file map: where DecodeScanComp()
+      // reads its first code, after the restart marker before it if there is
+      // one. (It was marked here, before the marker: the position of the
+      // previous MCU's padding bits.)
+      m_nMcuPosPending = static_cast<int64_t>(nMcuXY);
 
       // Is this an MCU that we want full printing of decode process?
       // (In 64 bits: the range wrapped around, so a large Y or length chose
@@ -5033,6 +5080,10 @@ void CimgDecode::DecodeRestartScanBuf(uint32_t nFilePos, bool bRestart)
     // not after any RSTn markers. This is only used for the compression
     // ratio calculations.
     m_nScanBuffPtr_first = nFilePos;
+
+    // Nor where the scan's data ends, or the MCU whose position is wanted
+    m_nScanDataEnd = UINT32_MAX;
+    m_nMcuPosPending = -1;
   }
 
   m_nScanBuffPtr_start = nFilePos;
@@ -6314,24 +6365,29 @@ void CimgDecode::CalcChannelPreview()
   return;
 }
 
-// Determine the file position from a pixel coordinate
+// Determine the file position from a pixel coordinate (of the decoded
+// image, which is padded to whole MCUs)
 //
 // INPUT:
-// - nPixX                                      = Pixel coordinate (x)
-// - nPixY                                      = Pixel coordinate (y)
+// - p                                          = Pixel coordinate
 // OUTPUT:
 // - nByte                                      = File offset (byte)
 // - nBit                                       = File offset (bit)
+// RETURN:
+// - False (and 0) if the pixel is outside the image or its MCU wasn't decoded
 //
-void CimgDecode::LookupFilePosPix(QPoint p, uint32_t &nByte, uint32_t &nBit)
+bool CimgDecode::LookupFilePosPix(QPoint p, uint32_t &nByte, uint32_t &nBit)
 {
-  uint32_t nMcuX, nMcuY;
-  uint32_t nPacked;
+  // (It didn't check the map or the range: with no scan decoded, Tools >
+  // Lookup MCU Offset read a null map)
+  if((p.x() < 0) || (p.y() < 0) || (p.x() >= m_nImgSizeX) || (p.y() >= m_nImgSizeY))
+  {
+    nByte = 0;
+    nBit = 0;
+    return false;
+  }
 
-  nMcuX = p.x() / m_nMcuWidth;
-  nMcuY = p.y() / m_nMcuHeight;
-  nPacked = m_pMcuFileMap[nMcuX + nMcuY * m_nMcuXMax];
-  UnpackFileOffset(nPacked, nByte, nBit);
+  return LookupFilePosMcu(PixelToMcu(p), nByte, nBit);
 }
 
 // Determine the file position from a MCU coordinate
@@ -6343,20 +6399,25 @@ void CimgDecode::LookupFilePosPix(QPoint p, uint32_t &nByte, uint32_t &nBit)
 // - nByte                                    = File offset (byte)
 // - nBit                                       = File offset (bit)
 //
-void CimgDecode::LookupFilePosMcu(QPoint p, uint32_t &nByte, uint32_t &nBit)
+bool CimgDecode::LookupFilePosMcu(QPoint p, uint32_t &nByte, uint32_t &nBit)
 {
-  uint32_t nPacked;
+  nByte = 0;
+  nBit = 0;
 
   // The map is freed on Reset() and the point can come from the mouse
   if((!m_pMcuFileMap) || (p.x() < 0) || (p.y() < 0) || (p.x() >= m_nMcuXMax) || (p.y() >= m_nMcuYMax))
   {
-    nByte = 0;
-    nBit = 0;
-    return;
+    return false;
   }
 
-  nPacked = m_pMcuFileMap[p.x() + p.y() * m_nMcuXMax];
+  const uint64_t nPacked = m_pMcuFileMap[p.x() + p.y() * m_nMcuXMax];
+  if(nPacked == kMcuNotDecoded)
+  {
+    return false;
+  }
+
   UnpackFileOffset(nPacked, nByte, nBit);
+  return true;
 }
 
 // Determine the YCC DC value of a specified block
@@ -6449,6 +6510,28 @@ uint32_t CimgDecode::McuXyToLinear(QPoint ptMcu)
   return nLinear;
 }
 
+// Record where the MCU marked by m_nMcuPosPending starts in the file
+// (PackFileOffset() notation), as its first code is read
+//
+// INPUT:
+// - nPos                       = File position of the code's first bit (byte)
+// - nAlign                     = File position of the code's first bit (bit)
+//
+void CimgDecode::RecordMcuPos(uint32_t nPos, uint32_t nAlign)
+{
+  // From the marker that ends the scan data (or the end of the file) on,
+  // the decoder reads bytes that aren't this scan's: an MCU that starts
+  // there has no data, so it isn't recorded. (After the scan stops in a row,
+  // the decoder goes on to the first MCU of each row after it, and recorded
+  // its position: past the end of the file, or at the EOI marker.)
+  if(m_pMcuFileMap && (nPos < m_nScanDataEnd))
+  {
+    m_pMcuFileMap[m_nMcuPosPending] = PackFileOffset(nPos, nAlign);
+  }
+
+  m_nMcuPosPending = -1;
+}
+
 // Create a file offset notation that represents bytes and bits
 // - Essentially a fixed-point notation
 //
@@ -6456,32 +6539,28 @@ uint32_t CimgDecode::McuXyToLinear(QPoint ptMcu)
 // - nByte                            = File byte position
 // - nBit                               = File bit position
 // RETURN:
-// - Fixed-point file offset (29b for bytes, 3b for bits)
+// - Fixed-point file offset (60b for bytes, 4b for bits)
 //
-uint32_t CimgDecode::PackFileOffset(uint32_t nByte, uint32_t nBit)
+uint64_t CimgDecode::PackFileOffset(uint32_t nByte, uint32_t nBit)
 {
-  uint32_t nTmp;
-
   // Note that we only really need 3 bits, but I'll keep 4
-  // so that the file offset is human readable. We will only
-  // handle files up to 2^28 bytes (256MB), so this is probably
-  // fine!
-  nTmp = (nByte << 4) + nBit;
-  return nTmp;
+  // so that the file offset is human readable. (In 32 bits that left 28 for
+  // the byte, so a JPEG over 256 MB into a file got the wrong offsets.)
+  return (static_cast<uint64_t>(nByte) << 4) + nBit;
 }
 
 // Convert from file offset notation to bytes and bits
 //
 // INPUT:
-// - nPacked                    = Fixed-point file offset (29b for bytes, 3b for bits)
+// - nPacked                    = Fixed-point file offset (60b for bytes, 4b for bits)
 // OUTPUT:
 // - nByte                            = File byte position
 // - nBit                               = File bit position
 //
-void CimgDecode::UnpackFileOffset(uint32_t nPacked, uint32_t &nByte, uint32_t &nBit)
+void CimgDecode::UnpackFileOffset(uint64_t nPacked, uint32_t &nByte, uint32_t &nBit)
 {
-  nBit = nPacked & 0x7;
-  nByte = nPacked >> 4;
+  nBit = static_cast<uint32_t>(nPacked & 0x7);
+  nByte = static_cast<uint32_t>(nPacked >> 4);
 }
 
 // Fetch the number of block markers assigned
