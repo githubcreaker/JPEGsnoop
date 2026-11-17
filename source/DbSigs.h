@@ -91,8 +91,8 @@ public:
   // if none was)
   QString DatabaseExtraPath() const;
 
-  // Read the user database again (at startup, and when its folder changes).
-  // A missing file is an empty database.
+  // Read the user database again (at startup, when its folder changes, and
+  // before an entry is added). A missing file is an empty database.
   void DatabaseExtraLoad();
 
   // Why the user database file couldn't be read in full, or empty if it
@@ -108,7 +108,8 @@ public:
   };
 
   // Add an entry to the user database and save it (Tools > Add Camera/SW to
-  // DB). For software, the make and model aren't kept.
+  // DB). For software, the make and model aren't kept. The file is read
+  // again first, so what another copy of JPEGsnoop added is kept.
   AddResult DatabaseExtraAdd(QString strExifMake, QString strExifModel,
                              QString strQual, QString strSig, QString strSigRot, QString strCss,
                              teSource eUserSource, QString strUserSoftware, QString &strDetail);
@@ -130,7 +131,8 @@ private:
   void SetEntryValid(uint32_t nInd, bool bValid);
 
   void DatabaseExtraClean();
-  bool DatabaseExtraStore(QString &strError);
+  QByteArray DatabaseExtraBytes() const;
+  bool DatabaseExtraWrite(const QByteArray &abData, QString &strError);
 
   bool IsBuiltInEntry(const CompSig &sEntry) const;
   bool IsUserEntry(const CompSig &sEntry) const;

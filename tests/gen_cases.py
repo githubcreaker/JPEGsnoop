@@ -2705,6 +2705,10 @@ AD_WIN03 = [AD_CAM_ENTRY,
 write("ad_db_win03.dat", user_db(AD_WIN03))
 write("ad_db_win02.dat", user_db([AD_CAM_ENTRY], version="02"))
 write("ad_db_win01.dat", user_db([("TestCam", "Model 1", 1, "normal", AD_SIG, "", "1x1", "", "")], version="01"))
+# Version 01 kept only the signature of the tables as they are: here quality
+# 50's, which sorts after the rotated one (the one added first)
+write("ad_db_win01_q50.dat", user_db([("", "", 2, "", AD_Q50_SIG, "", "1x1", "", "GIMP"),
+                                      ("???", "???", 1, "", AD_Q50_SIG, "", "1x1", "", "")], version="01"))
 write("ad_db_builtin.dat", user_db([("SONY", "DSC-W1", 1, "", AD_SIG, AD_ROT, "2x1", "", ""),
                                     ("SONY", "DSC-W1", 1, "", AD_SIG, AD_ROT, "1x1", "", "")]))
 
@@ -2721,6 +2725,23 @@ write("ad_db_notdb.dat", AD_NOTDB)
 write("ad_db_v04.dat", user_db([AD_CAM_ENTRY], version="04"))
 write("ad_db_trunc.dat", user_db(AD_WIN03[:2], count=3, end=False))
 write("ad_db_noend.dat", user_db(AD_WIN03[:1], end=False))
+# Databases near the size the start reads (4 MiB): AD_CAM_ENTRY, added, makes
+# the first exactly that size, and the second 2 bytes more. Their one entry is
+# software with a long name and signatures no file here has.
+AD_LIMIT = 4 * 1024 * 1024
+AD_ENTRY_BYTES = len(user_db([AD_CAM_ENTRY])) - len(user_db([]))
+
+
+def ad_padded(total):
+    def db(name):
+        return user_db([("", "", 2, "", "03" + "0" * 30, "04" + "0" * 30, "1x1", "", name)])
+    out = db("P" * ((total - len(db(""))) // 2))
+    assert len(out) == total
+    return out
+
+
+write("ad_db_limit.dat", ad_padded(AD_LIMIT - AD_ENTRY_BYTES))
+write("ad_db_over.dat", ad_padded(AD_LIMIT - AD_ENTRY_BYTES + 2))
 with open(files_dir / "ad_db_big.dat", "wb") as f:
     f.write(user_db([AD_CAM_ENTRY]))
     f.seek(4 * 1024 * 1024)
@@ -2908,10 +2929,12 @@ add_db_case("AD_unreadable_note", "cancel", ad_note("couldn't be opened: .*"),
 add_db_case("AD_unreadable_kept", "ok", "harness: message box: ERROR: The signature wasn't added: "
             "\\[/.*/JPEGsnoop_db\\.dat\\] couldn't be kept as \\[/.*/JPEGsnoop_db\\.dat\\.bak\\], so it wasn't "
             "replaced: ", extra="--user-db ad_db_win03.dat --user-db-mode 000")
+add_db_case("AD_unreadable_count", "ok", ad_count(0), extra="--user-db ad_db_win03.dat --user-db-mode 000")
 
 # A folder that isn't there: not added, so not searched either
 add_db_case("AD_no_folder", "ok", "harness: message box: ERROR: The signature wasn't added: "
-            "\\[/.*/missing/JPEGsnoop_db\\.dat\\] couldn't be written: ", extra="--db-dir missing")
+            "\\[/.*/missing/JPEGsnoop_db\\.dat\\] couldn't be written: there is no folder \\[/.*/missing\\]$",
+            extra="--db-dir missing")
 add_db_case("AD_no_folder_count", "ok", ad_count(0), extra="--db-dir missing")
 # Options > Configuration: the new folder's database is searched and added to
 # (Windows kept the old folder's entries and wrote them over the new file)
@@ -2921,6 +2944,59 @@ add_db_case("AD_folder_after", "folder=other+" + AD_NEW_SW, ad_count(2), extra=A
 add_db_case("AD_folder_file", "folder=other+" + AD_NEW_SW, "harness: add-db file: .* count=2$", extra=AD_FOLDERS)
 add_db_case("AD_folder_none", "folder=+ok", "harness: message box: ERROR: The signature wasn't added: No folder is set "
             "for the user database \\(Options > Configuration\\)$")
+
+# Version 01's signature is found whichever signature is added first (the
+# lower one: here the rotated one, which version 01 didn't keep)
+W01Q = "--user-db ad_db_win01_q50.dat"
+add_db_case("AD_load_01_rot_sw", "source=sw,software=GIMP,ok", AD_ALREADY, names=("ad_q50.jpg",), extra=W01Q)
+add_db_case("AD_load_01_rot_cam", "source=cam,ok", AD_ALREADY, names=("ad_q50.jpg",), extra=W01Q)
+add_db_case("AD_load_01_rot_unchanged", "source=sw,software=GIMP,ok", "harness: add-db file: header=JPEGsnoop "
+            "version=01 utf16=0 count=2$", names=("ad_q50.jpg",), extra=W01Q)
+
+# No larger than the start reads: one that would be is refused, and the file
+# is left as it was
+add_db_case("AD_limit_added", AD_CAM, AD_ADDED, extra="--user-db ad_db_limit.dat")
+add_db_case("AD_limit_next_start", AD_CAM, 'harness: add-db next start: user=2 note=""$', extra="--user-db ad_db_limit.dat")
+AD_OVER = "--user-db ad_db_over.dat"
+add_db_case("AD_over", AD_CAM, "harness: message box: ERROR: The signature wasn't added: \\[/.*/JPEGsnoop_db\\.dat\\] "
+            f"would be {AD_LIMIT + 2} bytes with it, more than the {AD_LIMIT} that JPEGsnoop reads, so it wasn't "
+            "changed$", extra=AD_OVER)
+add_db_case("AD_over_next_start", AD_CAM, 'harness: add-db next start: user=1 note=""$', extra=AD_OVER)
+add_db_case("AD_over_unchanged", AD_CAM, "harness: add-db file: .* count=1$", extra=AD_OVER)
+add_db_case("AD_over_count", AD_CAM, ad_count(1), extra=AD_OVER)
+
+# Another copy of JPEGsnoop, started with this one, adds to the same file:
+# both entries are kept, whichever adds first, and one it added is already in
+AD_OTHER_SW = ad_entry(1, 2, "", "", "", AD_SIG, AD_ROT, "1x1", "GIMP")
+add_db_case("AD_other_first", "other=GIMP+" + AD_CAM, "harness: add-db file: .* count=2$")
+add_db_case("AD_other_first_entry", "other=GIMP+" + AD_CAM, AD_OTHER_SW)
+add_db_case("AD_other_first_mine", "other=GIMP+" + AD_CAM,
+            ad_entry(2, 1, "TestCam", "Model 1", "fine", AD_SIG, AD_ROT, "1x1", ""))
+add_db_case("AD_other_first_count", "other=GIMP+" + AD_CAM, ad_count(2))
+add_db_case("AD_other_second", AD_CAM + "+other=GIMP", "harness: add-db file: .* count=2$")
+add_db_case("AD_other_second_said", AD_CAM + "+other=GIMP", "harness: add-db other copy added GIMP: added$")
+add_db_case("AD_other_same", "other=GIMP+source=sw,software=GIMP,ok", AD_ALREADY)
+add_db_case("AD_other_same_count", "other=GIMP+source=sw,software=GIMP,ok", "harness: add-db file: .* count=1$")
+# While another copy writes it (holds its lock), it isn't changed; a lock left
+# by a copy that stopped is taken over
+add_db_case("AD_locked", "lock+" + AD_CAM, "harness: message box: ERROR: The signature wasn't added: "
+            "\\[/.*/JPEGsnoop_db\\.dat\\] is being changed by another copy of JPEGsnoop \\(it holds "
+            "\\[/.*/JPEGsnoop_db\\.dat\\.lock\\]\\)\\. Try again\\.$")
+add_db_case("AD_locked_none", "lock+" + AD_CAM, AD_NONE)
+add_db_case("AD_locked_count", "lock+" + AD_CAM, ad_count(0))
+add_db_case("AD_stale_lock", "stale-lock+" + AD_CAM, AD_ADDED)
+add_db_case("AD_stale_lock_gone", "stale-lock+" + AD_CAM, "harness: add-db files: JPEGsnoop_db\\.dat$")
+# A folder that can't be written to: the lock can't be made
+AD_RO = "--db-dir ro --db-dir-mode 555"
+add_db_case("AD_readonly", AD_CAM, "harness: message box: ERROR: The signature wasn't added: "
+            "\\[/.*/ro/JPEGsnoop_db\\.dat\\] couldn't be written: \\[/.*/ro/JPEGsnoop_db\\.dat\\.lock\\] couldn't "
+            "be made$", extra=AD_RO)
+add_db_case("AD_readonly_none", AD_CAM, AD_NONE, extra=AD_RO)
+# A file that can't be written to: not added, so not searched either
+AD_RO_FILE = "--user-db ad_db_win03.dat --user-db-mode 444"
+add_db_case("AD_readonly_file", AD_NEW_SW, "harness: message box: ERROR: The signature wasn't added: "
+            "\\[/.*/JPEGsnoop_db\\.dat\\] couldn't be written: .*not writable", extra=AD_RO_FILE)
+add_db_case("AD_readonly_file_count", AD_NEW_SW, ad_count(3), extra=AD_RO_FILE)
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

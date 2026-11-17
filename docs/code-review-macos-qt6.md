@@ -1813,8 +1813,66 @@ fail their own cases:
 - **No check for a signature:** 2 fail.
 - **No check for an analyzed file:** 1 fails.
 
+**Second check:** a further review found three problems, each reproduced and now fixed:
+- **Two copies of JPEGsnoop with the same database folder lost entries.** Each read the
+  file at its start and wrote back what it had read plus its own entry, so the second to
+  add wrote over what the first added. Windows does the same. An entry is now added
+  under a lock, `JPEGsnoop_db.dat.lock` beside the file: the file is read again, then
+  written, and the lock removed.
+  - A copy that finds the lock waits up to 5 seconds, then says "[...] is being
+    changed by another copy of JPEGsnoop (it holds [...lock]). Try again."
+  - A lock left by a copy that stopped is taken over: Qt's `QLockFile` treats one as
+    stale when its process has gone or it is over 30 seconds old.
+  - A folder where the lock can't be made gets "[...] couldn't be written: [...lock]
+    couldn't be made", and a folder that isn't there "there is no folder [...]".
+- **An entry could make the file too large to read back.** The start reads at most
+  4 MiB, but nothing limited what was written: a 4,194,272-byte database took an entry,
+  said "Added", and at the next start had no entries at all. An entry that would take
+  the file over 4 MiB is now refused, and the file is left as it was: "[...] would be N
+  bytes with it, more than the 4194304 that JPEGsnoop reads, so it wasn't changed".
+  Usual entries are about 200 bytes. Only very long names, such as a pasted software
+  name, come near the limit.
+- **A version 01 entry wasn't found as a duplicate when the image's tables, as they
+  are, have the higher signature.** Version 01 kept only that signature. An entry being
+  added puts the lower one first, so the comparison missed it, and the same entry was
+  added again. Signatures now match as they do in the signature search: either of the
+  entry's two against either of the other's. Every built-in entry has both signatures,
+  so this affected only version 01 files.
+
+The driver gains openings `other=NAME`, `lock` and `stale-lock`, and the option
+`--db-dir-mode`. `other=NAME` has another copy of JPEGsnoop add software NAME (a
+`CDbSigs` of the driver's own, which read the database when the window opened). `lock`
+holds the lock as such a copy does while it writes. `stale-lock` leaves an hour-old lock
+file. `--db-dir-mode` makes the folder read-only.
+
+27 new cases (747 in all) cover:
+- **Version 01:** a software and a camera entry already in, with the file left as it was.
+- **The size:** an entry that brings the file to exactly 4 MiB is added and read back.
+  One that would make it 2 bytes more is refused, and the file and the list stay as
+  they were.
+- **Another copy:** adding before this one and after it, with both entries kept, and
+  the same entry already in.
+- **The lock:** held by another copy, left by a copy that stopped, and a read-only
+  folder where it can't be made.
+- **A failed save** (a read-only file, an unreadable one, a file over the limit): the
+  entry isn't kept.
+
+The missing-folder case now checks the whole message. On the previous commit 18 of the
+new cases fail. The other 9 check what was already so, such as an entry that brings the
+file to exactly 4 MiB. Ten new deliberate breaks each fail their own cases:
+- **Signatures compared one way**, as before: 3 fail.
+- **The size:** no check, 4 fail; refusing a file of exactly 4 MiB, 2 fail; the entry
+  kept after the check fails, 2 fail.
+- **The file not read again:** 6 fail.
+- **The lock:** none taken, 5 fail; one left by a copy that stopped not taken over, 2
+  fail; the lock not removed after adding, 13 fail.
+- **No check for the folder:** 1 fails.
+- **The entry kept when the old file can't be copied:** 2 fail.
+
+The first 27 breaks were run again on the new code, and each still fails its own cases.
+
 **Checks:**
-- **All 720 pass** with and without ASan/UBSan.
+- **All 747 pass** with and without ASan/UBSan.
 - **The app builds** with no new warnings.
 - **Not checked:**
   - on the macOS platform: the dialog's layout, and Option-S;
@@ -1822,8 +1880,9 @@ fail their own cases:
   - a database written by Windows itself (the test files follow the Windows source);
   - the effect on File > Batch Process, which uses the same database.
 
-**Still open:** Tools > Manage Local DB. Options > Configuration's "Submit signature to
-Online DB" does nothing. Developer ID signing and notarization (M5). Latent code. Fill
+**Still open:** Tools > Manage Local DB, which will need the same lock and reading
+again before it writes. Options > Configuration's "Submit signature to Online DB" does
+nothing. Developer ID signing and notarization (M5). Latent code. Fill
 bytes before an RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
 ## How this was reviewed

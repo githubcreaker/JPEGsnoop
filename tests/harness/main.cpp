@@ -195,13 +195,19 @@
 //     item and answer its dialog with the opening's steps, separated by
 //     commas: quality=TEXT and software=TEXT (type into that field,
 //     percent-encoded), paste-software=TEXT (paste it into the software
-//     field), source=cam|sw|unsure, ok, return, cancel, escape and fields. An opening folder=NAME instead chooses Options > Configuration,
-//     sets the user database folder to NAME in the settings folder (empty for
-//     none) and saves. Print the dialog's fields and note when it shows, and
-//     after each step. Then print the user database file, read here as
-//     Windows wrote it (each entry's fields), the folder's files, whether a
-//     file was written beside the folder, and the signature search again
-//     after File > Reprocess.
+//     field), source=cam|sw|unsure, ok, return, cancel, escape and fields.
+//     An opening folder=NAME instead chooses Options > Configuration, sets
+//     the user database folder to NAME in the settings folder (empty for
+//     none) and saves. An opening other=NAME has another copy of JPEGsnoop,
+//     which read the user database when this one started, add software NAME
+//     with the file shown's signatures (a CDbSigs of its own); lock holds the
+//     user database's lock until the openings end, as another copy would
+//     while it writes; stale-lock leaves a lock file an hour old, as a copy
+//     that stopped while it wrote would. Print the dialog's fields and note
+//     when it shows, and after each step. Then print the user database file,
+//     read here as Windows wrote it (each entry's fields), the folder's
+//     files, whether a file was written beside the folder, and the signature
+//     search again after File > Reprocess.
 //
 // gui ... --user-db [FOLDER:]NAME (any number) [--user-db-mode OCTAL]
 //     Before the window opens, copy NAME (in the folder of the files given)
@@ -209,9 +215,10 @@
 //     the settings folder (made); --user-db-mode sets the permissions of the
 //     one copied into the user database folder.
 //
-// gui ... --db-dir NAME
+// gui ... --db-dir NAME [--db-dir-mode OCTAL]
 //     Use NAME in the settings folder (not made) as the user database folder,
-//     instead of the settings folder itself.
+//     instead of the settings folder itself. --db-dir-mode makes it and sets
+//     its permissions, until the window closes.
 //
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
@@ -230,6 +237,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLineEdit>
+#include <QLockFile>
 #include <QLabel>
 #include <QMap>
 #include <QMenu>
@@ -263,6 +271,7 @@
 #include <QtMath>
 #include <cmath>
 #include <functional>
+#include <memory>
 #include <cstdio>
 #include <cstring>
 
@@ -306,7 +315,8 @@ static void usage()
           "                         [--lookup STEPS [--lookup-at N] [--hover X,Y[/X,Y...]]]\n"
           "                         [--dqt CHOICE[+CHOICE...] [--dqt-at N]]\n"
           "                         [--add-db OPENING[+OPENING...] [--add-db-at N]]\n"
-          "                         [--user-db [FOLDER:]NAME]... [--user-db-mode OCTAL] [--db-dir NAME]\n"
+          "                         [--user-db [FOLDER:]NAME]... [--user-db-mode OCTAL]\n"
+          "                         [--db-dir NAME [--db-dir-mode OCTAL]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1024,6 +1034,7 @@ struct GuiOptions
   QStringList astrUserDb;         // --user-db [FOLDER:]NAME (any number)
   QString strUserDbMode;          // --user-db-mode OCTAL
   QString strDbDir;               // --db-dir NAME
+  QString strDbDirMode;           // --db-dir-mode OCTAL
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -2068,6 +2079,13 @@ static void dqtMenu(MainWindow &window, const GuiOptions &opts, QTextStream &out
   timer.stop();
 }
 
+// A database field as printed: one over 100 characters (a database near the
+// size limit) by its start and length
+static QString dbField(const QString &str)
+{
+  return (str.size() <= 100) ? str : QString("%1...(%2 characters)").arg(str.left(20)).arg(str.size());
+}
+
 // The user database file in strDbDir, read here as Windows wrote it (see
 // DbSigs.cpp), without CDbSigs: its header and each entry's fields. Also
 // whether a file was written beside the folder (the Qt port's missing
@@ -2127,9 +2145,9 @@ static void dumpUserDb(const QString &strDbDir, QTextStream &out)
     out << QString("harness: add-db entry %1: editor=%2 make=\"%3\" model=\"%4\" quality=\"%5\" sig=%6 sigrot=%7 "
                    "css=%8 swtrim=\"%9\"")
              .arg(nInd + 1)
-             .arg(astrField[2], astrField[0], astrField[1], astrField[3], astrField[4], astrField[5], astrField[6],
-                  astrField[7])
-        << QString(" software=\"%1\"\n").arg(astrField[8]);
+             .arg(astrField[2], dbField(astrField[0]), dbField(astrField[1]), dbField(astrField[3]), astrField[4],
+                  astrField[5], astrField[6], dbField(astrField[7]))
+        << QString(" software=\"%1\"\n").arg(dbField(astrField[8]));
   }
   QString strEnd;
   const bool bEnd = bOk && str(strEnd);
@@ -2160,8 +2178,8 @@ static void nextStartUserDb(const QString &strDbDir, QTextStream &out)
                    "sigrot=%7 css=%8 software=\"%9\"\n")
              .arg(nInd + 1)
              .arg(static_cast<int>(sEntry.eEditor))
-             .arg(sEntry.strXMake, sEntry.strXModel, sEntry.strUmQual, sEntry.strCSig, sEntry.strCSigRot,
-                  sEntry.strXSubsamp, sEntry.strMSwDisp);
+             .arg(dbField(sEntry.strXMake), dbField(sEntry.strXModel), dbField(sEntry.strUmQual), sEntry.strCSig,
+                  sEntry.strCSigRot, sEntry.strXSubsamp, dbField(sEntry.strMSwDisp));
   }
 }
 
@@ -2198,6 +2216,15 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
   }
   out << "harness: add-db " << menuPlace(pAction) << "\n";
   addDbReport(window, "before", out);
+
+  // Another copy of JPEGsnoop, started with this one (other=), and a lock it
+  // holds (lock)
+  CSnoopConfig otherCfg;
+  CDbSigs otherDb(nullptr, &otherCfg);
+  otherDb.SetDbDir(strDbDir);
+  otherDb.DatabaseExtraLoad();
+  std::unique_ptr<QLockFile> pHeldLock;
+  const QString strLockName = QStringLiteral("JPEGsnoop_db.dat.lock");
 
   QStringList astrSteps;
   QString strFolder;            // for a folder= opening: the folder to choose
@@ -2374,6 +2401,51 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
       bFolder = false;
       continue;
     }
+    if(strOpening.startsWith("other="))
+    {
+      // Another copy adds software, with the signatures the report shows
+      const QString strName = QUrl::fromPercentEncoding(strOpening.mid(6).toUtf8());
+      QString strSig;
+      QString strRot;
+      QString strCss;
+      for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
+      {
+        if(strLine.startsWith("  Signature:"))
+          strSig = strLine.mid(12).trimmed();
+        else if(strLine.startsWith("  Signature (Rotated):"))
+          strRot = strLine.mid(22).trimmed();
+        else if(strLine.startsWith("  Chroma subsampling:"))
+          strCss = strLine.mid(21).trimmed();
+      }
+      QString strDetail;
+      const CDbSigs::AddResult eResult =
+        otherDb.DatabaseExtraAdd(QString(), QString(), QString(), strSig, strRot, strCss, ENUM_SOURCE_SW, strName,
+                                 strDetail);
+      out << "harness: add-db other copy added " << strName << ": "
+          << ((eResult == CDbSigs::AddResult::Added)       ? "added"
+              : (eResult == CDbSigs::AddResult::AlreadyIn) ? "already in"
+              : (eResult == CDbSigs::AddResult::Full)      ? "full"
+                                                           : "save failed")
+          << (strDetail.isEmpty() ? QString() : " " + strDetail) << "\n";
+      continue;
+    }
+    if(strOpening == QLatin1String("lock"))
+    {
+      pHeldLock = std::make_unique<QLockFile>(QDir(strDbDir).filePath(strLockName));
+      out << "harness: add-db lock held: " << (pHeldLock->tryLock(0) ? 1 : 0) << "\n";
+      continue;
+    }
+    if(strOpening == QLatin1String("stale-lock"))
+    {
+      QFile fileLock(QDir(strDbDir).filePath(strLockName));
+      // (Written out before its time is set, which writing would change)
+      const bool bOk = fileLock.open(QIODevice::WriteOnly) && (fileLock.write("left by a copy that stopped\n") > 0) &&
+                       fileLock.flush() &&
+                       fileLock.setFileTime(QDateTime::currentDateTime().addSecs(-3600),
+                                            QFileDevice::FileModificationTime);
+      out << "harness: add-db stale lock left: " << (bOk ? 1 : 0) << "\n";
+      continue;
+    }
     astrSteps = strOpening.split(',', Qt::SkipEmptyParts);
     pAction->trigger();
     QCoreApplication::processEvents();
@@ -2381,6 +2453,7 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
       out << "harness: add-db dialog not shown\n";
   }
   timer.stop();
+  pHeldLock.reset();
 
   if(!strDbDir.isEmpty())
   {
@@ -2859,6 +2932,17 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     else if((nColon < 0) && !opts.strUserDbMode.isEmpty())
       chmod(QFile::encodeName(strTarget).constData(), static_cast<mode_t>(opts.strUserDbMode.toUInt(nullptr, 8)));
   }
+  // (Writable again at the end, so the settings folder can be removed)
+  const bool bDbDirMode = !opts.strDbDir.isEmpty() && !opts.strDbDirMode.isEmpty();
+  if(bDbDirMode)
+  {
+    QDir().mkpath(strDbDir);
+    chmod(QFile::encodeName(strDbDir).constData(), static_cast<mode_t>(opts.strDbDirMode.toUInt(nullptr, 8)));
+  }
+  const auto restoreDbDir = qScopeGuard([&]() {
+    if(bDbDirMode)
+      chmod(QFile::encodeName(strDbDir).constData(), 0755);
+  });
 
   if(opts.bDark)
     QApplication::setPalette(darkPalette());
@@ -3899,7 +3983,8 @@ int main(int argc, char **argv)
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
-                             "--batch", "--add-db", "--user-db-mode", "--db-dir" })
+                             "--batch", "--add-db", "--user-db-mode", "--db-dir",
+                             "--db-dir-mode" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3945,6 +4030,8 @@ int main(int argc, char **argv)
       guiOpts.strUserDbMode = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--db-dir"))
       guiOpts.strDbDir = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--db-dir-mode"))
+      guiOpts.strDbDirMode = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 

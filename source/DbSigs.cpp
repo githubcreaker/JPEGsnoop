@@ -18,6 +18,8 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QLockFile>
 #include <QSaveFile>
 #include <QtEndian>
 
@@ -191,8 +193,13 @@ int32_t CDbSigs::GetNumSigsExtra()
 namespace
 {
 
-// A user database is a few hundred KB at most (DBEX_ENTRIES_MAX entries)
+// The most of a user database that is read. DBEX_ENTRIES_MAX usual entries
+// come to under 100 KB, and DatabaseExtraAdd() writes no file larger.
 constexpr qint64 kDbMaxBytes = 4 * 1024 * 1024;
+
+// How long DatabaseExtraAdd() waits for another copy of JPEGsnoop to finish
+// writing the user database
+constexpr int kDbLockWaitMs = 5000;
 
 class CDbReader
 {
@@ -236,6 +243,11 @@ private:
   qsizetype m_nPos = 0;
 };
 
+QString noFolderText()
+{
+  return QStringLiteral("No folder is set for the user database (Options > Configuration)");
+}
+
 // An entry's editor as written ("%u"); anything else is unknown, as on
 // Windows (which cast whatever number it read)
 teEditor editorFromText(const QString &strEditor)
@@ -249,12 +261,19 @@ teEditor editorFromText(const QString &strEditor)
 
 // Whether sOther is the same database entry as sEntry: software by its name
 // and signature; anything else by its make, model, subsampling and signature.
-// (Either of sOther's signatures can match: the user database keeps the
-// lower of the two first.)
+// Any of either's signatures can match, as in the signature search: the user
+// database keeps the lower of the two first, and version 01 kept only the
+// signature of the tables as they are, which may be the higher one.
 template <typename T>
 bool sameEntry(const CompSig &sEntry, const T &sOther)
 {
-  if((sOther.strCSig != sEntry.strCSig) && (sOther.strCSigRot != sEntry.strCSig))
+  bool bSig = false;
+  for(const QString *pStr : { &sEntry.strCSig, &sEntry.strCSigRot })
+  {
+    if(!pStr->isEmpty() && ((*pStr == sOther.strCSig) || (*pStr == sOther.strCSigRot)))
+      bSig = true;
+  }
+  if(!bSig)
     return false;
 
   if(sEntry.eEditor == ENUM_EDITOR_SW)
@@ -434,11 +453,13 @@ void CDbSigs::DatabaseExtraLoad()
   }
 }
 
+// (Not used yet: Manage Local DB isn't ported. Like DatabaseExtraAdd(), it
+// will need to lock the file and read it again before writing it.)
 void CDbSigs::DatabaseExtraClean()
 {
   m_nSigListExtraNum = 0;
   QString strError;
-  DatabaseExtraStore(strError);
+  DatabaseExtraWrite(DatabaseExtraBytes(), strError);
 }
 
 uint32_t CDbSigs::DatabaseExtraGetNum()
@@ -452,18 +473,11 @@ CompSig CDbSigs::DatabaseExtraGet(uint32_t nInd)
   return m_sSigListExtra[nInd];
 }
 
-// Write the user database (version 03), in full or not at all. (The Qt port
-// wrote nothing: its string writer was commented out, and the buffer was
-// written up to its first zero byte.)
-bool CDbSigs::DatabaseExtraStore(QString &strError)
+// The user database as written (version 03). (The Qt port wrote nothing: its
+// string writer was commented out, and the buffer was written up to its first
+// zero byte.)
+QByteArray CDbSigs::DatabaseExtraBytes() const
 {
-  const QString strPath = DatabaseExtraPath();
-  if(strPath.isEmpty())
-  {
-    strError = QStringLiteral("No folder is set for the user database (Options > Configuration)");
-    return false;
-  }
-
   QByteArray abData;
   auto putStr = [&abData](const QString &str) {
     for(const QChar ch : str)
@@ -507,6 +521,18 @@ bool CDbSigs::DatabaseExtraStore(QString &strError)
   }
 
   putStr(QStringLiteral("*Z*"));
+  return abData;
+}
+
+// Write the user database, in full or not at all
+bool CDbSigs::DatabaseExtraWrite(const QByteArray &abData, QString &strError)
+{
+  const QString strPath = DatabaseExtraPath();
+  if(strPath.isEmpty())
+  {
+    strError = noFolderText();
+    return false;
+  }
 
   QSaveFile file(strPath);
   if(!file.open(QIODevice::WriteOnly) || (file.write(abData) != abData.size()) || !file.commit())
@@ -567,37 +593,79 @@ CDbSigs::AddResult CDbSigs::DatabaseExtraAdd(QString strExifMake, QString strExi
 
   // (Windows added it again, or added one the next start would drop as built
   // in, and said "Added")
-  if(IsBuiltInEntry(sEntry) || IsUserEntry(sEntry))
+  if(IsBuiltInEntry(sEntry))
+    return AddResult::AlreadyIn;
+
+  const QString strPath = DatabaseExtraPath();
+  if(strPath.isEmpty())
+  {
+    strDetail = noFolderText();
+    return AddResult::SaveFailed;
+  }
+  if(!QFileInfo(m_strDbDir).isDir())
+  {
+    strDetail = QString("[%1] couldn't be written: there is no folder [%2]").arg(strPath, QDir::cleanPath(m_strDbDir));
+    return AddResult::SaveFailed;
+  }
+
+  // Another copy of JPEGsnoop may have added to the file since it was read
+  // here (Windows wrote what it had read, and what the other added was lost):
+  // wait while another writes it, then read it again. A lock left by a copy
+  // that stopped is taken over (QLockFile: its process has gone, or it is
+  // over 30 s old).
+  const QString strLock = strPath + QStringLiteral(".lock");
+  QLockFile lock(strLock);
+  if(!lock.tryLock(kDbLockWaitMs))
+  {
+    if(lock.error() == QLockFile::LockFailedError)
+      strDetail = QString("[%1] is being changed by another copy of JPEGsnoop (it holds [%2]). Try again.")
+                    .arg(strPath, strLock);
+    else
+      strDetail = QString("[%1] couldn't be written: [%2] couldn't be made").arg(strPath, strLock);
+    return AddResult::SaveFailed;
+  }
+  DatabaseExtraLoad();
+
+  if(IsUserEntry(sEntry))
     return AddResult::AlreadyIn;
 
   if(m_nSigListExtraNum >= DBEX_ENTRIES_MAX)
     return AddResult::Full;
 
+  m_sSigListExtra[m_nSigListExtraNum++] = sEntry;
+  auto fail = [&](const QString &strWhy) {
+    // Not kept: it would be gone at the next start
+    m_sSigListExtra[--m_nSigListExtraNum] = CompSig();
+    strDetail = strWhy;
+    return AddResult::SaveFailed;
+  };
+
+  // No larger than the next start reads (it would read none of it)
+  const QByteArray abData = DatabaseExtraBytes();
+  if(abData.size() > kDbMaxBytes)
+  {
+    return fail(QString("[%1] would be %2 bytes with it, more than the %3 that JPEGsnoop reads, so it wasn't changed")
+                  .arg(strPath)
+                  .arg(abData.size())
+                  .arg(kDbMaxBytes));
+  }
+
   // Keep a file that couldn't be read in full, or an older version's
-  const QString strPath = DatabaseExtraPath();
   QString strBak;
-  if(m_bKeepOldFile && !strPath.isEmpty() && QFile::exists(strPath))
+  if(m_bKeepOldFile && QFile::exists(strPath))
   {
     strBak = strPath + QStringLiteral(".bak");
     QFile fileOld(strPath);
     if((QFile::exists(strBak) && !QFile::remove(strBak)) || !fileOld.copy(strBak))
     {
-      strDetail = QString("[%1] couldn't be kept as [%2], so it wasn't replaced: %3")
-                    .arg(strPath, strBak, fileOld.errorString());
-      return AddResult::SaveFailed;
+      return fail(QString("[%1] couldn't be kept as [%2], so it wasn't replaced: %3")
+                    .arg(strPath, strBak, fileOld.errorString()));
     }
   }
 
-  m_sSigListExtra[m_nSigListExtraNum++] = sEntry;
-
   QString strError;
-  if(!DatabaseExtraStore(strError))
-  {
-    // Not kept: it would be gone at the next start
-    m_sSigListExtra[--m_nSigListExtraNum] = CompSig();
-    strDetail = strError;
-    return AddResult::SaveFailed;
-  }
+  if(!DatabaseExtraWrite(abData, strError))
+    return fail(strError);
 
   if(!strBak.isEmpty())
     strDetail = QString("The file it replaced was kept as [%1].").arg(strBak);

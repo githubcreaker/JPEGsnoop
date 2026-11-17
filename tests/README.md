@@ -158,8 +158,13 @@ when it is installed, so Pillow needn't be installed separately).
       `source=sw` or `source=unsure`, `ok`, `return`, `cancel`, `escape` and
       `fields`. An OPENING `folder=NAME` instead sets Options >
       Configuration's user database folder to NAME in the settings folder
-      (empty for none) and saves. It prints the dialog's fields and note when
-      it shows and after each step; then the user database file read as
+      (empty for none) and saves. `other=NAME` has another copy of JPEGsnoop,
+      which read the user database when this one started, add software NAME
+      with the file shown's signatures; `lock` holds the database's lock
+      until the openings end, as another copy does while it writes; and
+      `stale-lock` leaves a lock file an hour old, as a copy that stopped
+      while writing would. It prints the dialog's fields and note when it
+      shows and after each step; then the user database file read as
       Windows wrote it (each entry's fields), the folder's files, whether a
       file was written beside the folder, the database as the next start
       reads it, and the signature search again after File > Reprocess.
@@ -168,7 +173,8 @@ when it is installed, so Pillow needn't be installed separately).
       the window opens (or into FOLDER in the settings folder), and
       `--user-db-mode OCTAL` sets that copy's permissions. `--db-dir NAME`
       makes NAME in the settings folder (not created) the user database
-      folder, instead of the settings folder itself.
+      folder, instead of the settings folder itself; `--db-dir-mode OCTAL`
+      creates it and sets its permissions until the window closes.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
