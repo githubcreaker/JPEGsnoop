@@ -2478,6 +2478,174 @@ lookup_case("LM_edit_clears", "x=13,y=10,recalc,x=14,close", 'harness: lookup ty
 lookup_case("LM_reopen", "x=13,y=10,recalc,close+close", 'harness: lookup dialog close \\(.* x="0" y="0" '
             + NOT_CALC)
 
+
+# --- DQ: Tools > Search Executable for DQT -----------------------------------
+# gui --dqt chooses the menu item and answers its file dialog with each file
+# (or cancel), then prints the report's search section and a "harness: dqt
+# found ORDER TABLE ENTRIES @ OFFSET" line for each match.
+def dqt_case(cid, choices, expect, names=("ok_444.jpg",), extra="", forbid="-"):
+    case(cid, "DQ", "gui", list(names), ("--dqt " + choices + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+DQ_STD = [16, 11, 10, 16, 24, 40, 51, 61, 12, 12, 14, 19, 26, 58, 60, 55, 14, 13, 16, 24, 40, 57, 69, 56,
+          14, 17, 22, 29, 51, 87, 80, 62, 18, 22, 37, 56, 68, 109, 103, 77, 24, 35, 55, 64, 81, 104, 113, 92,
+          49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99]   # T.81 Table K.1, row order
+DQ_ZIGZAG = [0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13,
+             6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38,
+             31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63]   # zigzag position -> row-order index
+
+
+def dqt_table0(data):
+    """Table 0 of a JPEG's DQT segments, in row order"""
+    i = marker_pos(data, 0xDB)
+    end = i + 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+    j = i + 4
+    while j < end:
+        pq, tq = data[j] >> 4, data[j] & 15
+        size = 2 if pq else 1
+        vals = [int.from_bytes(data[j + 1 + k * size:j + 1 + (k + 1) * size], "big") for k in range(64)]
+        if tq == 0:
+            table = [0] * 64
+            for k, v in enumerate(vals):
+                table[DQ_ZIGZAG[k]] = v
+            return table
+        j += 1 + 64 * size
+    raise ValueError("no DQT table 0")
+
+
+def dqt_pattern(table, order, entries):
+    """A table as a program might store it: order "pre-zigzag" (zigzag order,
+    as a DQT segment has it) or "post-zigzag" (row order), entries "1-big",
+    "2-big", "2-little", "4-big" or "4-little"."""
+    width, endian = int(entries[0]), entries[2:]
+    return b"".join(table[DQ_ZIGZAG[k] if order == "pre-zigzag" else k].to_bytes(width, endian) for k in range(64))
+
+
+DQ_ORDERS = ("pre-zigzag", "post-zigzag")
+DQ_ENTRIES = ("1-big", "2-big", "2-little", "4-big", "4-little")
+dq_rnd = random.Random(11)
+DQ_444 = dqt_table0(c444)
+# The standard table in every form, the first at offset 0 and the last ending
+# at the end of the file; ok_444.jpg's luminance table in two; and a 16-bit
+# table (dq_16bit.jpg's) as 2-byte big-endian entries
+DQ_16BIT = [v * 9 for v in DQ_STD]
+dq_exe = bytearray()
+DQ_AT = {}
+for order in DQ_ORDERS:
+    for entries in DQ_ENTRIES:
+        if dq_exe:
+            dq_exe += dq_rnd.randbytes(97)
+        DQ_AT[("standard", order, entries)] = len(dq_exe)
+        dq_exe += dqt_pattern(DQ_STD, order, entries)
+for table, name, order, entries in ((DQ_444, "file", "pre-zigzag", "1-big"),
+                                    (DQ_444, "file", "post-zigzag", "2-little"),
+                                    (DQ_16BIT, "16bit", "pre-zigzag", "2-big")):
+    dq_exe += dq_rnd.randbytes(53)
+    DQ_AT[(name, order, entries)] = len(dq_exe)
+    dq_exe += dqt_pattern(table, order, entries)
+dq_exe += dq_rnd.randbytes(50)
+DQ_AT_END = len(dq_exe)
+dq_exe += dqt_pattern(DQ_STD, "post-zigzag", "4-little")
+write("dq_exe.bin", bytes(dq_exe))
+write("dq_empty.bin", b"")
+# ok_444.jpg with table 0 defined again before the frame, with 16-bit entries
+# (some over 255)
+sof = marker_pos(c444, 0xC0)
+dq16 = seg(0xDB, bytes([0x10]) + b"".join(DQ_16BIT[DQ_ZIGZAG[k]].to_bytes(2, "big") for k in range(64)))
+write("dq_16bit.jpg", c444[:sof] + dq16 + c444[sof:])
+# An app, as the macOS open panel can return one: a folder whose Info.plist
+# names its program
+dq_app = files_dir / "dq_app.app" / "Contents"
+(dq_app / "MacOS").mkdir(parents=True, exist_ok=True)
+(dq_app / "MacOS" / "dqprog").write_bytes(bytes(dq_exe))
+(dq_app / "Info.plist").write_text(
+    '<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0">\n<dict>\n'
+    "  <key>CFBundleExecutable</key>\n  <string>dqprog</string>\n"
+    "  <key>CFBundlePackageType</key>\n  <string>APPL</string>\n</dict>\n</plist>\n")
+(files_dir / "dq_folder").mkdir(exist_ok=True)
+# Too large to search: 4 GB and a byte (sparse, as lm_big.bin is)
+with open(files_dir / "dq_4gb.bin", "wb") as f:
+    f.seek(0x100000000)
+    f.write(b"\0")
+
+
+def dq_found(table, order, entries, at):
+    return f"harness: dqt found {order} {table} {entries} @ 0x{at:08X}$"
+
+
+# The menu item, where Windows has it, and its file dialog. It needs no file.
+dqt_case("DQ_menu", "cancel", 'harness: dqt menu=&Tools after="File Overlay\\.\\.\\." separator=0 enabled=1 '
+         'tip="Find DQT Table in Executable"$')
+dqt_case("DQ_dialog", "cancel", 'harness: dqt dialog: Open Executable file for Search \\(filters="All Files \\(\\*\\)\\|'
+         'Executable \\(\\*\\.exe\\)\\|DLL Library \\(\\*\\.dll\\)\\|Dynamic Library \\(\\*\\.dylib\\)" '
+         'selected="All Files \\(\\*\\)" mode=existing-file\\)$')
+dqt_case("DQ_cancel", "cancel", "harness: dqt no search$", forbid="message box")
+dqt_case("DQ_no_file", "dq_exe.bin", dq_found("standard", "pre-zigzag", "1-big", 0), extra="--dqt-at 0")
+dqt_case("DQ_no_file_tables", "dq_exe.bin", "harness: dqt tables=standard$", extra="--dqt-at 0")
+dqt_case("DQ_no_file_standard_only", "dq_exe.bin", "harness: dqt matches=11$", extra="--dqt-at 0")
+
+# The report's section, as on Windows
+dqt_case("DQ_header", "dq_exe.bin", "harness: dqt report: \\*\\*\\* Searching Executable for DQT \\*\\*\\*$")
+dqt_case("DQ_filename", "dq_exe.bin", "harness: dqt report:   Filename: \\[/.*/dq_exe\\.bin\\]$")
+dqt_case("DQ_size", "dq_exe.bin", f"harness: dqt report:   Size:     \\[{len(dq_exe)}\\]$")
+dqt_case("DQ_tables", "dq_exe.bin", "harness: dqt tables=standard,file$")
+dqt_case("DQ_tables_name", "dq_exe.bin", "harness: dqt report:       Matching \\[.*ok_444\\.jpg\\]$")
+dqt_case("DQ_done", "dq_exe.bin", "harness: dqt report:   Done Search$")
+
+# The standard table in each form: at the start of the file and at its end
+# (Windows compared neither), and nothing else
+for (table, order, entries), at in DQ_AT.items():
+    if table == "standard":
+        dqt_case(f"DQ_std_{order.split('-')[0]}_{entries.replace('-', '_')}", "dq_exe.bin",
+                 dq_found(table, order, entries, at))
+dqt_case("DQ_std_at_end", "dq_exe.bin", dq_found("standard", "post-zigzag", "4-little", DQ_AT_END))
+# The file shown's luminance table
+dqt_case("DQ_file_zigzag", "dq_exe.bin", dq_found("file", "pre-zigzag", "1-big", DQ_AT[("file", "pre-zigzag", "1-big")]))
+dqt_case("DQ_file_rows", "dq_exe.bin",
+         dq_found("file", "post-zigzag", "2-little", DQ_AT[("file", "post-zigzag", "2-little")]))
+dqt_case("DQ_count", "dq_exe.bin", "harness: dqt matches=13$")
+# The file shown after another, and a second search
+dqt_case("DQ_second_file", "dq_exe.bin", "harness: dqt report:       Matching \\[.*ok_420\\.jpg\\]$",
+         names=("ok_444.jpg", "ok_420.jpg"), extra="--dqt-at 2")
+dqt_case("DQ_twice", "dq_exe.bin+dq_exe.bin", "harness: dqt matches=13$", forbid="no search")
+
+# A table of one value (here 1, as at quality 100) would match any run of that
+# byte, so it isn't searched for. (Windows' note had "_T(" in it.)
+dqt_case("DQ_constant", "dq_exe.bin", "harness: dqt report:   NOTE: Because the JPEG's DQT Luminance table is "
+         "constant value \\(0x01\\),$", names=("lm_444.jpg",))
+dqt_case("DQ_constant_next", "dq_exe.bin", "harness: dqt report:         matching for this table has been disabled\\.$",
+         names=("lm_444.jpg",))
+dqt_case("DQ_constant_tables", "dq_exe.bin", "harness: dqt tables=standard$", names=("lm_444.jpg",))
+dqt_case("DQ_constant_standard_only", "dq_exe.bin", "harness: dqt matches=11$", names=("lm_444.jpg",))
+# A file shown without a luminance table (Windows searched for all 0s, and
+# called it a constant table)
+dqt_case("DQ_no_table", "dq_exe.bin", "harness: dqt report:   NOTE: The file shown has no DQT Luminance table "
+         "\\(table 0\\): only the JPEG Standard table$", names=("psd_rgb_rle.psd",), forbid="constant value")
+dqt_case("DQ_no_table_tables", "dq_exe.bin", "harness: dqt tables=standard$", names=("psd_rgb_rle.psd",))
+dqt_case("DQ_not_analyzed", "dq_exe.bin", "harness: dqt tables=standard$", names=("f4_no_such_file.jpg",),
+         forbid="NOTE")
+# A table with entries over 255 has no 1-byte form, but the standard table
+# still does (Windows skipped both)
+dqt_case("DQ_16bit_found", "dq_exe.bin", dq_found("file", "pre-zigzag", "2-big", DQ_AT[("16bit", "pre-zigzag", "2-big")]),
+         names=("dq_16bit.jpg",))
+dqt_case("DQ_16bit_skip", "dq_exe.bin", "harness: dqt report:           DQT Table is not baseline, skipping 1-byte "
+         "search$", names=("dq_16bit.jpg",))
+dqt_case("DQ_16bit_standard", "dq_exe.bin", dq_found("standard", "pre-zigzag", "1-big", 0), names=("dq_16bit.jpg",))
+
+# What can be chosen: an empty file, an app (its program is searched), a
+# folder, a file that has gone, and one too large for 32-bit offsets
+dqt_case("DQ_empty", "dq_empty.bin", "harness: message box: \\[/.*/dq_empty\\.bin\\] is empty: there is nothing to "
+         "search\\.$", forbid="BufFileSet|BufLoadWindow")
+dqt_case("DQ_app", "dq_app.app", "harness: dqt report:   Filename: \\[/.*/dq_app\\.app/Contents/MacOS/dqprog\\]$")
+dqt_case("DQ_app_found", "dq_app.app", "harness: dqt matches=13$")
+dqt_case("DQ_folder", "dq_folder", "harness: message box: \\[/.*/dq_folder\\] is a folder: choose a file to search\\.$")
+dqt_case("DQ_missing", "dq_no_such.bin", "harness: message box: ERROR: Couldn't open file \\[/.*/dq_no_such\\.bin\\]: "
+         "\\[No such file or directory\\]$")
+dqt_case("DQ_too_large", "dq_4gb.bin", "harness: message box: \\[/.*/dq_4gb\\.bin\\] is too large to search: "
+         "4294967297 bytes \\(4 GB or more\\)\\.$")
+dqt_case("DQ_too_large_no_search", "dq_4gb.bin", "harness: dqt no search$")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

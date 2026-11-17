@@ -96,7 +96,7 @@ public:
   QString BufReadStrn(uint32_t nPosition, uint32_t nLen);
 
   bool BufSearch(uint32_t nStartPos, uint32_t nSearchVal, uint32_t nSearchLen, bool bDirFwd, uint32_t &nFoundPos);
-  bool BufSearchX(uint32_t nStartPos, uint8_t * anSearchVal, uint32_t nSearchLen, bool bDirFwd, uint32_t &nFoundPos);
+  bool BufSearchX(uint32_t nStartPos, const uint8_t *anSearchVal, uint32_t nSearchLen, uint32_t &nFoundPos);
 
   bool OverlayAlloc(uint32_t nInd);
   bool OverlayInstall(uint32_t nOvrInd, uint8_t *pOverlay, uint32_t nLen, uint32_t nBegin,

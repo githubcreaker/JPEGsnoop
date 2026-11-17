@@ -140,6 +140,15 @@ when it is installed, so Pillow needn't be installed separately).
       `--hover X,Y[/X,Y...]` then moves the mouse over the preview to each
       image pixel and prints the image window's status bar (MCU, file offset
       and YCC).
+    - `--dqt CHOICE[+CHOICE...]` chooses Tools > Search Executable for DQT
+      after the first file (or file N with `--dqt-at N`; `0` is before any
+      file), printing the menu item's place first, and answers its file
+      dialog with each CHOICE: `cancel`, or the file to search
+      (percent-encoded; a relative path is in the folder of the files given).
+      It prints the dialog's title and filters, the report's search section,
+      a `harness: dqt found ORDER TABLE ENTRIES @ OFFSET` line for each match,
+      and the tables searched for (`standard`, and `file` for the file
+      shown's).
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -226,8 +235,8 @@ in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
 section, `A` in its "About" section, `T` in its "Select All and Copy"
 section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
 `BP` in its "Batch Process" section, `FO` in its "File > Offset" section, `IS`
-in its "Tools > Image Search Fwd and Rev" section, and `LM` in its "Tools > Lookup MCU
-Offset" section);
+in its "Tools > Image Search Fwd and Rev" section, `LM` in its "Tools > Lookup MCU
+Offset" section, and `DQ` in its "Tools > Search Executable for DQT" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

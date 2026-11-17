@@ -178,6 +178,16 @@
 //     preview to each image pixel and print the window's status bar (the MCU,
 //     file offset and YCC labels).
 //
+// gui ... --dqt CHOICE[+CHOICE...]
+//     After the first file (or file N with --dqt-at N; 0 is before any file),
+//     print the place of Tools > Search Executable for DQT in the menu, then
+//     for each CHOICE choose it and answer its file dialog: cancel, or the
+//     file to search (percent-encoded; a relative path is in the folder of
+//     the files given). Print the dialog's title and filters, then the
+//     report's search section: each line, a "harness: dqt found" line for
+//     each match, with the ordering, table and entry format it was found with,
+//     and the tables searched for ("standard", and "file" for the file shown's).
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -269,6 +279,7 @@ static void usage()
           "                         [--edit STEPS [--edit-before]] [--overlay STEPS [--overlay-at N]]\n"
           "                         [--offset STEPS [--offset-at N]] [--search STEPS [--search-at N]]\n"
           "                         [--lookup STEPS [--lookup-at N] [--hover X,Y[/X,Y...]]]\n"
+          "                         [--dqt CHOICE[+CHOICE...] [--dqt-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -979,6 +990,9 @@ struct GuiOptions
   QString strLookup;              // --lookup STEPS
   int nLookupAt = 1;              // --lookup-at N
   QString strHover;               // --hover X,Y[/X,Y...]
+  QString strDqt;                 // --dqt CHOICE[+CHOICE...]
+  int nDqtAt = 1;                 // --dqt-at N
+  QString strFilesDir;            // the folder of the files given
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -1909,6 +1923,119 @@ static void hoverPositions(const QString &strPoints, QTextStream &out)
   }
 }
 
+// Tools > Search Executable for DQT as a user chooses it (see --dqt above). A
+// message box it shows is printed and closed as it opens.
+static void dqtMenu(MainWindow &window, const GuiOptions &opts, QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("Search Executable for DQT..."));
+  if(!pAction)
+  {
+    out << "harness: menu Search Executable for DQT unavailable\n";
+    return;
+  }
+  out << "harness: dqt " << menuPlace(pAction) << "\n";
+  if(!pAction->isEnabled())
+  {
+    out << "harness: menu Search Executable for DQT unavailable\n";
+    return;
+  }
+
+  QString strChoice;
+  bool bShown = false;
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QFileDialog *pDlg = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+    if(!pDlg || (pDlg->objectName() != QLatin1String("dqtExeDialog")) || bShown)
+      return;
+    bShown = true;
+    out << "harness: dqt dialog: " << pDlg->windowTitle() << " (filters=\"" << pDlg->nameFilters().join('|')
+        << "\" selected=\"" << pDlg->selectedNameFilter() << "\" mode="
+        << ((pDlg->fileMode() == QFileDialog::ExistingFile) ? "existing-file" : "other") << ")\n";
+    if(strChoice == QLatin1String("cancel"))
+    {
+      pDlg->reject();
+      return;
+    }
+    // As the dialog returns it (a folder or app too, as the macOS panel can)
+    QString strPath = QUrl::fromPercentEncoding(strChoice.toUtf8());
+    if(QFileInfo(strPath).isRelative())
+      strPath = QDir(opts.strFilesDir).filePath(strPath);
+    // Typed in the name field: selectFile() depends on the dialog's listing
+    // of the folder, which it loads in the background
+    if(QLineEdit *pName = pDlg->findChild<QLineEdit *>("fileNameEdit"))
+      pName->setText(strPath);
+    else
+      pDlg->selectFile(strPath);
+    out << "harness: dqt chose " << pDlg->selectedFiles().join('|') << "\n";
+    static_cast<QDialog *>(pDlg)->done(QDialog::Accepted);
+  });
+  timer.start(20);
+
+  const QStringList astrChoices = opts.strDqt.split('+');
+  for(const QString &strOne : astrChoices)
+  {
+    strChoice = strOne;
+    bShown = false;
+    const QString strBefore = window.textEdit->toPlainText();
+    pAction->trigger();
+    QCoreApplication::processEvents();
+    if(!bShown)
+      out << "harness: dqt dialog not shown\n";
+
+    // The report's new search section, if there is one
+    const QString strLog = window.textEdit->toPlainText();
+    const qsizetype nHdr = strLog.lastIndexOf(QLatin1String("*** Searching Executable for DQT ***"));
+    if((nHdr < 0) || (strLog.count(QLatin1String("*** Searching Executable for DQT ***")) ==
+                      strBefore.count(QLatin1String("*** Searching Executable for DQT ***"))))
+    {
+      out << "harness: dqt no search\n";
+      continue;
+    }
+    QString strOrder;
+    QString strTable;
+    QString strEntries;
+    QStringList astrTables;           // those searched for, in the first ordering
+    int nOrders = 0;
+    int nFound = 0;
+    const QStringList astrLines = strLog.mid(nHdr).split('\n');
+    for(const QString &strLine : astrLines)
+    {
+      out << "harness: dqt report: " << strLine << "\n";
+      static const QRegularExpression reOrder(QStringLiteral("^    DQT Ordering: (.*)$"));
+      static const QRegularExpression reTable(QStringLiteral("^      Matching \\[(.*)\\]$"));
+      static const QRegularExpression reEntries(QStringLiteral("^        Searching patterns with (\\d)-byte DQT entries(, endian byteswap)?$"));
+      static const QRegularExpression reFound(QStringLiteral("^          Found @ (0x[0-9A-F]{8})$"));
+      QRegularExpressionMatch m;
+      if((m = reOrder.match(strLine)).hasMatch())
+      {
+        strOrder = m.captured(1);
+        nOrders++;
+      }
+      else if((m = reTable.match(strLine)).hasMatch())
+      {
+        strTable = (m.captured(1) == QLatin1String("JPEG Standard")) ? QStringLiteral("standard")
+                                                                      : QStringLiteral("file");
+        if(nOrders == 1)
+          astrTables << strTable;
+      }
+      else if((m = reEntries.match(strLine)).hasMatch())
+        strEntries = m.captured(1) + (m.captured(2).isEmpty() ? "-big" : "-little");
+      else if((m = reFound.match(strLine)).hasMatch())
+      {
+        nFound++;
+        out << "harness: dqt found " << strOrder << " " << strTable << " " << strEntries << " @ " << m.captured(1)
+            << "\n";
+      }
+      if(strLine == QLatin1String("  Done Search"))
+        break;
+    }
+    out << "harness: dqt tables=" << astrTables.join(',') << "\n";
+    out << "harness: dqt matches=" << nFound << "\n";
+    out.flush();
+  }
+  timer.stop();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -2395,6 +2522,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     lookupMenu(window, opts.strLookup, out);
   }
 
+  // Tools > Search Executable for DQT before any file has been opened
+  if(!opts.strDqt.isEmpty() && (opts.nDqtAt == 0))
+  {
+    out << "harness: dqt before any file\n";
+    dqtMenu(window, opts, out);
+  }
+
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
   if(opts.bReprocessFirst)
@@ -2456,6 +2590,9 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
         if(!opts.strHover.isEmpty())
           hoverPositions(opts.strHover, out);
       }
+
+      if((nRound == 0) && !opts.strDqt.isEmpty() && (nFileInd == opts.nDqtAt))
+        dqtMenu(window, opts, out);
 
       if(nRound == 0)
       {
@@ -3373,7 +3510,8 @@ int main(int argc, char **argv)
   QString strFormat;
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
-                             "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--batch" })
+                             "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
+                             "--batch" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3409,6 +3547,8 @@ int main(int argc, char **argv)
       guiOpts.strLookup = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--hover"))
       guiOpts.strHover = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--dqt"))
+      guiOpts.strDqt = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--batch"))
       batchOpts.strSteps = args.at(nInd + 1);
     args.remove(nInd, 2);
@@ -3417,7 +3557,7 @@ int main(int argc, char **argv)
   // Options with a numeric value
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
-                             "--offset-at", "--search-at", "--lookup-at", "--batch-cancel-after",
+                             "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
                              "--batch-close-after" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
@@ -3447,6 +3587,8 @@ int main(int argc, char **argv)
       guiOpts.nSearchAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--lookup-at"))
       guiOpts.nLookupAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--dqt-at"))
+      guiOpts.nDqtAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))
@@ -3465,7 +3607,10 @@ int main(int argc, char **argv)
   if(strMode == "decode" && args.size() == 1)
     return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, nStart, strDetail, bPreviewMd5, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
+  {
+    guiOpts.strFilesDir = QFileInfo(args.first()).absolutePath();
     return runGui(args, guiOpts, tmpDir.path());
+  }
   if(strMode == "settings" && args.isEmpty())
     return runSettings(tmpDir.path());
   if(strMode == "export-jpeg" && args.size() == 1)

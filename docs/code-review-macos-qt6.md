@@ -1542,6 +1542,109 @@ which it already was. Thirteen deliberate breaks each fail their own cases:
   takes the first 0xFF of the fill as the end of the scan. It then says "Restart
   marker [0xFFd0] detected outside scan". The scan's decode, and the lookup, are right.
 
+### Tools > Search Executable for DQT
+
+Tools > Search Executable for DQT did nothing: the menu item had no handler. On Windows
+it looks in another file, such as a camera maker's program, for quantization tables. A
+program that writes JPEGs often keeps its tables in its code, so finding one there
+suggests which program wrote an image. Now, as there:
+- **The menu item** comes after File Overlay. Its status tip is "Find DQT Table in
+  Executable", and it needs no file open.
+- **It asks for a file** ("Open Executable file for Search"). It searches it for the
+  JPEG standard luminance table (T.81 Table K.1) and, when a file has been analyzed,
+  that file's luminance table (DQT table 0).
+- **Each table is searched for in ten forms:**
+  - in zigzag order, as a DQT segment has it ("pre-zigzag"), and in row order
+    ("post-zigzag");
+  - with 1-byte entries, and with 2- and 4-byte entries in big-endian and little-endian
+    order ("endian byteswap"). The 1-byte form is searched only for a table whose
+    entries all fit in a byte.
+- **Each place found is listed** at the end of the report ("Found @ 0x00000A1B"), under
+  its table and form. Reprocess clears the list, as on Windows.
+- **A table of one value** (such as the 1s of quality 100) isn't searched for, as it
+  would match any run of that byte. The report says so.
+
+**Found and fixed** (all as on Windows 1.8.0):
+- **Tables at the start and end of the file weren't found.** The search never compared
+  offset 0, and it stopped 2 × length − 1 bytes before the end: 127 to 511 bytes,
+  depending on the entry size.
+- **The search was slow.** It compared one byte at a time through `Buf()`, in 20 passes
+  over the file, and the window doesn't respond while it runs. `CwindowBuf::BufSearchX`
+  now reads the file in 64 KiB blocks and searches them in memory. Searching a 64 MiB
+  file for both tables took about 4.5 s and now takes about 0.2 s (measured with
+  hyperfine against choosing the menu item and cancelling).
+- **A table with entries over 255 skipped the standard table's 1-byte search too,**
+  though the standard table has a 1-byte form.
+- **The note about a table of one value was garbled.** Its format string had `_T(` in
+  it, so it read "...constant nValue (0x01),_T(" and the next line started with ")".
+- **A file shown without a luminance table** (a Photoshop file, say) was taken to have a
+  table of 0s, and the report called it a constant table (0x00). It now says that the
+  file has no luminance table, so only the standard one is searched for.
+- **An empty file** made the file buffer show two errors: "BufFileSet() File length
+  zero", then "BufLoadWindow() and no file open". It now says that the file is empty.
+
+**Changes from Windows:**
+- **The file dialog** shows all files first, since macOS programs have no extension.
+  Then come Executable (.exe), DLL Library (.dll) and, added, Dynamic Library (.dylib).
+- **An app chosen as a whole** (a .app bundle, which the macOS open panel can return as
+  one item) is searched by its program: the file its Info.plist's CFBundleExecutable
+  names in Contents/MacOS. The report gives that file's path.
+- **A folder, or a file of 4 GB or more,** gets a message. Files are read with 32-bit
+  offsets, as images are.
+
+**Unchanged from Windows:** the report's wording, including "pre-zigzag" and
+"post-zigzag". The luminance table is table 0, which isn't always the table the Y
+component uses.
+
+**Tests:** 45 new `DQ` cases (632 in all). `gui --dqt CHOICE[+CHOICE...]` chooses the
+menu item and answers its file dialog with each file, or cancels it. It prints the
+report's search section, each match with its table and form, and which tables were
+searched for. The file searched, `dq_exe.bin`, is random bytes with these tables in it:
+- the standard table in all ten forms, the first at offset 0, and once more ending at
+  the end of the file;
+- ok_444.jpg's luminance table in two forms;
+- a table with entries over 255 in its 2-byte big-endian form.
+
+The cases cover:
+- **The menu item and its dialog,** cancelling it, and a search with no file open.
+- **The report's section:** its header, file name and size, the tables, and the end.
+- **The standard table in each form,** at the start and end of the file, and the
+  number of matches (so nothing else matches).
+- **The file shown's table** in both orders, in the second file opened, and in a
+  second search.
+- **Tables not searched for:** a table of one value, a file without a luminance table,
+  and no file analyzed. Also a 16-bit table, which is found in 2-byte form, with only
+  its own 1-byte search skipped.
+- **What can be chosen:** an empty file, an app, a folder, a missing file, and one too
+  large (a sparse file of 4 GB and a byte).
+
+On the previous commit 43 fail. The other two check that no search happens, which was
+already so. Twelve deliberate breaks each fail their own cases:
+- **Starting after the start position,** as on Windows: 8 cases fail.
+- **Stopping before the end,** as on Windows: 6 cases fail.
+- **Skipping the 1-byte search for both tables,** as on Windows: 1 case fails.
+- **Not checking for a luminance table:** 1 case fails.
+- **Searching for a table of one value:** 3 cases fail.
+- **The two orders swapped:** 16 cases fail.
+- **The two byte orders swapped:** 11 cases fail.
+- **Only the first match of each form:** 6 cases fail.
+- **An app searched as a folder:** 2 cases fail.
+- **No check for a folder:** 1 case fails.
+- **No check for an empty file:** 1 case fails.
+- **No check for a file of 4 GB or more:** 2 cases fail.
+
+**Checks:**
+- **All 632 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **Not checked:**
+  - on the macOS platform: whether the open panel returns an app as one item, and its
+    filters; the wait cursor and the status bar during a long search;
+  - a real camera maker's program.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; the signature
+database items; fill bytes before an RST marker in the report's marker list (see Tools >
+Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

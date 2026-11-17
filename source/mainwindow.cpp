@@ -466,6 +466,8 @@ void MainWindow::createActions(void)
   connect(fileOverlayAct, &QAction::triggered, this, &MainWindow::onFileOverlay);
 
   searchDqtAct = new QAction(tr("Search Executable for DQT..."), this);
+  searchDqtAct->setStatusTip(tr("Find DQT Table in Executable"));
+  connect(searchDqtAct, &QAction::triggered, this, &MainWindow::onSearchDqt);
 
   exportJpegAct = new QAction(tr("Export JPEG..."), this);
   exportJpegAct->setEnabled(false);
@@ -1928,6 +1930,210 @@ void MainWindow::onLookupMcuOffset()
                     },
                     this);
   dlg.exec();
+}
+
+//-----------------------------------------------------------------------------
+// Tools > Search Executable for DQT: look in another file, such as a camera
+// maker's program, for the JPEG standard luminance quantization table and the
+// luminance table of the file shown (master's
+// CJPEGsnoopDoc::OnToolsSearchexecutablefordqt). A program that writes JPEGs
+// often keeps its tables in its code, so finding one there suggests which
+// program wrote a JPEG. As on Windows, the item needs no file open, and the
+// results go at the end of the report.
+void MainWindow::onSearchDqt()
+{
+  QFileDialog dlg(this, tr("Open Executable file for Search"));
+  dlg.setObjectName(QStringLiteral("dqtExeDialog"));
+  dlg.setFileMode(QFileDialog::ExistingFile);
+  dlg.setOption(QFileDialog::ReadOnly);
+  // Windows offered .exe files first; macOS programs have no extension
+  dlg.setNameFilters({ tr("All Files (*)"), tr("Executable (*.exe)"), tr("DLL Library (*.dll)"),
+                       tr("Dynamic Library (*.dylib)") });
+
+  if((dlg.exec() != QDialog::Accepted) || dlg.selectedFiles().isEmpty())
+  {
+    return;
+  }
+
+  searchDqt(dlg.selectedFiles().first());
+}
+
+// Search the file strChosen for the tables (see onSearchDqt()): each in zigzag
+// order (as a DQT segment has it) and in row order, with 1-, 2- and 4-byte
+// entries in either byte order. Each place found is reported.
+void MainWindow::searchDqt(const QString &strChosen)
+{
+  QString strPath = strChosen;
+  QFileInfo fileInfo(strPath);
+
+#ifdef Q_OS_MACOS
+  // An app chosen as a whole (the macOS open panel shows it as one file): its
+  // program, as its Info.plist names it
+  if(fileInfo.isBundle())
+  {
+    const QSettings plist(fileInfo.absoluteFilePath() + "/Contents/Info.plist", QSettings::NativeFormat);
+    const QString strExe = plist.value("CFBundleExecutable").toString();
+
+    if(!strExe.isEmpty())
+    {
+      strPath = fileInfo.absoluteFilePath() + "/Contents/MacOS/" + strExe;
+      fileInfo = QFileInfo(strPath);
+    }
+  }
+#endif
+
+  if(fileInfo.isDir())
+  {
+    QMessageBox::warning(this, "JPEGsnoop", tr("[%1] is a folder: choose a file to search.").arg(strPath));
+    return;
+  }
+
+  QFile fileExe(strPath);
+  if(!fileExe.open(QIODevice::ReadOnly))
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("ERROR: Couldn't open file [%1]: [%2]").arg(strPath, fileExe.errorString()));
+    return;
+  }
+
+  // The file is read with 32-bit offsets, as an image is. (For an empty file
+  // the file buffer showed two errors of its own.)
+  const qint64 nSize = fileExe.size();
+  if(nSize > 0xFFFFFFFF)
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("[%1] is too large to search: %2 bytes (4 GB or more).").arg(strPath).arg(nSize));
+    return;
+  }
+  if(nSize == 0)
+  {
+    QMessageBox::warning(this, "JPEGsnoop", tr("[%1] is empty: there is nothing to search.").arg(strPath));
+    return;
+  }
+
+  m_pDocLog->AddLineHdr("*** Searching Executable for DQT ***");
+  m_pDocLog->AddLine(QString("  Filename: [%1]").arg(strPath));
+  m_pDocLog->AddLine(QString("  Size:     [%1]").arg(nSize));
+
+  // The tables: the JPEG standard's, and the file shown's luminance table
+  struct DqtTable
+  {
+    QString strName;
+    uint32_t anVal[64];
+    bool bBaseline;               // every entry fits in a byte
+  };
+  QList<DqtTable> aTables;
+
+  DqtTable sStd;
+  sStd.strName = "JPEG Standard";
+  sStd.bBaseline = true;
+  for(uint32_t nInd = 0; nInd < 64; nInd++)
+  {
+    sStd.anVal[nInd] = glb_anStdQuantLum[nInd];
+  }
+  aTables.append(sStd);
+
+  // (Windows used whatever table 0 held: for a file without one, all 0s,
+  // which it reported as a constant table)
+  if(m_bFileAnalyzed && !m_pImgDec->m_abDqtDefined[0])
+  {
+    m_pDocLog->AddLine("  NOTE: The file shown has no DQT Luminance table (table 0): only the JPEG Standard table");
+    m_pDocLog->AddLine("        is searched for.");
+  }
+  else if(m_bFileAnalyzed)
+  {
+    DqtTable sFile;
+    sFile.strName = m_currentFile;
+    sFile.bBaseline = true;
+    bool bAllSame = true;
+    for(uint32_t nInd = 0; nInd < 64; nInd++)
+    {
+      sFile.anVal[nInd] = m_pImgDec->GetDqtEntry(0, nInd);
+      bAllSame = bAllSame && (sFile.anVal[nInd] == sFile.anVal[0]);
+      sFile.bBaseline = sFile.bBaseline && (sFile.anVal[nInd] <= 0xFF);
+    }
+
+    if(bAllSame)
+    {
+      m_pDocLog->AddLineWarn(QString("  NOTE: Because the JPEG's DQT Luminance table is constant value (0x%1),")
+                               .arg(QString("%1").arg(sFile.anVal[0], 2, 16, QChar('0')).toUpper()));
+      m_pDocLog->AddLineWarn("        matching for this table has been disabled.");
+      m_pDocLog->AddLineWarn("        Please select a different reference image.");
+    }
+    else
+    {
+      aTables.append(sFile);
+    }
+  }
+
+  CwindowBuf exeBuf(m_pDocLog);
+  exeBuf.SetStatusBar(m_StatusBar);
+  exeBuf.BufFileSet(&fileExe);
+  exeBuf.BufLoadWindow(0);
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+
+  uint8_t anPattern[64 * 4];
+  m_pDocLog->AddLine("  Searching for DQT Luminance tables:");
+  for(bool bRowOrder : { false, true })
+  {
+    m_pDocLog->AddLine(QString("    DQT Ordering: %1").arg(bRowOrder ? "post-zigzag" : "pre-zigzag"));
+    for(const DqtTable &sTable : aTables)
+    {
+      m_pDocLog->AddLine(QString("      Matching [%1]").arg(sTable.strName));
+
+      // Entries of 1, 2 and 4 bytes, the 2- and 4-byte ones in big-endian and
+      // little-endian order ("endian byteswap")
+      static const struct { uint32_t nWidth; bool bSwap; } asPatterns[] = {
+        { 1, false }, { 2, false }, { 2, true }, { 4, false }, { 4, true } };
+      for(const auto &sPattern : asPatterns)
+      {
+        m_pDocLog->AddLine(QString("        Searching patterns with %1-byte DQT entries%2")
+                             .arg(sPattern.nWidth)
+                             .arg(sPattern.bSwap ? ", endian byteswap" : ""));
+        if((sPattern.nWidth == 1) && !sTable.bBaseline)
+        {
+          m_pDocLog->AddLine("          DQT Table is not baseline, skipping 1-byte search");
+          continue;
+        }
+
+        const uint32_t nLen = 64 * sPattern.nWidth;
+        memset(anPattern, 0, sizeof(anPattern));
+        for(uint32_t nInd = 0; nInd < 64; nInd++)
+        {
+          const uint32_t nVal = sTable.anVal[bRowOrder ? nInd : glb_anZigZag[nInd]];
+          uint8_t *pEntry = &anPattern[nInd * sPattern.nWidth];
+          if(sPattern.nWidth == 1)
+          {
+            pEntry[0] = static_cast<uint8_t>(nVal);
+          }
+          else if(sPattern.bSwap)
+          {
+            pEntry[0] = static_cast<uint8_t>(nVal & 0xFF);
+            pEntry[1] = static_cast<uint8_t>((nVal >> 8) & 0xFF);
+          }
+          else
+          {
+            pEntry[sPattern.nWidth - 1] = static_cast<uint8_t>(nVal & 0xFF);
+            pEntry[sPattern.nWidth - 2] = static_cast<uint8_t>((nVal >> 8) & 0xFF);
+          }
+        }
+
+        uint32_t nStart = 0;
+        uint32_t nFound = 0;
+        while(exeBuf.BufSearchX(nStart, anPattern, nLen, nFound))
+        {
+          m_pDocLog->AddLineGood(
+            QString("          Found @ 0x%1").arg(QString("%1").arg(nFound, 8, 16, QChar('0')).toUpper()));
+          nStart = nFound + 1;
+        }
+      }
+    }
+  }
+
+  m_pDocLog->AddLine("  Done Search");
+  QApplication::restoreOverrideCursor();
+  m_StatusBar->clearMessage();
+  exeBuf.BufFileUnset();
 }
 
 //-----------------------------------------------------------------------------

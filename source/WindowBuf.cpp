@@ -16,6 +16,9 @@
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
+#include <algorithm>
+#include <functional>
+
 #include <QPlainTextEdit>
 #include <QString>
 
@@ -295,20 +298,15 @@ void CwindowBuf::SetStatusBar(QStatusBar * pStatBar)
   m_pStatBar = pStatBar;
 }
 
-// Search for a variable-length byte string in the buffer from a given starting position
-// and direction, limited to a maximum search depth
-// - Search string is array of unsigned bytes
-// - Update progress in lengthy searches
+// Search forward for a byte string (Tools > Search Executable for DQT)
 //
 // INPUT:
-// - nStartPos                  Starting byte offset for search
+// - nStartPos                  First position a match may start at
 // - anSearchVal                Byte array to search for
-// - nSearchLen                 Maximum number of bytes to search
-// - bDirFwd                    TRUE for forward, FALSE for backwards
+// - nSearchLen                 Its length
 //
 // PRE:
 // - m_nPosEof
-// - m_pStatBar
 //
 // OUTPUT:
 // - nFoundPos                  Byte offset in buffer for start of search match
@@ -316,122 +314,63 @@ void CwindowBuf::SetStatusBar(QStatusBar * pStatBar)
 // RETURN:
 // - Success in finding the value
 //
-bool CwindowBuf::BufSearchX(uint32_t nStartPos, unsigned char *anSearchVal, uint32_t nSearchLen,
-                            bool bDirFwd, uint32_t &nFoundPos)
+// The bytes are read a block at a time, as Buf() reads them (see
+// BufSearch()), and searched in memory. Master compared one byte at a time
+// through Buf(), never compared nStartPos itself (so a match at the start of
+// the file wasn't found), and stopped 2 x nSearchLen - 1 bytes before the end
+// of the file. Its reverse search had no callers.
+bool CwindowBuf::BufSearchX(uint32_t nStartPos, const uint8_t *anSearchVal, uint32_t nSearchLen, uint32_t &nFoundPos)
 {
-  // Save the current position
-  uint32_t nCurPos;
+  nFoundPos = nStartPos;
 
-  uint32_t nByteCur;
-  uint32_t nByteSearch;
-
-  uint32_t nCurPosOffset;
-  uint32_t nMatchStartPos = 0;
-
-  //bool                  bMatchStart = false;
-  bool bMatchOn = false;
-
-  QString strStatus;
-
-  time_t tmLast = clock();
-
-  nCurPosOffset = 0;
-  nCurPos = nStartPos;
-  bool bDone = false;
-
-  bool bFound = false;          // Matched entire search string
-
-  while(!bDone)
+  if((nSearchLen == 0) || (m_nPosEof < nSearchLen) || (nStartPos > m_nPosEof - nSearchLen))
   {
+    return false;
+  }
 
-    if(bDirFwd)
+  // The last position a match can start at
+  const int64_t nLast = static_cast<int64_t>(m_nPosEof) - nSearchLen;
+
+  // Each block holds kBlock positions and the bytes their matches run on to
+  constexpr int64_t kBlock = 65536;
+  QByteArray abBlock(static_cast<qsizetype>(kBlock + nSearchLen - 1), '\0');
+  uint8_t *pBlock = reinterpret_cast<uint8_t *>(abBlock.data());
+  const std::boyer_moore_horspool_searcher<const uint8_t *> searcher(anSearchVal, anSearchVal + nSearchLen);
+  clock_t tmLast = clock();
+
+  for(int64_t nBlockStart = nStartPos; nBlockStart <= nLast; nBlockStart += kBlock)
+  {
+    const int64_t nCount = qMin(kBlock, nLast - nBlockStart + 1);
+    const uint32_t nRead = static_cast<uint32_t>(nCount + nSearchLen - 1);
+
+    BufReadBlock(nBlockStart, pBlock, nRead);
+
+    const uint8_t *pMatch = std::search(pBlock, pBlock + nRead, searcher);
+
+    if(pMatch != pBlock + nRead)
     {
-      nCurPos++;
-
-      if(nCurPos + (nSearchLen - 1) >= m_nPosEof)
-      {
-        bDone = true;
-      }
+      nFoundPos = static_cast<uint32_t>(nBlockStart + (pMatch - pBlock));
+      return true;
     }
-    else
-    {
-      if(nCurPos > 0)
-      {
-        nCurPos--;
-      }
-      else
-      {
-        bDone = true;
-      }
-    }
 
-    // Update progress in status bar
-    // - Note that we only check timer when step counter has
-    //   reached a certain threshold. This limits the overhead
-    //   associated with the timer comparison
-    if(((nCurPos % (16 * 1024)) == 0) && (m_pStatBar))
+    // Update progress in status bar (at most 8 times a second)
+    if(m_pStatBar)
     {
-      time_t tmNow = clock();
+      const clock_t tmNow = clock();
 
       if((tmNow - tmLast) > (CLOCKS_PER_SEC / 8))
       {
         tmLast = tmNow;
-        float fProgress = (nCurPos * 100.0f) / m_nPosEof;
+        const int64_t nCurPos = nBlockStart + nCount;
+        const double dProgress = (static_cast<double>(nCurPos) * 100.0) / static_cast<double>(m_nPosEof);
 
-        strStatus = QString("Searching %1% (%2 of %3)...").arg(fProgress, 3, 'f', 0).arg(nCurPos).arg(m_nPosEof);
-        m_pStatBar->showMessage(strStatus);
+        m_pStatBar->showMessage(
+          QString("Searching %1% (%2 of %3)...").arg(dProgress, 3, 'f', 0).arg(nCurPos).arg(m_nPosEof));
       }
-    }
-
-    nByteSearch = anSearchVal[nCurPosOffset];
-    nByteCur = Buf(nCurPos);
-
-    if(nByteSearch == nByteCur)
-    {
-      if(!bMatchOn)
-      {
-        // Since we aren't in match mode, we are beginning a new
-        // sequence, so save the starting position in case we
-        // have to rewind
-        nMatchStartPos = nCurPos;
-        bMatchOn = true;
-      }
-
-      nCurPosOffset++;
-    }
-    else
-    {
-      if(bMatchOn)
-      {
-        // Since we were in a sequence of matches, but ended early,
-        // we now need to reset our position to just after the start
-        // of the previous 1st match.
-        nCurPos = nMatchStartPos;
-        bMatchOn = false;
-      }
-
-      nCurPosOffset = 0;
-    }
-
-    if(nCurPosOffset >= nSearchLen)
-    {
-      // We matched the entire length of our search string!
-      bFound = true;
-      bDone = true;
     }
   }
 
-  if(m_pStatBar)
-  {
-    m_pStatBar->showMessage("Done");
-  }
-
-  if(bFound)
-  {
-    nFoundPos = nMatchStartPos;
-  }
-
-  return bFound;
+  return false;
 }
 
 // Ensure that the file offset parameter is captured in the current

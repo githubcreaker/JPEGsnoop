@@ -94,6 +94,7 @@ private slots:
   void onImageSearchFwd();
   void onImageSearchRev();
   void onLookupMcuOffset();
+  void onSearchDqt();
   void onAbout();
 
 private:
@@ -110,6 +111,7 @@ private:
   bool currentOverlay(QByteArray &abData, uint32_t &nStart);
   void setCurrentOverlay(const QByteArray &abData, uint32_t nStart);
   void imageSearch(bool bForward);
+  void searchDqt(const QString &strChosen);
   void clearImageViews();
   void AnalyzeFile();
   bool AnalyzeOpen();
