@@ -149,6 +149,26 @@ when it is installed, so Pillow needn't be installed separately).
       a `harness: dqt found ORDER TABLE ENTRIES @ OFFSET` line for each match,
       and the tables searched for (`standard`, and `file` for the file
       shown's).
+    - `--add-db OPENING[+OPENING...]` chooses Tools > Add Camera/SW to DB
+      after the first file (or file N with `--add-db-at N`; `0` is before any
+      file), printing the menu item's place and the report's signature search
+      first, and answers its dialog with each OPENING's steps, separated by
+      commas: `quality=TEXT` and `software=TEXT` (type TEXT over the field,
+      percent-encoded), `paste-software=TEXT` (paste it there), `source=cam`,
+      `source=sw` or `source=unsure`, `ok`, `return`, `cancel`, `escape` and
+      `fields`. An OPENING `folder=NAME` instead sets Options >
+      Configuration's user database folder to NAME in the settings folder
+      (empty for none) and saves. It prints the dialog's fields and note when
+      it shows and after each step; then the user database file read as
+      Windows wrote it (each entry's fields), the folder's files, whether a
+      file was written beside the folder, the database as the next start
+      reads it, and the signature search again after File > Reprocess.
+      `--user-db [FOLDER:]NAME` (any number) copies NAME, in the folder of the
+      files given, into the user database folder as `JPEGsnoop_db.dat` before
+      the window opens (or into FOLDER in the settings folder), and
+      `--user-db-mode OCTAL` sets that copy's permissions. `--db-dir NAME`
+      makes NAME in the settings folder (not created) the user database
+      folder, instead of the settings folder itself.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -236,7 +256,8 @@ section, `A` in its "About" section, `T` in its "Select All and Copy"
 section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
 `BP` in its "Batch Process" section, `FO` in its "File > Offset" section, `IS`
 in its "Tools > Image Search Fwd and Rev" section, `LM` in its "Tools > Lookup MCU
-Offset" section, and `DQ` in its "Tools > Search Executable for DQT" section);
+Offset" section, `DQ` in its "Tools > Search Executable for DQT" section, and
+`AD` in its "Tools > Add Camera/SW to DB" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

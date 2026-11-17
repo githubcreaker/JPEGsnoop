@@ -95,6 +95,7 @@ private slots:
   void onImageSearchRev();
   void onLookupMcuOffset();
   void onSearchDqt();
+  void onAddToDb();
   void onAbout();
 
 private:

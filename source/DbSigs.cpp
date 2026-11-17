@@ -16,9 +16,12 @@
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
-#include <QDataStream>
-#include <QDebug>
+#include <QDir>
 #include <QFile>
+#include <QSaveFile>
+#include <QtEndian>
+
+#include <utility>
 
 #include "DocLog.h"
 #include "General.h"
@@ -29,8 +32,6 @@
 #include "DbSigs.h"
 
 #include "Signatures.inl"
-
-#define	MAX_BUF_SET_FILE	131072
 
 
 // TODO:
@@ -76,15 +77,12 @@ CDbSigs::CDbSigs(CDocLog *pLog, CSnoopConfig *pAppConfig) : m_pDocLog(pLog), m_p
 		else
     {
 			m_nSigListNum++;
-      m_qSigList.append(m_sSigList[m_nSigListNum]);
     }
 	}
 
-  QFile sigFile(m_pAppConfig->dbPath() + "Signatures.dat");
-  sigFile.open(QIODevice::WriteOnly);
-  QDataStream out(&sigFile);
-//  out << m_qSigList;
-  qDebug() << m_qSigList.count();
+  // (The Qt port wrote an empty file here on every start, the user database
+  // folder's path + "Signatures.dat": beside the folder, for want of a
+  // separator)
 
 	// Count number of exceptions in Signatures.inl
 	bDone = false;
@@ -177,671 +175,460 @@ int32_t CDbSigs::GetNumSigsExtra()
 	return m_nSigListExtraNum;
 }
 
-// Read an unsigned integer (4B) from the buffer
-bool CDbSigs::BufReadNum(uint8_t *pBuf,uint32_t &nOut,uint32_t,uint32_t &nOffsetBytes)
+// The user database file (JPEGsnoop_db.dat), as Windows wrote it:
+//   "JPEGsnoop", the version ("03"), "*DB*", a 4-byte little-endian count,
+//   then for each entry its make, model, editor (a number), quality,
+//   signature, signature of the rotated tables, subsampling, software match
+//   string and software name, then "*Z*".
+// Each string ends in a NUL (a newline also ends one when read). Version 03
+// is UTF-16LE (Windows' wchar_t); versions 01 and 02 used single bytes, and
+// 01 has no rotated signature.
+//
+// Windows read only the low byte of the count, so a database of 256 or more
+// entries lost its entries after the first (count mod 256); and of each
+// UTF-16 character, only its low byte.
+
+namespace
 {
-  Q_ASSERT(pBuf);
-	// TODO: check for buffer bounds
-  nOut = static_cast<uint32_t>(pBuf[nOffsetBytes]);
-  nOffsetBytes += sizeof(uint32_t);
-	return true;
+
+// A user database is a few hundred KB at most (DBEX_ENTRIES_MAX entries)
+constexpr qint64 kDbMaxBytes = 4 * 1024 * 1024;
+
+class CDbReader
+{
+public:
+  CDbReader(const QByteArray &abData, bool bUni) : m_abData(abData), m_bUni(bUni) {}
+
+  // False if the data ends before the string does
+  bool str(QString &strOut)
+  {
+    strOut.clear();
+    const qsizetype nCharSz = m_bUni ? 2 : 1;
+    while(m_nPos + nCharSz <= m_abData.size())
+    {
+      const uint8_t nLo = static_cast<uint8_t>(m_abData.at(m_nPos));
+      const char16_t ch =
+        m_bUni ? static_cast<char16_t>(nLo | (static_cast<uint8_t>(m_abData.at(m_nPos + 1)) << 8)) : nLo;
+      m_nPos += nCharSz;
+      if((ch == u'\n') || (ch == 0))
+        return true;
+      strOut += QChar(ch);      // (single bytes as Latin-1)
+    }
+    m_nPos = m_abData.size();
+    return false;
+  }
+
+  bool num(uint32_t &nOut)
+  {
+    if(m_nPos + 4 > m_abData.size())
+    {
+      m_nPos = m_abData.size();
+      return false;
+    }
+    nOut = qFromLittleEndian<quint32>(m_abData.constData() + m_nPos);
+    m_nPos += 4;
+    return true;
+  }
+
+private:
+  const QByteArray &m_abData;
+  bool m_bUni;
+  qsizetype m_nPos = 0;
+};
+
+// An entry's editor as written ("%u"); anything else is unknown, as on
+// Windows (which cast whatever number it read)
+teEditor editorFromText(const QString &strEditor)
+{
+  bool bOk = false;
+  const uint32_t nEditor = strEditor.toUInt(&bOk);
+  if(bOk && (nEditor >= ENUM_EDITOR_CAM) && (nEditor <= ENUM_EDITOR_UNSURE))
+    return static_cast<teEditor>(nEditor);
+  return ENUM_EDITOR_UNSET;
 }
 
-// Write an unsigned integer (4B) to the buffer
-bool CDbSigs::BufWriteNum(uint8_t *pBuf,uint32_t nIn,uint32_t,uint32_t &nOffsetBytes)
+// Whether sOther is the same database entry as sEntry: software by its name
+// and signature; anything else by its make, model, subsampling and signature.
+// (Either of sOther's signatures can match: the user database keeps the
+// lower of the two first.)
+template <typename T>
+bool sameEntry(const CompSig &sEntry, const T &sOther)
 {
-  Q_ASSERT(pBuf);
-	// TODO: check for buffer bounds
-  uint8_t *	pBufBase;
-  uint32_t*	pBufInt;
-	pBufBase = &pBuf[nOffsetBytes];
-  pBufInt = reinterpret_cast<uint32_t *>(pBufBase);
-	pBufInt[0] = nIn;
-  nOffsetBytes += sizeof(uint32_t);
-	return true;
+  if((sOther.strCSig != sEntry.strCSig) && (sOther.strCSigRot != sEntry.strCSig))
+    return false;
+
+  if(sEntry.eEditor == ENUM_EDITOR_SW)
+    return (sOther.eEditor == ENUM_EDITOR_SW) && (sOther.strMSwDisp == sEntry.strMSwDisp);
+
+  return (sOther.eEditor != ENUM_EDITOR_SW) && (sOther.strXMake == sEntry.strXMake) &&
+         (sOther.strXModel == sEntry.strXModel) && (sOther.strXSubsamp == sEntry.strXSubsamp);
 }
 
-// Attempt to read a line from the buffer
-// This is a replacement for CStdioFile::ReadLine()
-// Both 16-bit unicode and 8-bit SBCS encoding modes are supported (via bUni)
-// Offset parameter is incremented accordingly
-// Supports both newline and NULL for string termination
-bool CDbSigs::BufReadStr(uint8_t *pBuf,QString &strOut,uint32_t nMaxBytes,bool bUni,uint32_t &nOffsetBytes)
+} // namespace
+
+QString CDbSigs::DatabaseExtraPath() const
 {
-  Q_ASSERT(pBuf);
-  QString		strOutTmp;
-	bool		bDone;
-
-	char		chAsc;
-	char16_t	chUni;
-  // The Unicode DB file is UTF-16LE (2 bytes/char). Don't use sizeof(wchar_t):
-  // it is 2 on Windows but 4 on macOS/Linux.
-  uint32_t	nCharSz = ((bUni)?2:1);
-
-	bDone = false;
-  strOut = "";
-
-  // Ensure we don't overrun the buffer by calculating the last byte index required for each iteration.
-  for (uint32_t nInd=nOffsetBytes; (!bDone) && (nInd + nCharSz - 1 < nMaxBytes); nInd += nCharSz)
-  {
-    if (bUni)
-    {
-			chUni = static_cast<char16_t>(pBuf[nInd] | (pBuf[nInd+1] << 8));
-
-      if ( (chUni != '\n') && (chUni != 0) )
-      {
-				strOut += QChar(chUni);
-      }
-      else
-      {
-				bDone = true;
-				nOffsetBytes = nInd+nCharSz;
-			}
-    }
-    else
-    {
-			chAsc = pBuf[nInd];
-
-      if ( (chAsc != '\n') && (chAsc != 0) )
-      {
-				strOut += chAsc;
-      }
-      else
-      {
-				bDone = true;
-				nOffsetBytes = nInd+nCharSz;
-			}
-		}
-	}
-
-  if (!bDone)
-  {
-		nOffsetBytes = nMaxBytes;
-		// The input was not terminated, so we're still going to return what we got so far
-		return false;
-	}
-
-	return true;
-}
-
-// Return true if we managed to write entire string including terminator without overrunning nMaxBytes
-bool CDbSigs::BufWriteStr(unsigned char *pBuf,QString strIn,uint32_t nMaxBytes,bool bUni,uint32_t &nOffsetBytes)
-{
-  Q_ASSERT(pBuf);
-
-	bool		bRet = false;
-
-    /* // FIXME Commented out the following until unicode equivalent available
-    char		chAsc;
-	wchar_t		chUni;
-  uint32_t	nCharSz = ((bUni)?sizeof(wchar_t):sizeof(char));
-  unsigned char *pBufBase;
-  wchar_t	*pBufUni;
-  unsigned char		*pBufAsc;
-
-	pBufBase = pBuf + nOffsetBytes;
-  pBufUni = (wchar_t *)pBufBase;
-  pBufAsc = pBufBase;
-
-
-#ifdef UNICODE
-	// Create non-Unicode version of string
-	// Ref: http://social.msdn.microsoft.com/Forums/vstudio/en-US/85f02321-de88-47d2-98c8-87daa839a98e/how-to-convert-cstring-to-const-char-?forum=vclanguage
-	// Added constant specifier
-	LPCSTR		pszNonUnicode;
-	USES_CONVERSION;
-	// Not specifying code page explicitly but assume content
-	// should be ASCII. Default code page is probably Windows-1252.
-	pszNonUnicode = CW2A( strIn.LockBuffer( ) );
-	strIn.UnlockBuffer( );
-#endif
-
-  uint32_t	nStrLen;
-  uint32_t	nChInd;
-  nStrLen = strIn.size();
-
-  for (nChInd=0;(nChInd<nStrLen)&&(nOffsetBytes+nCharSz-1<nMaxBytes);nChInd++)
-  {
-    if (bUni)
-    {
-			// Normal handling for unicode
-      chUni = strIn[nChInd];
-			pBufUni[nChInd] = chUni; 
-    }
-    else
-    {
-#ifdef UNICODE
-			// To avoid Warning C4244: Conversion from 'wchar_t' to 'char' possible loss of data
-			// We need to implement conversion here
-			// Ref: http://stackoverflow.com/questions/4786292/converting-unicode-strings-and-vice-versa
-
-      // Since we have compiled for unicode, the QString character fetch
-			// will be unicode char. Therefore we need to use ANSI-converted form.
-			chAsc = pszNonUnicode[nChInd];
-#else
-      // Since we have compiled for non-Unicode, the QString character fetch
-			// will be single byte char
-      chAsc = strIn[nChInd];
-#endif
-			pBufAsc[nChInd] = chAsc; 
-		}
-
-		// Advance pointers
-		nOffsetBytes += nCharSz;
-	}
-
-	// Now terminate if we have space
-  if ((nOffsetBytes + nCharSz-1) < nMaxBytes)
-  {
-    if (bUni)
-    {
-      chUni = wchar0;
-			pBufUni[nChInd] = chUni;
-    }
-    else
-    {
-			chAsc = char(0);
-			pBufAsc[nChInd] = chAsc;
-		}
-
-    // Advance pointers
-		nOffsetBytes += nCharSz;
-
-		// Since we managed to include terminator, return is successful
-		bRet = true;
-  } */
-
-	// Return true if we finished the string write (without exceeding nMaxBytes)
-	// or false otherwise
-	return bRet;
+  // (The Qt port had no separator: "<folder>JPEGsnoop_db.dat", beside the
+  // folder)
+  return m_strDbDir.isEmpty() ? QString() : QDir(m_strDbDir).filePath(QStringLiteral(DAT_FILE));
 }
 
 void CDbSigs::DatabaseExtraLoad()
 {
-  uint8_t *	pBuf = nullptr;
-  uint32_t	nBufLenBytes = 0;
-  uint32_t	nBufOffset = 0;
-  QString		strError;
+  // Nothing from the previous folder's file stays (on Windows, changing the
+  // folder kept the old entries, and the next one added wrote them all over
+  // the new folder's file)
+  m_nSigListExtraNum = 0;
+  m_strLoadError.clear();
+  m_bKeepOldFile = false;
 
-  Q_ASSERT(m_strDbDir != "");
+  const QString strPath = DatabaseExtraPath();
+  if(strPath.isEmpty())
+    return;
 
-  if (m_strDbDir == "")
+  // None yet: the first entry added makes it. (Windows wrote an empty one at
+  // once, and on a later start said it was missing and wrote another.)
+  QFile file(strPath);
+  if(!file.exists())
+    return;
+
+  // From here on, a file that can't be read in full is kept: the next entry
+  // added copies it to .bak before replacing it. (Windows copied it and wrote
+  // an empty database at once.)
+  m_bKeepOldFile = true;
+
+  if(!file.open(QIODevice::ReadOnly))
   {
-		return;
-	}
+    m_strLoadError = QString("[%1] couldn't be opened: %2").arg(strPath, file.errorString());
+    return;
+  }
 
-	// Open the input file
-  QFile pInFile(m_strDbDir + QString(DAT_FILE));
+  // (Windows read 128 KB and asserted that the file was smaller)
+  const QByteArray abData = file.read(kDbMaxBytes + 1);
+  if(file.error() != QFileDevice::NoError)
+  {
+    m_strLoadError = QString("[%1] couldn't be read: %2").arg(strPath, file.errorString());
+    return;
+  }
+  if(abData.size() > kDbMaxBytes)
+  {
+    m_strLoadError = QString("[%1] is too large to be a user database").arg(strPath);
+    return;
+  }
+  file.close();
 
-  if(pInFile.open(QIODevice::ReadOnly) == false)
-	{
-		// To avoid any user confusion, we disable this warning message if this
-		// is the first time the program has been run (when we would expect that the user
-		// database is not present). After first run, the user database will have been
-		// created.
-		// Take from SnoopConfig.bEulaAccepted
-    if (!m_bFirstRun)
+  // UTF-16LE (version 03) or single bytes (01 and 02)
+  bool bUni = false;
+  bool bHeader = false;
+  for(const bool bTryUni : { true, false })
+  {
+    CDbReader reader(abData, bTryUni);
+    QString strHeader;
+    if(reader.str(strHeader) && (strHeader == QLatin1String("JPEGsnoop")))
     {
-      strError = QString("Couldn't find User Signature Database\n\n[%1]\n\nCreating default database").arg(pInFile.errorString());
-      qDebug() << (strError);
-//@@			AfxMessageBox(strError);
-		}
-
-		// Now create default database file in current DB location
-		DatabaseExtraStore();
-
-		return;
-	}
-
-	// Allocate the input buffer
-  pBuf = new unsigned char[MAX_BUF_SET_FILE];
-  Q_ASSERT(pBuf);
-
-	// Load the buffer
-  nBufLenBytes = pInFile.read((char *)pBuf,MAX_BUF_SET_FILE);
-
-  Q_ASSERT(nBufLenBytes>0);
-	// TODO: Error check for config file longer than max buffer!
-  Q_ASSERT(nBufLenBytes<MAX_BUF_SET_FILE);
-	nBufOffset = 0;
-
-  QString		strLine;
-  QString		strParam;
-  QString		strVal;
-
-  QString		strTmp;
-  QString		strVer;
-  QString		strSec;
-
-	//bool		bErr = false;
-	bool		bDone = false;
-  bool		bRet;
-
-  uint32_t	nBufOffsetTmp;
-	bool		bFileOk = false;
-	bool		bFileModeUni = false;
-
-	bool		bValid;
-
-  uint32_t	nNumLoad = 0;				// Number of entries to read
-	CompSig		sDbLocalEntry;				// Temp entry for load
-	bool		bDbLocalEntryFound;			// Temp entry already in built-in DB?
-	bool		bDbLocalTrimmed = false;	// Did we trim down the DB?
-
-
-	// Determine if config file is in Unicode or SBCS
-	// If the file is in SBCS (legacy) then back it up
-	// and then write-back in unicode mode.
-
-	// Test unicode mode
-	nBufOffsetTmp = 0;
-	bRet = BufReadStr(pBuf,strLine,nBufLenBytes,true,nBufOffsetTmp);
-
-  if (strLine == "JPEGsnoop")
-  {
-		bFileOk = true;
-		bFileModeUni = true;
-		nBufOffset = nBufOffsetTmp;
-	}
-
-	// Test SBCS mode
-	nBufOffsetTmp = 0;
-	bRet = BufReadStr(pBuf,strLine,nBufLenBytes,false,nBufOffsetTmp);
-
-  if (strLine == "JPEGsnoop")
-  {
-		bFileOk = true;
-		nBufOffset = nBufOffsetTmp;
-	}
-
-  if (!bFileOk)
-  {
-    strError = QString("WARNING: User Signature Database corrupt\n[%1]\nProceeding with defaults.").arg(m_strDbDir + QString(DAT_FILE));
-    qDebug() << (strError);
-//		AfxMessageBox(strError);
-
-		// Close the file to ensure no sharing violation
-    pInFile.close();
-
-		// Copy old config file
-    pInFile.copy(m_strDbDir + QString(DAT_FILE) + ".bak");
-    // Now rewrite file in latest version
-    DatabaseExtraStore();
-
-		// Notify user
-    strTmp = QString("Created default User Signature Database. Backup of old DB in [%1]").arg(m_strDbDir + QString(DAT_FILE) + ".bak");
-//@@		AfxMessageBox(strTmp);
-    delete[] pBuf;              // (was leaked on this path)
-		return;
-	}
-	
-	m_nSigListExtraNum = 0;
-
-	// Version
-	bRet = BufReadStr(pBuf,strVer,nBufLenBytes,bFileModeUni,nBufOffset);
-	bValid = false;
-
-  if (strVer == "00")
-  {
-    bValid = false;
-  }
-
-  if (strVer == "01")
-  {
-    bValid = true;
-  }
-
-  if (strVer == "02")
-  {
-    bValid = true;
-  }
-
-  if (strVer == "03")
-  {
-    bValid = true;
-  }
-
-	// Should consider trimming down local database if same entry
-	// exists in built-in database (for example, user starts running
-	// new version of tool).
-
-  while (!bDone && bValid)
-  {
-		// Read section header
-
-		bRet = BufReadStr(pBuf,strSec,nBufLenBytes,bFileModeUni,nBufOffset);
-
-    if (strSec == "*DB*")
-    {
-			// Read DB count
-			bRet = BufReadNum(pBuf,nNumLoad,nBufLenBytes,nBufOffset);
-
-			// For each entry that we read, we should double-check to see
-			// if we already have it in the built-in DB. If we do, then
-			// don't add it to the runtime DB, and mark the local DB as
-			// needing trimming. If so, rewrite the DB.
-
-      for (uint32_t ind=0;ind<nNumLoad;ind++)
-      {
-				sDbLocalEntry.bValid = false;
-        sDbLocalEntry.strXMake = "";
-        sDbLocalEntry.strXModel = "";
-        sDbLocalEntry.strUmQual = "";
-        sDbLocalEntry.strCSig = "";
-        sDbLocalEntry.strCSigRot = "";
-        sDbLocalEntry.strXSubsamp = "";
-        sDbLocalEntry.strMSwTrim = "";
-        sDbLocalEntry.strMSwDisp = "";
-
-				bDbLocalEntryFound = false;
-
-        if (strVer == "01")
-        {
-					// For version 01:
-
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strXMake,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strXModel,nBufLenBytes,bFileModeUni,nBufOffset);
-
-          strTmp = "";
-					bRet = BufReadStr(pBuf,strTmp,nBufLenBytes,bFileModeUni,nBufOffset);
-//@@					sDbLocalEntry.eEditor = static_cast<teEditor>(_tstoi(strTmp));
-
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strUmQual,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strCSig,nBufLenBytes,bFileModeUni,nBufOffset);
-
-					// In older version of DB, these entries won't exist
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strXSubsamp,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strMSwTrim,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strMSwDisp,nBufLenBytes,bFileModeUni,nBufOffset);
-
-        }
-        else if ( (strVer == "02") || (strVer == "03") )
-        {
-					// For version 02 or 03:
-					// NOTE: Difference between 02 and 03:
-					//       - 02 : SBCS format
-					//       - 03 : Unicode format
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strXMake,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strXModel,nBufLenBytes,bFileModeUni,nBufOffset);
-
-          strTmp = "";
-					bRet = BufReadStr(pBuf,strTmp,nBufLenBytes,bFileModeUni,nBufOffset);
-//@@					sDbLocalEntry.eEditor = static_cast<teEditor>(_tstoi(strTmp));
-
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strUmQual,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strCSig,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strCSigRot,nBufLenBytes,bFileModeUni,nBufOffset);
-
-					
-					// In older version of DB, these entries won't exist
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strXSubsamp,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strMSwTrim,nBufLenBytes,bFileModeUni,nBufOffset);
-					bRet = BufReadStr(pBuf,sDbLocalEntry.strMSwDisp,nBufLenBytes,bFileModeUni,nBufOffset);
-				}
-
-				// -------------------------------------------------------
-
-				// Does the entry already exist in the internal DB?
-				bDbLocalEntryFound = SearchSignatureExactInternal(sDbLocalEntry.strXMake,sDbLocalEntry.strXModel,sDbLocalEntry.strCSig);
-
-        if (!bDbLocalEntryFound)
-        {
-					// Add it!
-					m_sSigListExtra[m_nSigListExtraNum].bValid    = true;
-					m_sSigListExtra[m_nSigListExtraNum].strXMake    = sDbLocalEntry.strXMake;
-					m_sSigListExtra[m_nSigListExtraNum].strXModel   = sDbLocalEntry.strXModel;
-					m_sSigListExtra[m_nSigListExtraNum].eEditor  = sDbLocalEntry.eEditor;
-					m_sSigListExtra[m_nSigListExtraNum].strUmQual   = sDbLocalEntry.strUmQual;
-					m_sSigListExtra[m_nSigListExtraNum].strCSig     = sDbLocalEntry.strCSig;
-					m_sSigListExtra[m_nSigListExtraNum].strCSigRot  = sDbLocalEntry.strCSigRot;
-
-					m_sSigListExtra[m_nSigListExtraNum].strXSubsamp = sDbLocalEntry.strXSubsamp;
-					m_sSigListExtra[m_nSigListExtraNum].strMSwTrim  = sDbLocalEntry.strMSwTrim;
-					m_sSigListExtra[m_nSigListExtraNum].strMSwDisp  = sDbLocalEntry.strMSwDisp;
-					m_nSigListExtraNum++;
-        }
-        else
-        {
-					bDbLocalTrimmed = true;
-				}
-			}
+      bUni = bTryUni;
+      bHeader = true;
+      break;
     }
-    else if (strSec == "*Z*")
+  }
+  if(!bHeader)
+  {
+    m_strLoadError = QString("[%1] isn't a JPEGsnoop user database").arg(strPath);
+    return;
+  }
+
+  CDbReader reader(abData, bUni);
+  QString strVer;
+  reader.str(strVer);           // "JPEGsnoop"
+  if(!reader.str(strVer))
+  {
+    m_strLoadError = QString("[%1] is damaged: it ends after its first line").arg(strPath);
+    return;
+  }
+  if((strVer != QLatin1String("01")) && (strVer != QLatin1String("02")) && (strVer != QLatin1String("03")))
+  {
+    m_strLoadError = QString("[%1] is version %2, which this version of JPEGsnoop can't read").arg(strPath, strVer);
+    return;
+  }
+
+  uint32_t nListed = 0;         // entries the file says it has
+  uint32_t nRead = 0;           // entries read in full
+  bool bDamaged = false;
+  bool bDone = false;
+
+  while(!bDone && !bDamaged)
+  {
+    QString strSec;
+    if(!reader.str(strSec))
     {
-			bDone = true;
+      bDamaged = true;
+    }
+    else if(strSec == QLatin1String("*Z*"))
+    {
+      bDone = true;
+    }
+    else if(strSec == QLatin1String("*DB*"))
+    {
+      uint32_t nNum = 0;
+      if(!reader.num(nNum))
+      {
+        bDamaged = true;
+        break;
+      }
+      nListed += nNum;
+
+      for(uint32_t nInd = 0; (nInd < nNum) && !bDamaged; nInd++)
+      {
+        CompSig sEntry;
+        QString strEditor;
+        bool bOk = reader.str(sEntry.strXMake) && reader.str(sEntry.strXModel) && reader.str(strEditor) &&
+                   reader.str(sEntry.strUmQual) && reader.str(sEntry.strCSig);
+        if(bOk && (strVer != QLatin1String("01")))
+          bOk = reader.str(sEntry.strCSigRot);
+        bOk = bOk && reader.str(sEntry.strXSubsamp) && reader.str(sEntry.strMSwTrim) &&
+              reader.str(sEntry.strMSwDisp);
+        if(!bOk)
+        {
+          bDamaged = true;
+          break;
+        }
+        nRead++;
+        sEntry.eEditor = editorFromText(strEditor);
+        sEntry.bValid = true;
+
+        // One the built-in database now has isn't used, as on Windows (which
+        // also wrote the file again without it)
+        if(IsBuiltInEntry(sEntry))
+          continue;
+
+        // (Windows wrote past the end of the list)
+        if(m_nSigListExtraNum < DBEX_ENTRIES_MAX)
+          m_sSigListExtra[m_nSigListExtraNum++] = sEntry;
+      }
     }
     else
     {
-			bValid = false;
-		} // strSec
-	} // while
+      bDamaged = true;
+    }
+  }
 
-	// ----------------------
-
-  pInFile.close();
-
-  if (pBuf)
+  if(bDamaged)
   {
-		delete [] pBuf;
-        pBuf = nullptr;
-	}
-
-	// If we did make changes to the database (trim), then rewrite it!
-	// Ensure that we have closed the file above before we rewrite it
-	// otherwise we could end up with a sharing violation
-  if (bDbLocalTrimmed)
+    if(nRead < nListed)
+      m_strLoadError = QString("[%1] is damaged: %2 of its %3 entries could be read").arg(strPath).arg(nRead).arg(nListed);
+    else if(nRead == 0)
+      m_strLoadError = QString("[%1] is damaged after its header").arg(strPath);
+    else
+      m_strLoadError = QString("[%1] is damaged after entry %2").arg(strPath).arg(nRead);
+  }
+  else if(nRead > DBEX_ENTRIES_MAX)
   {
-		DatabaseExtraStore();
-	}
-
-	// Now is this an old config file version? If so,
-	// create a backup and then rewrite the new version
-//	if (bValid) {
-//		if (strVer != DB_VER_STR) {
-//			// Copy old config file
-//			TCHAR szFilePathNameBak[200];
-//      _stprintf_s(szFilePathNameBak,"%s\\%s.bak",m_strDbDir,DAT_FILE);
-//			CopyFile(szFilePathName,szFilePathNameBak,false);
-//			// Now rewrite file in latest version
-//			DatabaseExtraStore();
-//			// Notify user
-//      strError = QString(("Upgraded User Signature Database. Backup in:\n%s",szFilePathNameBak);
-//			AfxMessageBox(strError);
-//		}
-//	}
+    m_strLoadError =
+      QString("[%1] has %2 entries: only the first %3 are used").arg(strPath).arg(nRead).arg(DBEX_ENTRIES_MAX);
+  }
+  else
+  {
+    // Read in full: an older version's file is still kept, as Windows kept
+    // it when it wrote it again as version 03
+    m_bKeepOldFile = (strVer != QLatin1String(DB_VER_STR));
+  }
 }
 
 void CDbSigs::DatabaseExtraClean()
 {
-	m_nSigListExtraNum = 0;
-	DatabaseExtraStore();
+  m_nSigListExtraNum = 0;
+  QString strError;
+  DatabaseExtraStore(strError);
 }
 
 uint32_t CDbSigs::DatabaseExtraGetNum()
 {
-	return m_nSigListExtraNum;
+  return static_cast<uint32_t>(m_nSigListExtraNum);
 }
 
 CompSig CDbSigs::DatabaseExtraGet(uint32_t nInd)
 {
-  Q_ASSERT(nInd<m_nSigListExtraNum);
-	return m_sSigListExtra[nInd];
+  Q_ASSERT(nInd < static_cast<uint32_t>(m_nSigListExtraNum));
+  return m_sSigListExtra[nInd];
 }
 
-void CDbSigs::DatabaseExtraStore()
+// Write the user database (version 03), in full or not at all. (The Qt port
+// wrote nothing: its string writer was commented out, and the buffer was
+// written up to its first zero byte.)
+bool CDbSigs::DatabaseExtraStore(QString &strError)
 {
-  uint8_t *	pBuf = nullptr;
-  //uint32_t	nBufLenBytes = 0;
-  uint32_t	nBufOffset = 0;
-
-	bool		bModeUni = true;	// Save in Unicode format
-
-  Q_ASSERT(m_strDbDir != "");
-  if (m_strDbDir == "") {
-		return;
-	}
-
-	// Open the output file
-    QFile pOutFile(m_strDbDir + QString(DAT_FILE));
-
-  if(pOutFile.open(QIODevice::WriteOnly) == false)
-	{
-    QString		strError;
-    strError = QString("ERROR: Couldn't open file: [%1]").arg(pOutFile.errorString());
-    qDebug() << (strError);
-//@@		AfxMessageBox(strError);
-		return;
-	}
-
-	// Allocate the output buffer
-  pBuf = new unsigned char [MAX_BUF_SET_FILE];
-  Q_ASSERT(pBuf);
-
-	nBufOffset = 0;
-
-  QString		strLine;
-  QString		strParam;
-  QString		strVal;
-	//bool		bErr = false;
-	//bool		bDone = false;
-  bool		bRet;
-
-  uint32_t	nMaxBufBytes = MAX_BUF_SET_FILE;
-
-  bRet = BufWriteStr(pBuf,"JPEGsnoop",nMaxBufBytes,bModeUni,nBufOffset);
-  bRet = BufWriteStr(pBuf,DB_VER_STR,nMaxBufBytes,bModeUni,nBufOffset);
-  bRet = BufWriteStr(pBuf,"*DB*",nMaxBufBytes,bModeUni,nBufOffset);
-
-  // Determine how many entries will remain (after removing marked deleted entries
-  uint32_t nNewExtraNum = m_nSigListExtraNum;
-
-  for (uint32_t nInd=0;nInd<m_nSigListExtraNum;nInd++)
+  const QString strPath = DatabaseExtraPath();
+  if(strPath.isEmpty())
   {
-    if (!m_sSigListExtra[nInd].bValid)
+    strError = QStringLiteral("No folder is set for the user database (Options > Configuration)");
+    return false;
+  }
+
+  QByteArray abData;
+  auto putStr = [&abData](const QString &str) {
+    for(const QChar ch : str)
     {
-			nNewExtraNum--;
-		}
-	}
+      const char16_t nCh = ch.unicode();
+      abData.append(static_cast<char>(nCh & 0xFF));
+      abData.append(static_cast<char>(nCh >> 8));
+    }
+    abData.append(2, '\0');
+  };
 
-	bRet = BufWriteNum(pBuf,nNewExtraNum,nMaxBufBytes,nBufOffset);
+  putStr(QStringLiteral("JPEGsnoop"));
+  putStr(QStringLiteral(DB_VER_STR));
+  putStr(QStringLiteral("*DB*"));
 
-  for (uint32_t nInd=0;nInd<m_nSigListExtraNum;nInd++) {
+  // Entries marked for removal (Manage Local DB) are left out
+  quint32 nValid = 0;
+  for(int32_t nInd = 0; nInd < m_nSigListExtraNum; nInd++)
+  {
+    if(m_sSigListExtra[nInd].bValid)
+      nValid++;
+  }
+  char acNum[4];
+  qToLittleEndian<quint32>(nValid, acNum);
+  abData.append(acNum, sizeof(acNum));
 
-		// Is it marked for deletion (from Manage dialog?)
-		if (!m_sSigListExtra[nInd].bValid) {
-			continue;
-		}
+  for(int32_t nInd = 0; nInd < m_nSigListExtraNum; nInd++)
+  {
+    const CompSig &sEntry = m_sSigListExtra[nInd];
+    if(!sEntry.bValid)
+      continue;
+    putStr(sEntry.strXMake);
+    putStr(sEntry.strXModel);
+    putStr(QString::number(static_cast<uint32_t>(sEntry.eEditor)));
+    putStr(sEntry.strUmQual);
+    putStr(sEntry.strCSig);
+    putStr(sEntry.strCSigRot);
+    putStr(sEntry.strXSubsamp);
+    putStr(sEntry.strMSwTrim);
+    putStr(sEntry.strMSwDisp);
+  }
 
-    QString	strTmp;
+  putStr(QStringLiteral("*Z*"));
 
-		// For version 02?
-
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strXMake,nMaxBufBytes,bModeUni,nBufOffset);
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strXModel,nMaxBufBytes,bModeUni,nBufOffset);
-    strTmp = QString("%1").arg(m_sSigListExtra[nInd].eEditor);				// eEditor = u_source
-		bRet = BufWriteStr(pBuf,strTmp,nMaxBufBytes,bModeUni,nBufOffset);
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strUmQual,nMaxBufBytes,bModeUni,nBufOffset);
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strCSig,nMaxBufBytes,bModeUni,nBufOffset);
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strCSigRot,nMaxBufBytes,bModeUni,nBufOffset);
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strXSubsamp,nMaxBufBytes,bModeUni,nBufOffset);
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strMSwTrim,nMaxBufBytes,bModeUni,nBufOffset);
-		bRet = BufWriteStr(pBuf,m_sSigListExtra[nInd].strMSwDisp,nMaxBufBytes,bModeUni,nBufOffset);
-
-	}
-
-  bRet = BufWriteStr(pBuf,"*Z*",nMaxBufBytes,bModeUni,nBufOffset);
-
-	// --------------------------
-
-	// Now write out the buffer
-    pOutFile.write((char *)pBuf);
-
-    pOutFile.close();
-
-	if (pBuf) {
-		delete [] pBuf;
-        pBuf = nullptr;
-	}
-	
+  QSaveFile file(strPath);
+  if(!file.open(QIODevice::WriteOnly) || (file.write(abData) != abData.size()) || !file.commit())
+  {
+    strError = QString("[%1] couldn't be written: %2").arg(strPath, file.errorString());
+    return false;
+  }
+  return true;
 }
 
-void CDbSigs::DatabaseExtraAdd(QString strExifMake,QString strExifModel,
-                 QString strQual,QString strSig,QString strSigRot,QString strCss,
-                 teSource eUserSource,QString strUserSoftware)
+CDbSigs::AddResult CDbSigs::DatabaseExtraAdd(QString strExifMake, QString strExifModel,
+                                             QString strQual, QString strSig, QString strSigRot, QString strCss,
+                                             teSource eUserSource, QString strUserSoftware, QString &strDetail)
 {
-  Q_ASSERT(m_nSigListExtraNum < DBEX_ENTRIES_MAX);
+  strDetail.clear();
 
-  if (m_nSigListExtraNum >= DBEX_ENTRIES_MAX)
+  // The lower signature first, so the same tables make the same entry
+  // whichever way the image is turned (as on Windows)
+  if(strSigRot < strSig)
+    std::swap(strSig, strSigRot);
+
+  CompSig sEntry;
+  // (Windows never set this, so whether the new entry was written depended
+  // on what was in memory there before)
+  sEntry.bValid = true;
+  sEntry.strXMake = strExifMake;
+  sEntry.strXModel = strExifModel;
+  sEntry.strUmQual = strQual;
+  sEntry.strCSig = strSig;
+  sEntry.strCSigRot = strSigRot;
+  sEntry.strXSubsamp = strCss;
+
+  if(eUserSource == ENUM_SOURCE_CAM)
   {
-    QString strTmp;
-    strTmp = QString("ERROR: Can only store maximum of %1 extra signatures in local DB").arg(DBEX_ENTRIES_MAX);
-//@@		AfxMessageBox(strTmp);
-		return;
-	}
+    sEntry.eEditor = ENUM_EDITOR_CAM;
+  }
+  else if(eUserSource == ENUM_SOURCE_SW)
+  {
+    sEntry.eEditor = ENUM_EDITOR_SW;
+    sEntry.strMSwDisp = strUserSoftware;
+    sEntry.strXMake.clear();
+    sEntry.strXModel.clear();
+  }
+  else
+  {
+    // The user didn't know
+    sEntry.eEditor = ENUM_EDITOR_UNSURE;
+    sEntry.strMSwDisp = strUserSoftware;
+  }
 
-		// Now append it to the local database and resave
-		m_sSigListExtra[m_nSigListExtraNum].strXMake    = strExifMake;
-		m_sSigListExtra[m_nSigListExtraNum].strXModel   = strExifModel;
-		m_sSigListExtra[m_nSigListExtraNum].strUmQual   = strQual;
-		m_sSigListExtra[m_nSigListExtraNum].strCSig     = strSig;
-		m_sSigListExtra[m_nSigListExtraNum].strCSigRot  = strSigRot;
-		m_sSigListExtra[m_nSigListExtraNum].strXSubsamp = strCss;
+  // A newline or NUL would end the field early when the file is read back,
+  // and every field after it would be out of step
+  for(QString *pStr : { &sEntry.strXMake, &sEntry.strXModel, &sEntry.strUmQual, &sEntry.strXSubsamp,
+                        &sEntry.strMSwDisp })
+  {
+    pStr->replace(QChar(u'\n'), QChar(u' ')).replace(QChar(u'\0'), QChar(u' '));
+  }
 
-    if (eUserSource == ENUM_SOURCE_CAM)
-    { // digicam
-			m_sSigListExtra[m_nSigListExtraNum].eEditor = ENUM_EDITOR_CAM;
-      m_sSigListExtra[m_nSigListExtraNum].strMSwTrim = "";
-      m_sSigListExtra[m_nSigListExtraNum].strMSwDisp = "";
+  // (Windows added it again, or added one the next start would drop as built
+  // in, and said "Added")
+  if(IsBuiltInEntry(sEntry) || IsUserEntry(sEntry))
+    return AddResult::AlreadyIn;
+
+  if(m_nSigListExtraNum >= DBEX_ENTRIES_MAX)
+    return AddResult::Full;
+
+  // Keep a file that couldn't be read in full, or an older version's
+  const QString strPath = DatabaseExtraPath();
+  QString strBak;
+  if(m_bKeepOldFile && !strPath.isEmpty() && QFile::exists(strPath))
+  {
+    strBak = strPath + QStringLiteral(".bak");
+    QFile fileOld(strPath);
+    if((QFile::exists(strBak) && !QFile::remove(strBak)) || !fileOld.copy(strBak))
+    {
+      strDetail = QString("[%1] couldn't be kept as [%2], so it wasn't replaced: %3")
+                    .arg(strPath, strBak, fileOld.errorString());
+      return AddResult::SaveFailed;
     }
-    else if (eUserSource == ENUM_SOURCE_SW)
-    { // software
-			m_sSigListExtra[m_nSigListExtraNum].eEditor = ENUM_EDITOR_SW;
-      m_sSigListExtra[m_nSigListExtraNum].strMSwTrim = "";
-			m_sSigListExtra[m_nSigListExtraNum].strMSwDisp = strUserSoftware; // Not quite right perfect
-      m_sSigListExtra[m_nSigListExtraNum].strXMake   = "";
-      m_sSigListExtra[m_nSigListExtraNum].strXModel  = "";
-    }
-    else
-    { // user didn't know
-			m_sSigListExtra[m_nSigListExtraNum].eEditor = ENUM_EDITOR_UNSURE;
-      m_sSigListExtra[m_nSigListExtraNum].strMSwTrim = "";
-			m_sSigListExtra[m_nSigListExtraNum].strMSwDisp = strUserSoftware; // Not quite right perfect
-		}
+  }
 
-		m_nSigListExtraNum++;
+  m_sSigListExtra[m_nSigListExtraNum++] = sEntry;
 
-		// Now resave the database
-		DatabaseExtraStore();
+  QString strError;
+  if(!DatabaseExtraStore(strError))
+  {
+    // Not kept: it would be gone at the next start
+    m_sSigListExtra[--m_nSigListExtraNum] = CompSig();
+    strDetail = strError;
+    return AddResult::SaveFailed;
+  }
+
+  if(!strBak.isEmpty())
+    strDetail = QString("The file it replaced was kept as [%1].").arg(strBak);
+  m_bKeepOldFile = false;
+  m_strLoadError.clear();
+  return AddResult::Added;
 }
 
-// TODO: Should we include editors in this search?
-bool CDbSigs::SearchSignatureExactInternal(QString strMake, QString strModel, QString strSig)
+// Whether the built-in database has this entry (see sameEntry()). Windows
+// compared only the make, model and signature, so it also dropped a user's
+// entry for the same camera with other subsampling, which the signature
+// search doesn't count as a match; and it never matched software, whose make
+// and model the user database leaves empty.
+bool CDbSigs::IsBuiltInEntry(const CompSig &sEntry) const
 {
-	bool		bFoundExact = false;
-	bool		bDone = false;
-  int32_t	nInd = 0;
-
-  while (!bDone)
+  for(int32_t nInd = 0; nInd < m_nSigListNum; nInd++)
   {
-    if (nInd >= m_nSigListNum)
-    {
-			bDone = true;
-    }
-    else
-    {
-      if((m_sSigList[nInd].strXMake  == strMake) &&
-         (m_sSigList[nInd].strXModel == strModel) &&
-         ((m_sSigList[nInd].strCSig  == strSig) || (m_sSigList[nInd].strCSigRot == strSig)) )
-			{
-				bFoundExact = true;
-				bDone = true;
-			}
+    if(sameEntry(sEntry, m_sSigList[nInd]))
+      return true;
+  }
+  return false;
+}
 
-			nInd++;
-		}
-	}
-
-	return bFoundExact;
+bool CDbSigs::IsUserEntry(const CompSig &sEntry) const
+{
+  for(int32_t nInd = 0; nInd < m_nSigListExtraNum; nInd++)
+  {
+    if(m_sSigListExtra[nInd].bValid && sameEntry(sEntry, m_sSigListExtra[nInd]))
+      return true;
+  }
+  return false;
 }
 
 bool CDbSigs::SearchCom(QString strCom)

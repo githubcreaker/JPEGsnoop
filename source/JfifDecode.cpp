@@ -8327,6 +8327,14 @@ bool CjfifDecode::CompareSignature(bool bQuiet = false)
   strTmp = QString("  Searching Compression Signatures: (%1 built-in, %2 user(*) )").arg(nSigsInternal).arg(nSigsExtra);
   m_pLog->AddLine(strTmp);
 
+  // Entries the user added that aren't searched. (Windows said so only for a
+  // file without its header, in a message box at startup, and then replaced
+  // the file with an empty database, keeping a copy.)
+  if(!m_pDbSigs->DatabaseExtraLoadError().isEmpty())
+  {
+    m_pLog->AddLineWarn("  NOTE: User database " + m_pDbSigs->DatabaseExtraLoadError());
+  }
+
   // Now in SIG version 0x01 and later, we are not including
   // the CSS in the signature. Therefore, we need to compare it
   // manually.

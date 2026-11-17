@@ -156,6 +156,8 @@ public:
   uint32_t GetPosEmbedEnd();
   void GetDecodeSummary(QString & strHash, QString & strHashRot, QString & strImgExifMake, QString & strImgExifModel,
                         QString & strImgQualExif, QString & strSoftware, teDbAdd & eDbReqSuggest);
+  // The chroma subsampling a signature entry records ("2x1", "Gray", ...)
+  QString GetImgQuantCss() const { return m_strImgQuantCss; }
   uint32_t GetDqtZigZagIndex(uint32_t nInd, bool bZigZag);
   uint32_t GetDqtQuantStd(uint32_t nInd);
 

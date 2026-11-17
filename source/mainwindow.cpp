@@ -32,6 +32,7 @@
 #include "aboutdialog.h"
 #include "batchdialog.h"
 #include "batchprocess.h"
+#include "dbsubmitdialog.h"
 #include "finddialog.h"
 #include "lookupdialog.h"
 #include "offsetdialog.h"
@@ -88,6 +89,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new CRep
   m_pAppConfig->RegistryLoad();
 
   m_pDbSigs = new CDbSigs(m_pDocLog, m_pAppConfig);
+
+  // The signatures the user added (Tools > Add Camera/SW to DB), which every
+  // signature search uses. (The Qt port never read them.)
+  m_pDbSigs->SetDbDir(m_pAppConfig->dbPath());
+  m_pDbSigs->DatabaseExtraLoad();
 
   // Allocate the file window buffer
   m_pWBuf = new CwindowBuf(m_pDocLog);
@@ -480,6 +486,7 @@ void MainWindow::createActions(void)
   addToDbAct = new QAction(tr("Add Camera/SW to DB..."), this);
   addToDbAct->setShortcut(tr("Alt+S"));
   addToDbAct->setEnabled(false);
+  connect(addToDbAct, &QAction::triggered, this, &MainWindow::onAddToDb);
 
   manageLocalDbAct = new QAction(tr("Manage Local DB..."), this);
 
@@ -1134,8 +1141,18 @@ void MainWindow::onConfig()
 {
   // Modal and on the stack: one dialog at a time, nothing left behind.
   // Save applies the settings (SnoopConfigDialog::onSave).
+  const QString strDbDirBefore = m_pAppConfig->dbPath();
   SnoopConfigDialog dlg(m_pAppConfig, this);
   dlg.exec();
+
+  // A new user database folder: its database is the one searched and added
+  // to. (Windows only noted the folder, so the next entry added wrote the old
+  // folder's entries over the new folder's file.)
+  if(m_pAppConfig->dbPath() != strDbDirBefore)
+  {
+    m_pDbSigs->SetDbDir(m_pAppConfig->dbPath());
+    m_pDbSigs->DatabaseExtraLoad();
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -2134,6 +2151,88 @@ void MainWindow::searchDqt(const QString &strChosen)
   QApplication::restoreOverrideCursor();
   m_StatusBar->clearMessage();
   exeBuf.BufFileUnset();
+}
+
+//-----------------------------------------------------------------------------
+// Tools > Add Camera/SW to DB: add the shown file's compression signature to
+// the user database, with what the user says made the file (master's
+// CJPEGsnoopDoc::OnToolsAddcameratodb). Every signature search uses it from
+// then on. Windows also posted the entry to impulseadventure.com when
+// "Submit signature to Online DB" was on; this version doesn't.
+void MainWindow::onAddToDb()
+{
+  if(m_currentFile.isEmpty())
+  {
+    return;
+  }
+
+  // The menu stays enabled after a file that couldn't be opened, and the
+  // decoder still has the previous file's signature
+  if(!m_bFileAnalyzed)
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("The file shown couldn't be analyzed, so it has no compression signature to add."));
+    return;
+  }
+
+  QString strHash;
+  QString strHashRot;
+  QString strMake;
+  QString strModel;
+  QString strQual;
+  QString strSoftware;
+  teDbAdd eSuggest = DB_ADD_SUGGEST_UNSET;
+  m_pJfifDec->GetDecodeSummary(strHash, strHashRot, strMake, strModel, strQual, strSoftware, eSuggest);
+
+  // (Windows: "No valid signature could be created, so DB submit is
+  // temporarily disabled", also added to the report)
+  if(strHash == "NONE")
+  {
+    QMessageBox::information(this, "JPEGsnoop",
+                             tr("No compression signature could be made for the file shown: that needs a frame "
+                                "header (SOF) and quantization tables (DQT). There is nothing to add to the "
+                                "database."));
+    return;
+  }
+
+  // The source the report suggested
+  teSource eSource = ENUM_SOURCE_UNSURE;
+  if(eSuggest == DB_ADD_SUGGEST_CAM)
+    eSource = ENUM_SOURCE_CAM;
+  else if(eSuggest == DB_ADD_SUGGEST_SW)
+    eSource = ENUM_SOURCE_SW;
+
+  // (Windows also filled the software field with the EXIF Software)
+  CDbSubmitDialog dlg(strMake, strModel, strSoftware, strHash, strQual, eSource, m_pDbSigs->DatabaseExtraPath(),
+                      this);
+  if(dlg.exec() != QDialog::Accepted)
+  {
+    return;
+  }
+
+  QString strDetail;
+  const CDbSigs::AddResult eResult =
+    m_pDbSigs->DatabaseExtraAdd(strMake, strModel, dlg.quality(), strHash, strHashRot, m_pJfifDec->GetImgQuantCss(),
+                                dlg.source(), dlg.software(), strDetail);
+  if(eResult == CDbSigs::AddResult::Added)
+  {
+    QMessageBox::information(this, "JPEGsnoop",
+                             strDetail.isEmpty() ? tr("Added Compression signature to database")
+                                                 : tr("Added Compression signature to database. %1").arg(strDetail));
+  }
+  else if(eResult == CDbSigs::AddResult::AlreadyIn)
+  {
+    QMessageBox::information(this, "JPEGsnoop", tr("Compression signature already in database"));
+  }
+  else if(eResult == CDbSigs::AddResult::Full)
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         tr("ERROR: Can only store maximum of %1 extra signatures in local DB").arg(DBEX_ENTRIES_MAX));
+  }
+  else
+  {
+    QMessageBox::warning(this, "JPEGsnoop", tr("ERROR: The signature wasn't added: %1").arg(strDetail));
+  }
 }
 
 //-----------------------------------------------------------------------------

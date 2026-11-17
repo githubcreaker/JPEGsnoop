@@ -2646,6 +2646,282 @@ dqt_case("DQ_too_large", "dq_4gb.bin", "harness: message box: \\[/.*/dq_4gb\\.bi
          "4294967297 bytes \\(4 GB or more\\)\\.$")
 dqt_case("DQ_too_large_no_search", "dq_4gb.bin", "harness: dqt no search$")
 
+# --- Tools > Add Camera/SW to DB ------------------------------------------------
+def add_db_case(cid, steps, expect, names=("ad_cam.jpg",), extra="", forbid="-"):
+    case(cid, "AD", "gui", list(names), ("--add-db " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+def rx(text):
+    """text as a grep -E pattern that matches it literally"""
+    return "".join("\\" + c if c in ".[]()*+?{}|^$\\" else c for c in text)
+
+
+AD_SIG, AD_ROT = "013BA18D5561625796E986FDBC09F846", "01AC57E12793DFA7C46C704625C5AF0F"   # ok_444.jpg's tables
+AD_Q50_SIG, AD_Q50_ROT = "017FEB124293E03634B25E85B537A2E9", "0133FC69E52E74319F110B4486B8B0D8"
+
+
+def ad_exif(make, model, software=None, makernote=False):
+    """EXIF with a make and model, and maybe a software and a maker note"""
+    ifd0_entries = [entry(0x010F, ascii_(make)), entry(0x0110, ascii_(model))]
+    if software is not None:
+        ifd0_entries.append(entry(0x0131, ascii_(software)))
+    ifds = {}
+    if makernote:
+        ifd0_entries.append(entry(0x8769, longs("<", 0x100)))
+        ifds[0x100] = tiff_ifd("<", 0x100, [(0x927C, 7, 8, b"MAKERNOT")])
+    ifds[8] = tiff_ifd("<", 8, ifd0_entries)
+    return app1_exif(tiff("<", ifds))
+
+
+# A camera the report suggests ("new signature for known camera": make, model
+# and maker notes, an EXIF Software that isn't an editor's); a camera the
+# built-in database has at 2x1 only (Sony DSC-W1), at 1x1 and at 2x1; and the
+# tables of quality 50, whose signature sorts after the rotated one
+write("ad_cam.jpg", insert_after_app0(c444, ad_exif("TestCam", "Model 1", "FW 1.0", makernote=True)))
+write("ad_sony.jpg", insert_after_app0(c444, ad_exif("SONY", "DSC-W1")))
+write("ad_sony_422.jpg", insert_after_app0(c422, ad_exif("SONY", "DSC-W1")))
+write("ad_q50.jpg", jpeg(color, quality=50, subsampling=0))
+
+
+def user_db(entries, version="03", count=None, end=True):
+    """A user database file as Windows wrote it. entries: (make, model, editor,
+    quality, sig, sigrot, css, swtrim, swdisp); version 01 has no sigrot."""
+    def s(text):
+        return text.encode("utf-16-le") + b"\0\0" if version == "03" else text.encode("latin-1") + b"\0"
+    out = s("JPEGsnoop") + s(version) + s("*DB*") + struct.pack("<I", len(entries) if count is None else count)
+    for e in entries:
+        fields = list(e)
+        if version == "01":
+            del fields[5]
+        out += b"".join(s(str(f)) for f in fields)
+    return out + (s("*Z*") if end else b"")
+
+
+AD_CAM_ENTRY = ("TestCam", "Model 1", 1, "fine", AD_SIG, AD_ROT, "1x1", "", "")
+AD_WIN03 = [AD_CAM_ENTRY,
+            ("", "", 2, "high", AD_SIG, AD_ROT, "1x1", "", "Łódź"),
+            ("Odd", "Thing", 9, "", AD_SIG, AD_ROT, "1x1", "", "")]
+write("ad_db_win03.dat", user_db(AD_WIN03))
+write("ad_db_win02.dat", user_db([AD_CAM_ENTRY], version="02"))
+write("ad_db_win01.dat", user_db([("TestCam", "Model 1", 1, "normal", AD_SIG, "", "1x1", "", "")], version="01"))
+write("ad_db_builtin.dat", user_db([("SONY", "DSC-W1", 1, "", AD_SIG, AD_ROT, "2x1", "", ""),
+                                    ("SONY", "DSC-W1", 1, "", AD_SIG, AD_ROT, "1x1", "", "")]))
+
+
+def ad_fake(n):
+    return [("Fake", f"Model {i}", 1, "", f"01{i:030X}", f"02{i:030X}", "1x1", "", "") for i in range(n)]
+
+
+write("ad_db_260.dat", user_db(ad_fake(260)))
+write("ad_db_300.dat", user_db(ad_fake(300)))
+write("ad_db_301.dat", user_db(ad_fake(301)))
+AD_NOTDB = b"not a JPEGsnoop database\n" * 8
+write("ad_db_notdb.dat", AD_NOTDB)
+write("ad_db_v04.dat", user_db([AD_CAM_ENTRY], version="04"))
+write("ad_db_trunc.dat", user_db(AD_WIN03[:2], count=3, end=False))
+write("ad_db_noend.dat", user_db(AD_WIN03[:1], end=False))
+with open(files_dir / "ad_db_big.dat", "wb") as f:
+    f.write(user_db([AD_CAM_ENTRY]))
+    f.seek(4 * 1024 * 1024)
+    f.write(b"\0")
+
+AD_DIALOG = "harness: add-db dialog: Add Compression Signature to Database \\("
+AD_ADDED = "harness: message box: Added Compression signature to database$"
+AD_ALREADY = "harness: message box: Compression signature already in database$"
+AD_NONE = "harness: add-db files: none$"
+AD_CAM_LINE = "\\*CAM:\\[TestCam +\\] \\[Model 1 +\\] \\[fine +\\] Yes"
+
+
+def ad_count(n, when="after"):
+    return f"harness: add-db report {when}: Searching Compression Signatures: \\(3347 built-in, {n} user\\(\\*\\) \\)$"
+
+
+def ad_entry(n, editor, make, model, quality, sig, sigrot, css, software):
+    return rx(f'harness: add-db entry {n}: editor={editor} make="{make}" model="{model}" quality="{quality}" '
+              f'sig={sig} sigrot={sigrot} css={css} swtrim="" software="{software}"') + "$"
+
+
+def ad_note(rest, when="before"):
+    return f"harness: add-db report {when}: NOTE: User database \\[/.*/JPEGsnoop_db\\.dat\\] {rest}$"
+
+
+# The menu item, where Windows has it; it needs a file
+add_db_case("AD_menu", "cancel", 'harness: add-db menu=&Tools after="Export TIFF\\.\\.\\." separator=1 enabled=1 tip=""$')
+add_db_case("AD_no_file_disabled", "ok", "harness: add-db menu=.* enabled=0 ", extra="--add-db-at 0")
+add_db_case("AD_no_file_no_dialog", "ok", "harness: add-db dialog not shown$", extra="--add-db-at 0")
+
+# The dialog: the file's EXIF fields and signature, which can't be changed,
+# and the source the report suggests
+add_db_case("AD_dialog_cam", "cancel", AD_DIALOG + rx(f'make="TestCam" model="Model 1" exif-software="FW 1.0" '
+                                                      f'sig={AD_SIG} quality="" source=cam software="FW 1.0" '
+                                                      'read-only=1)') + "$")
+add_db_case("AD_dialog_sw", "cancel", AD_DIALOG + rx(f'make="???" model="???" exif-software="" sig={AD_SIG} '
+                                                     'quality="" source=sw software="" read-only=1)') + "$",
+            names=("ok_444.jpg",))
+add_db_case("AD_dialog_unsure", "cancel", AD_DIALOG + rx('make="TestMake" model="TestModel" exif-software="" ') +
+            ".* source=unsure ", names=("r_exif.jpg",))
+add_db_case("AD_dialog_q50_sig", "cancel", AD_DIALOG + ".* sig=" + AD_Q50_SIG + " ", names=("ad_q50.jpg",))
+# Nothing is sent: the note says where it goes (Windows' note said it went to
+# the ImpulseAdventure database too)
+add_db_case("AD_note", "cancel", "harness: add-db note: .*Nothing is sent over the network\\. /  / User database: "
+            "/.*/JPEGsnoop_db\\.dat$", forbid="ImpulseAdventure")
+
+# Cancel and Escape add nothing; Return is OK
+add_db_case("AD_cancel", "cancel", AD_NONE, forbid="message box")
+add_db_case("AD_cancel_report", "cancel", ad_count(0))
+add_db_case("AD_escape", "escape", AD_NONE, forbid="message box")
+add_db_case("AD_return", "quality=fine,return", AD_ADDED)
+add_db_case("AD_return_entry", "quality=fine,return",
+            ad_entry(1, 1, "TestCam", "Model 1", "fine", AD_SIG, AD_ROT, "1x1", ""))
+
+# A camera: written as Windows wrote it, without the software; searched from
+# then on, so the file now matches a camera in the database (Class 3)
+AD_CAM = "quality=fine,ok"
+add_db_case("AD_cam_added", AD_CAM, AD_ADDED)
+add_db_case("AD_cam_entry", AD_CAM, ad_entry(1, 1, "TestCam", "Model 1", "fine", AD_SIG, AD_ROT, "1x1", ""))
+add_db_case("AD_cam_file", AD_CAM, "harness: add-db file: header=JPEGsnoop version=03 utf16=1 count=1$")
+add_db_case("AD_cam_file_end", AD_CAM, "harness: add-db file end=\\*Z\\* rest=0$")
+add_db_case("AD_cam_files", AD_CAM, "harness: add-db files: JPEGsnoop_db\\.dat$")
+add_db_case("AD_cam_count", AD_CAM, ad_count(1))
+add_db_case("AD_cam_report", AD_CAM, "harness: add-db report after: " + AD_CAM_LINE)
+add_db_case("AD_cam_assessment_before", AD_CAM, "harness: add-db report before: ASSESSMENT: Class 4 - ")
+add_db_case("AD_cam_assessment_after", AD_CAM, "harness: add-db report after: ASSESSMENT: Class 3 - Image has high "
+            "probability of being original$")
+add_db_case("AD_cam_next_start", AD_CAM, 'harness: add-db next start: user=1 note=""$')
+add_db_case("AD_cam_next_start_entry", AD_CAM, rx(f'harness: add-db next start entry 1: editor=1 make="TestCam" '
+                                                  f'model="Model 1" quality="fine" sig={AD_SIG} sigrot={AD_ROT} '
+                                                  'css=1x1 software=""') + "$")
+# In the folder, not beside it, and no Signatures.dat (the Qt port wrote one
+# beside the folder at every start)
+add_db_case("AD_in_folder", AD_CAM, "harness: add-db beside folder: 0 0$")
+add_db_case("AD_start_writes_nothing", "cancel", "harness: add-db beside folder: 0 0$", names=("ok_444.jpg",))
+
+# Software: its name, without spaces around it, and no make or model
+AD_SW = "software=%20%20GIMP%20%20,quality=%2090%20,ok"
+add_db_case("AD_sw_entry", AD_SW, ad_entry(1, 2, "", "", "90", AD_SIG, AD_ROT, "1x1", "GIMP"), names=("ok_444.jpg",))
+add_db_case("AD_sw_report", AD_SW, "harness: add-db report after: \\*SW :\\[GIMP +\\]", names=("ok_444.jpg",))
+add_db_case("AD_sw_empty", "software=,ok,cancel", "harness: message box: You indicated that this file is processed\\. "
+            "Please enter software name\\.$", names=("ok_444.jpg",))
+add_db_case("AD_sw_empty_stays", "software=,ok,cancel", "harness: add-db ok left the dialog open ",
+            names=("ok_444.jpg",))
+add_db_case("AD_sw_spaces", "software=%20%20,ok,cancel", "harness: add-db ok left the dialog open ",
+            names=("ok_444.jpg",))
+add_db_case("AD_sw_then_named", "software=,ok,software=GIMP,ok",
+            ad_entry(1, 2, "", "", "", AD_SIG, AD_ROT, "1x1", "GIMP"), names=("ok_444.jpg",))
+# Not sure: the make and model, and the software
+add_db_case("AD_unsure_entry", "software=Thing,ok",
+            ad_entry(1, 3, "TestMake", "TestModel", "", AD_SIG, AD_ROT, "1x1", "Thing"), names=("r_exif.jpg",))
+add_db_case("AD_unsure_report", "software=Thing,ok", "harness: add-db report after: \\*\\?\\? :\\[TestMake +\\]",
+            names=("r_exif.jpg",))
+# The lower signature first, as on Windows
+add_db_case("AD_sig_order", "source=cam,ok", ad_entry(1, 1, "???", "???", "", AD_Q50_ROT, AD_Q50_SIG, "1x1", ""),
+            names=("ad_q50.jpg",))
+# A newline would end the field early when read back, and put every field
+# after it out of step. (The EXIF make shows one as ".", but one can be pasted.)
+add_db_case("AD_newline", "paste-software=Two%0ALines,ok", 'harness: add-db next start entry 1: editor=2 make="" '
+            'model="" quality="" sig=' + AD_SIG + ' sigrot=' + AD_ROT + ' css=1x1 software="Two Lines"$',
+            names=("ok_444.jpg",))
+
+# Already in the database (Windows added it again, or added one the next start
+# dropped as built in)
+add_db_case("AD_twice", "ok+ok", AD_ALREADY)
+add_db_case("AD_twice_count", "ok+ok", "harness: add-db file: .* count=1$")
+add_db_case("AD_twice_quality", "quality=fine,ok+quality=normal,ok", AD_ALREADY)
+add_db_case("AD_twice_unsure", "ok+source=unsure,ok", AD_ALREADY)
+add_db_case("AD_twice_sw_other_name", "software=GIMP,ok+software=XnView,ok", "harness: add-db file: .* count=2$",
+            names=("ok_444.jpg",))
+add_db_case("AD_builtin_cam", "source=cam,ok", AD_ALREADY, names=("ad_sony_422.jpg",))
+add_db_case("AD_builtin_cam_none", "source=cam,ok", AD_NONE, names=("ad_sony_422.jpg",))
+add_db_case("AD_builtin_sw", "software=IJG%20Library,ok", AD_ALREADY, names=("ok_444.jpg",))
+# The same camera with other subsampling isn't built in, and stays at the next
+# start (Windows dropped it)
+add_db_case("AD_other_css_added", "source=cam,ok", AD_ADDED, names=("ad_sony.jpg",))
+add_db_case("AD_other_css_kept", "source=cam,ok", "harness: add-db next start: user=1 ", names=("ad_sony.jpg",))
+
+# Nothing to add
+add_db_case("AD_no_signature", "ok", "harness: message box: No compression signature could be made for the file "
+            "shown: that needs a frame header \\(SOF\\) and quantization tables \\(DQT\\)\\. There is nothing to add "
+            "to the database\\.$", names=("psd_rgb_rle.psd",))
+add_db_case("AD_no_signature_dialog", "ok", "harness: add-db dialog not shown$", names=("psd_rgb_rle.psd",))
+add_db_case("AD_not_analyzed", "ok", "harness: message box: The file shown couldn't be analyzed, so it has no "
+            "compression signature to add\\.$", names=("ok_444.jpg", "f4_no_such_file.jpg"), extra="--add-db-at 2")
+
+# A database Windows wrote, read at the start (the Qt port never read one):
+# version 03 (UTF-16; Windows read only each character's low byte), 02 and 01
+# (single bytes)
+W03 = "--user-db ad_db_win03.dat"
+add_db_case("AD_load_03_count", "cancel", ad_count(3, "before"), extra=W03)
+add_db_case("AD_load_03_cam", "cancel", "harness: add-db report before: " + AD_CAM_LINE, extra=W03)
+add_db_case("AD_load_03_unicode", "cancel", "harness: add-db report before: \\*SW :\\[Łódź +\\]", extra=W03)
+add_db_case("AD_load_03_unknown_editor", "cancel", "harness: add-db report before: \\*\\?\\? :\\[Odd +\\]", extra=W03)
+add_db_case("AD_load_03_assessment", "cancel", "harness: add-db report before: ASSESSMENT: Class 3 - ", extra=W03)
+add_db_case("AD_load_03_add", "source=sw,software=New,ok", "harness: add-db file: .* count=4$", extra=W03)
+add_db_case("AD_load_03_unknown_editor_kept", "source=sw,software=New,ok", 'harness: add-db entry 3: editor=0 make="Odd" ',
+            extra=W03)
+add_db_case("AD_load_03_no_bak", "source=sw,software=New,ok", "harness: add-db files: JPEGsnoop_db\\.dat$", extra=W03)
+add_db_case("AD_load_02", "cancel", "harness: add-db report before: " + AD_CAM_LINE, extra="--user-db ad_db_win02.dat")
+add_db_case("AD_load_01", "cancel", "harness: add-db report before: \\*CAM:\\[TestCam +\\] \\[Model 1 +\\] \\[normal +\\] "
+            "Yes", extra="--user-db ad_db_win01.dat")
+# An older version's file is kept when it is replaced, as Windows kept it
+AD_NEW_SW = "source=sw,software=New,ok"
+AD_KEPT = ("harness: message box: Added Compression signature to database\\. The file it replaced was kept as "
+           "\\[/.*/JPEGsnoop_db\\.dat\\.bak\\]\\.$")
+add_db_case("AD_load_02_kept", AD_NEW_SW, AD_KEPT, extra="--user-db ad_db_win02.dat")
+add_db_case("AD_load_02_bak", AD_NEW_SW, "harness: add-db bak md5=" + md5(user_db([AD_CAM_ENTRY], version="02")) + "$",
+            extra="--user-db ad_db_win02.dat")
+add_db_case("AD_load_02_now_03", AD_NEW_SW, "harness: add-db file: header=JPEGsnoop version=03 utf16=1 count=2$",
+            extra="--user-db ad_db_win02.dat")
+# One the built-in database has is dropped, but not one with other subsampling
+add_db_case("AD_load_builtin", "cancel", ad_count(1, "before"), names=("ad_sony.jpg",),
+            extra="--user-db ad_db_builtin.dat")
+add_db_case("AD_load_builtin_kept", "cancel", "harness: add-db report before: \\*CAM:\\[SONY +\\] \\[DSC-W1 +\\] "
+            "\\[ +\\] Yes", names=("ad_sony.jpg",), extra="--user-db ad_db_builtin.dat")
+# 256 or more entries (Windows read the count's low byte: 4 of 260)
+add_db_case("AD_load_260", "cancel", ad_count(260, "before"), extra="--user-db ad_db_260.dat")
+add_db_case("AD_load_301", "cancel", ad_count(300, "before"), extra="--user-db ad_db_301.dat")
+add_db_case("AD_load_301_note", "cancel", ad_note("has 301 entries: only the first 300 are used"),
+            extra="--user-db ad_db_301.dat")
+add_db_case("AD_full", "ok", "harness: message box: ERROR: Can only store maximum of 300 extra signatures in local "
+            "DB$", extra="--user-db ad_db_300.dat")
+add_db_case("AD_full_unchanged", "ok", "harness: add-db file: .* count=300$", extra="--user-db ad_db_300.dat")
+
+# A file that can't be read in full: the report says so, its entries before
+# the problem are used, and it is kept when replaced (Windows replaced one
+# without its header at the start, and read the rest as far as it could)
+add_db_case("AD_notdb_note", "cancel", ad_note("isn't a JPEGsnoop user database"), extra="--user-db ad_db_notdb.dat")
+add_db_case("AD_notdb_kept", "ok", AD_KEPT, extra="--user-db ad_db_notdb.dat")
+add_db_case("AD_notdb_bak", "ok", "harness: add-db bak md5=" + md5(AD_NOTDB) + "$", extra="--user-db ad_db_notdb.dat")
+add_db_case("AD_notdb_now", "ok", "harness: add-db file: header=JPEGsnoop version=03 utf16=1 count=1$",
+            extra="--user-db ad_db_notdb.dat")
+add_db_case("AD_notdb_note_gone", "ok", 'harness: add-db next start: user=1 note=""$', extra="--user-db ad_db_notdb.dat")
+add_db_case("AD_v04_note", "cancel", ad_note("is version 04, which this version of JPEGsnoop can't read"),
+            extra="--user-db ad_db_v04.dat")
+add_db_case("AD_v04_kept", "ok", AD_KEPT, extra="--user-db ad_db_v04.dat")
+add_db_case("AD_trunc_note", "cancel", ad_note("is damaged: 2 of its 3 entries could be read"),
+            extra="--user-db ad_db_trunc.dat")
+add_db_case("AD_trunc_count", "cancel", ad_count(2, "before"), extra="--user-db ad_db_trunc.dat")
+add_db_case("AD_noend_note", "cancel", ad_note("is damaged after entry 1"), extra="--user-db ad_db_noend.dat")
+add_db_case("AD_big_note", "cancel", ad_note("is too large to be a user database"), extra="--user-db ad_db_big.dat")
+add_db_case("AD_unreadable_note", "cancel", ad_note("couldn't be opened: .*"),
+            extra="--user-db ad_db_win03.dat --user-db-mode 000")
+add_db_case("AD_unreadable_kept", "ok", "harness: message box: ERROR: The signature wasn't added: "
+            "\\[/.*/JPEGsnoop_db\\.dat\\] couldn't be kept as \\[/.*/JPEGsnoop_db\\.dat\\.bak\\], so it wasn't "
+            "replaced: ", extra="--user-db ad_db_win03.dat --user-db-mode 000")
+
+# A folder that isn't there: not added, so not searched either
+add_db_case("AD_no_folder", "ok", "harness: message box: ERROR: The signature wasn't added: "
+            "\\[/.*/missing/JPEGsnoop_db\\.dat\\] couldn't be written: ", extra="--db-dir missing")
+add_db_case("AD_no_folder_count", "ok", ad_count(0), extra="--db-dir missing")
+# Options > Configuration: the new folder's database is searched and added to
+# (Windows kept the old folder's entries and wrote them over the new file)
+AD_FOLDERS = "--user-db ad_db_win03.dat --user-db other:ad_db_win02.dat"
+add_db_case("AD_folder_before", "folder=other+" + AD_NEW_SW, ad_count(3, "before"), extra=AD_FOLDERS)
+add_db_case("AD_folder_after", "folder=other+" + AD_NEW_SW, ad_count(2), extra=AD_FOLDERS)
+add_db_case("AD_folder_file", "folder=other+" + AD_NEW_SW, "harness: add-db file: .* count=2$", extra=AD_FOLDERS)
+add_db_case("AD_folder_none", "folder=+ok", "harness: message box: ERROR: The signature wasn't added: No folder is set "
+            "for the user database \\(Options > Configuration\\)$")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

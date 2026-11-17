@@ -1645,6 +1645,187 @@ already so. Twelve deliberate breaks each fail their own cases:
 database items; fill bytes before an RST marker in the report's marker list (see Tools >
 Lookup MCU Offset).
 
+### Tools > Add Camera/SW to DB
+
+Tools > Add Camera/SW to DB did nothing: the menu item had no handler. The user
+signature database it adds to didn't work either: nothing read it, and nothing could
+write it. Now, as on Windows:
+- **The menu item** comes after Export TIFF and a separator, with the shortcut Alt+S
+  (Option-S on macOS). It needs a file analyzed.
+- **Its dialog** shows the file's EXIF Make, Model and Software and its compression
+  signature, which can't be changed. It asks for the quality setting and where the
+  file came from: a camera, software (whose name it needs), or "I really don't know".
+  The source the report suggested is chosen at first.
+- **OK adds the entry to the user database,** `JPEGsnoop_db.dat` in the folder that
+  Options > Configuration names, and says "Added Compression signature to database".
+  A software entry keeps no make or model, as on Windows.
+- **Every signature search uses the user database:** the report counts its entries
+  ("1 user(*)") and marks them with "*". It is read at the start, as on Windows.
+
+**Found and fixed** (all as on Windows 1.8.0, unless marked as the Qt port's):
+- **The database was never read or written** (the Qt port). Nothing loaded it, its
+  string writer was commented out, and its path had no separator
+  (`<folder>JPEGsnoop_db.dat`, beside the folder). The app also wrote an empty
+  `<folder>Signatures.dat` beside the folder at every start. This Mac's temp folder had
+  23,079 of them from test runs, which are left there.
+- **The same entry could be added again and again.** Windows has an "already in
+  database" check, but its flag is never set. An entry the built-in database has was
+  also added, then dropped at the next start. Both now get "Compression signature
+  already in database". For software, "the same" means the same name and signature.
+  For anything else, it means the same make, model, subsampling and signature.
+- **An entry for a built-in camera with other subsampling was dropped** at the start,
+  though the signature search doesn't count the built-in entry as a match for it.
+  Subsampling now counts.
+- **The new entry's "valid" flag was never set,** so whether Windows wrote it to the
+  file depended on what was in memory there before (found by reading the code).
+- **Windows read only the low byte of the entry count,** so a database of 260 entries
+  had 4 at the next start. The whole count is now read. A file that lists more than
+  300 entries, the limit, has its first 300 used, and the report says so.
+- **Windows read only the low byte of each UTF-16 character,** so "Łódź" came back as
+  "Aódz".
+- **Changing the database folder kept the old folder's entries.** The next entry added
+  then wrote them all over the new folder's file. The new folder's database is now read.
+- **A file that couldn't be read in full could be lost.** Windows replaced a file
+  without its header at the start with an empty database, keeping a copy. It read an
+  unknown version's file as empty and a damaged one as far as it could, and the next
+  entry added then replaced either without a copy. Now nothing is written at the start.
+  The report's signature search says what is wrong, for example "NOTE: User database
+  [...] isn't a JPEGsnoop user database". The entries before the problem are used, and
+  the next entry added keeps the old file as `JPEGsnoop_db.dat.bak` first. An older
+  version's file is kept the same way, as Windows kept it when it rewrote it.
+- **An entry that couldn't be saved** stayed in the list for that session only. It is
+  now not added, and the message says why.
+- **A newline in a field** (one can be pasted into the Software field) ended the field
+  early when the file was read back. Every field after it was then out of step. It is
+  now saved as a space.
+
+**Changes from Windows:**
+- **Nothing is sent over the network.** Windows also posted the entry to
+  impulseadventure.com over plain HTTP when "Submit signature to Online DB" was on,
+  which it is by default. The post included the make, model, EXIF Software, the JPEG
+  comment, MakerNote fields and the user's notes. The dialog's note said that only the
+  signature was sent. The dialog's Notes field, which only the post used, is gone. Its
+  note now says where the entry goes and that nothing is sent. The title says "Add"
+  rather than "Submit".
+- **No database file is written until an entry is added.** Windows wrote an empty one
+  at the first start, and on a later start said it was missing if it had gone.
+- **Messages:**
+  - With no signature, a message box says what one needs. Windows said "No valid
+    signature could be created, so DB submit is temporarily disabled", and also added
+    that to the report.
+  - A file that couldn't be analyzed gets a message. The menu item stays enabled after
+    one, and the decoder still has the previous file's signature. (Windows enabled the
+    item only while a file was analyzed.)
+  - A save that fails says why.
+- **The quality and software name** are saved without spaces around them, and a name
+  of spaces doesn't count as one.
+- **An editor number other than 1 to 3** in the file is read as unknown and written
+  back as 0. Windows kept the number. Both show such an entry as "??".
+
+**Unchanged from Windows:**
+- **The file's format** (version 03, UTF-16LE), so a database from Windows can be copied
+  over and used. Versions 02 and 01 are read too.
+- **The wording** of the dialog and of the messages above.
+- **The 300-entry limit** and its message.
+- **What the dialog starts with:**
+  - the source the report suggests ("I really don't know" when it suggests neither, the
+    signature search is off, or the file was decoded from an offset);
+  - the quality from the maker notes;
+  - the EXIF Software as the software name. A camera entry doesn't keep it.
+- **A software entry the user adds has no match string,** so it never makes the report
+  say "EXIF Software field recognized as from editor". (The Windows source says "Not
+  quite right perfect" here.)
+
+**Tests:** 88 new `AD` cases (720 in all).
+- **The driver:** `gui --add-db OPENING[+OPENING...]` chooses the menu item and answers
+  its dialog. It types the quality or software name, pastes into the software field,
+  chooses the source, and presses OK, Return, Cancel or Escape. An opening
+  `folder=NAME` changes the database folder in Options > Configuration.
+- **What it prints:**
+  - the dialog's fields and note;
+  - the database file, read by the driver's own parser as Windows wrote it;
+  - the database as the next start reads it (a `CDbSigs` of the driver's own);
+  - the folder's files, and whether a file was written beside the folder;
+  - the report's signature search before and after File > Reprocess.
+- **Setup options:** `--user-db` copies a database into the folder before the window
+  opens (`--user-db-mode` sets its permissions), and `--db-dir` names a folder that
+  isn't there.
+
+The cases cover:
+- **The menu item and its dialog:**
+  - the menu item's place, and that it needs a file;
+  - the fields and the suggested source for a camera, software and an unsure file;
+  - the note;
+  - Cancel, Escape and Return.
+- **Adding:**
+  - a camera, software and an unsure entry, each written as Windows wrote it and read
+    back at the next start;
+  - the camera's entry changing the file's assessment from Class 4 to Class 3;
+  - the signatures in order, and a pasted newline;
+  - a software name that is empty or only spaces, then given.
+- **Already in the database:**
+  - twice, also with another quality or as unsure;
+  - built in for a camera and for software;
+  - the same camera with other subsampling, which is added and kept.
+- **Nothing to add:** no signature (a Photoshop file), and a file that couldn't be
+  analyzed.
+- **Windows' files:**
+  - versions 03, 02 and 01, with a name beyond Latin-1 and an unknown editor;
+  - a built-in duplicate dropped, but not one with other subsampling;
+  - 260 entries, 301, and a full database of 300;
+  - an older version's file kept when replaced.
+- **Files that can't be read in full:** not a database, version 04, damaged in two
+  ways, too large, and unreadable. Each gets the report's note, and is kept or left
+  alone when an entry is added.
+- **Folders:** one that isn't there, a change of folder in Options > Configuration,
+  and no folder.
+
+On the previous commit 76 fail. The other 12 check what was already so, such as the
+menu item's place and that Cancel writes nothing. Twenty-seven deliberate breaks each
+fail their own cases:
+- **Reading as Windows did:** only the count's low byte, 5 cases fail; only each
+  character's low byte, 1 fails.
+- **The database not read at the start:** 31 fail.
+- **No separator in its path:** 48 fail.
+- **The empty `Signatures.dat` written at the start again:** 2 fail.
+- **The new entry's "valid" flag not set,** as on Windows: 21 fail.
+- **Duplicates:**
+  - one built in not refused: 3 fail;
+  - one the user added not refused: 4 fail;
+  - subsampling not compared, as on Windows: 4 fail;
+  - software names not compared: 1 fails.
+- **Reading the file:**
+  - built-in entries not dropped at the start: 1 fails;
+  - no limit of 300 while reading: 2 fail (the app crashes);
+  - an unknown editor kept: 1 fails;
+  - the list not emptied before a folder's database is read: 2 fail.
+- **A folder change not read,** as on Windows: 3 fail.
+- **Old files:** no copy of a file that couldn't be read in full, 6 fail; none of an
+  older version's file, 2 fail.
+- **No note in the report:** 7 fail.
+- **An entry kept after a failed save,** as on Windows: 1 fails.
+- **Saving:** no newline replaced, 1 fails; the signatures not in order, 1 fails.
+- **The dialog:**
+  - no suggested source: 16 fail;
+  - no software name required: 4 fail;
+  - spaces kept: 3 fail;
+  - no subsampling passed on: 12 fail.
+- **No check for a signature:** 2 fail.
+- **No check for an analyzed file:** 1 fails.
+
+**Checks:**
+- **All 720 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **Not checked:**
+  - on the macOS platform: the dialog's layout, and Option-S;
+  - the quality taken from real maker notes;
+  - a database written by Windows itself (the test files follow the Windows source);
+  - the effect on File > Batch Process, which uses the same database.
+
+**Still open:** Tools > Manage Local DB. Options > Configuration's "Submit signature to
+Online DB" does nothing. Developer ID signing and notarization (M5). Latent code. Fill
+bytes before an RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:
@@ -1909,9 +2090,9 @@ directory mode).
 These can't be reached in this build, but will matter when the features are finished.
 
 - **PSD files are never parsed** (`JfifDecode.cpp:9859`: `DecodePsd` call commented out, `bDecPsdOk = false`). Inside that code: heap overflow from `nNumChans*nHeight` wrap (`DecodePs.cpp:2412`, `2426`, ASan-confirmed), a 0xFFFFFFF4 length loop (`2638`, loops at `1687`, `1983`, `2684`), a 16 GB allocation from an inverted layer rect (`1911`, `2146`), leaked channel arrays (`1866`), `char` vs `signed char` RLE (`2243`, breaks on Linux arm64), and an unchecked RLE writer (`2283-2340`). The `#else` branch at `9880` doesn't compile.
-- **User signature DB:** `DbSigs.cpp:756` writes with `strlen` over an uninitialised buffer; `589-600` has no `DBEX_ENTRIES_MAX` check (overflows `m_sSigListExtra[300]`); `185` reads 1 byte instead of 4; `689` uses `"[%s]"`.
+- **User signature DB:** `DbSigs.cpp:756` writes with `strlen` over an uninitialised buffer; `589-600` has no `DBEX_ENTRIES_MAX` check (overflows `m_sSigListExtra[300]`); `185` reads 1 byte instead of 4; `689` uses `"[%s]"`. (Fixed: see "Tools > Add Camera/SW to DB".)
 - **Export JPEG:** `JfifDecode.cpp:10321` skips writing the MJPEG DHT but logs that it did; `10232`, `10429` leak the `QFile` on failure. (Fixed: see "Export JPEG and Export TIFF".)
-- **Signature submit:** `strFormData` is never built (`8846` commented out).
+- **Signature submit:** `strFormData` is never built (`8846` commented out). (Not needed: this version doesn't post signatures. See "Tools > Add Camera/SW to DB".)
 - `General.cpp:107-111` (`Uint2DotByte`): operator precedence makes every field the low byte; `93-98` (`Uint2Chars`): chained `.arg()` substitutes `%` in file bytes.
 - `WindowBuf.cpp:584`, `196`, `347`: printf formats passed to `.arg()`; `716`: `OverlayGet` has no bounds check.
 - `q_decodedetaildlg.cpp:38-46`: empty `accept()`/`reject()`, so the dialog can't be closed once wired up. (Fixed: see "Detailed Decode".)
@@ -1919,9 +2100,9 @@ These can't be reached in this build, but will matter when the features are fini
 ## 8. Found earlier, during the macOS build work
 
 - `WindowBuf.cpp:1113` (`BufReadUniStr2`): builds a `QString` from UTF-16 bytes as a C string, so EXIF `XPTitle`/`XPComment`/`XPAuthor`/`XPKeywords` show one letter, and FlashPix stream positions drift (`JfifDecode.cpp:4853`).
-- `DbSigs.cpp:83`: writes `dbPath() + "Signatures.dat"` without a path separator, dumping the built-in list next to the app-data folder on every launch.
+- `DbSigs.cpp:83`: writes `dbPath() + "Signatures.dat"` without a path separator, dumping the built-in list next to the app-data folder on every launch. (Fixed: see "Tools > Add Camera/SW to DB". The file was empty: the line that wrote the list was commented out.)
 - `Viewer.cpp:29`, `56`: preview opens at 12.5% and `setScaledContents` stretches it, so it looks blocky.
-- About 25 menu actions are created but never connected (batch, export, find, copy, detailed decode, DB, about, updates); no command-line mode; `FileTiff`, `JPEGsnoopCore`, `DecodeDicom` aren't built; user DB load/save disabled.
+- About 25 menu actions are created but never connected (batch, export, find, copy, detailed decode, DB, about, updates); no command-line mode; `FileTiff`, `JPEGsnoopCore`, `DecodeDicom` aren't built; user DB load/save disabled (fixed: see "Tools > Add Camera/SW to DB").
 - Fixed already in `0a70ad1`: inverted APP0 JFIF/AVI1 checks (every JFIF file was reported as MotionJPEG) and the `wchar_t`-size user DB read.
 
 ## Sanitizer run

@@ -188,6 +188,31 @@
 //     each match, with the ordering, table and entry format it was found with,
 //     and the tables searched for ("standard", and "file" for the file shown's).
 //
+// gui ... --add-db OPENING[+OPENING...]
+//     After the first file (or file N with --add-db-at N; 0 is before any
+//     file), print the place of Tools > Add Camera/SW to DB in the menu and
+//     the report's signature search, then for each OPENING choose the menu
+//     item and answer its dialog with the opening's steps, separated by
+//     commas: quality=TEXT and software=TEXT (type into that field,
+//     percent-encoded), paste-software=TEXT (paste it into the software
+//     field), source=cam|sw|unsure, ok, return, cancel, escape and fields. An opening folder=NAME instead chooses Options > Configuration,
+//     sets the user database folder to NAME in the settings folder (empty for
+//     none) and saves. Print the dialog's fields and note when it shows, and
+//     after each step. Then print the user database file, read here as
+//     Windows wrote it (each entry's fields), the folder's files, whether a
+//     file was written beside the folder, and the signature search again
+//     after File > Reprocess.
+//
+// gui ... --user-db [FOLDER:]NAME (any number) [--user-db-mode OCTAL]
+//     Before the window opens, copy NAME (in the folder of the files given)
+//     into the user database folder as JPEGsnoop_db.dat, or into FOLDER in
+//     the settings folder (made); --user-db-mode sets the permissions of the
+//     one copied into the user database folder.
+//
+// gui ... --db-dir NAME
+//     Use NAME in the settings folder (not made) as the user database folder,
+//     instead of the settings folder itself.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -280,6 +305,8 @@ static void usage()
           "                         [--offset STEPS [--offset-at N]] [--search STEPS [--search-at N]]\n"
           "                         [--lookup STEPS [--lookup-at N] [--hover X,Y[/X,Y...]]]\n"
           "                         [--dqt CHOICE[+CHOICE...] [--dqt-at N]]\n"
+          "                         [--add-db OPENING[+OPENING...] [--add-db-at N]]\n"
+          "                         [--user-db [FOLDER:]NAME]... [--user-db-mode OCTAL] [--db-dir NAME]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -992,6 +1019,11 @@ struct GuiOptions
   QString strHover;               // --hover X,Y[/X,Y...]
   QString strDqt;                 // --dqt CHOICE[+CHOICE...]
   int nDqtAt = 1;                 // --dqt-at N
+  QString strAddDb;               // --add-db OPENING[+OPENING...]
+  int nAddDbAt = 1;               // --add-db-at N
+  QStringList astrUserDb;         // --user-db [FOLDER:]NAME (any number)
+  QString strUserDbMode;          // --user-db-mode OCTAL
+  QString strDbDir;               // --db-dir NAME
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -2036,6 +2068,331 @@ static void dqtMenu(MainWindow &window, const GuiOptions &opts, QTextStream &out
   timer.stop();
 }
 
+// The user database file in strDbDir, read here as Windows wrote it (see
+// DbSigs.cpp), without CDbSigs: its header and each entry's fields. Also
+// whether a file was written beside the folder (the Qt port's missing
+// separator), and the folder's files.
+static void dumpUserDb(const QString &strDbDir, QTextStream &out)
+{
+  out << "harness: add-db beside folder: " << (QFileInfo::exists(strDbDir + "JPEGsnoop_db.dat") ? 1 : 0) << " "
+      << (QFileInfo::exists(strDbDir + "Signatures.dat") ? 1 : 0) << "\n";
+  QStringList astrNames = QDir(strDbDir).entryList(QDir::Files | QDir::Hidden, QDir::Name);
+  out << "harness: add-db files: " << (astrNames.isEmpty() ? QStringLiteral("none") : astrNames.join(',')) << "\n";
+
+  QFile file(QDir(strDbDir).filePath("JPEGsnoop_db.dat"));
+  if(!file.open(QIODevice::ReadOnly))
+  {
+    out << "harness: add-db file: none\n";
+    return;
+  }
+  const QByteArray ab = file.readAll();
+  const bool bUni = (ab.size() >= 2) && (ab.at(1) == '\0');
+  qsizetype nPos = 0;
+  auto str = [&](QString &strOut) {
+    strOut.clear();
+    const qsizetype nSz = bUni ? 2 : 1;
+    while(nPos + nSz <= ab.size())
+    {
+      const uint16_t nCh = bUni ? static_cast<uint16_t>(static_cast<uint8_t>(ab.at(nPos)) |
+                                                        (static_cast<uint8_t>(ab.at(nPos + 1)) << 8))
+                                : static_cast<uint8_t>(ab.at(nPos));
+      nPos += nSz;
+      if(nCh == 0)
+        return true;
+      strOut += QChar(nCh);
+    }
+    return false;
+  };
+  QString strHeader;
+  QString strVer;
+  QString strSec;
+  uint32_t nCount = 0;
+  bool bOk = str(strHeader) && str(strVer) && str(strSec) && (strSec == "*DB*") && (nPos + 4 <= ab.size());
+  if(bOk)
+  {
+    nCount = qFromLittleEndian<quint32>(ab.constData() + nPos);
+    nPos += 4;
+  }
+  out << QString("harness: add-db file: header=%1 version=%2 utf16=%3 count=%4\n")
+           .arg(strHeader, strVer)
+           .arg(bUni ? 1 : 0)
+           .arg(bOk ? QString::number(nCount) : QStringLiteral("-"));
+  for(uint32_t nInd = 0; bOk && (nInd < nCount); nInd++)
+  {
+    QString astrField[9];
+    for(QString &strField : astrField)
+      bOk = bOk && str(strField);
+    if(!bOk)
+      break;
+    out << QString("harness: add-db entry %1: editor=%2 make=\"%3\" model=\"%4\" quality=\"%5\" sig=%6 sigrot=%7 "
+                   "css=%8 swtrim=\"%9\"")
+             .arg(nInd + 1)
+             .arg(astrField[2], astrField[0], astrField[1], astrField[3], astrField[4], astrField[5], astrField[6],
+                  astrField[7])
+        << QString(" software=\"%1\"\n").arg(astrField[8]);
+  }
+  QString strEnd;
+  const bool bEnd = bOk && str(strEnd);
+  out << QString("harness: add-db file end=%1 rest=%2\n")
+           .arg(bEnd ? strEnd : QStringLiteral("-"))
+           .arg(ab.size() - nPos);
+}
+
+// The user database in strDbDir as the next start reads it (a CDbSigs of its
+// own), and a copy of an earlier file, if one was kept
+static void nextStartUserDb(const QString &strDbDir, QTextStream &out)
+{
+  const QString strBak = QDir(strDbDir).filePath("JPEGsnoop_db.dat.bak");
+  if(QFileInfo::exists(strBak))
+    out << "harness: add-db bak md5=" << fileMd5(strBak) << "\n";
+
+  CSnoopConfig cfg;
+  CDbSigs db(nullptr, &cfg);
+  db.SetDbDir(strDbDir);
+  db.DatabaseExtraLoad();
+  out << QString("harness: add-db next start: user=%1 note=\"%2\"\n")
+           .arg(db.DatabaseExtraGetNum())
+           .arg(db.DatabaseExtraLoadError());
+  for(uint32_t nInd = 0; nInd < db.DatabaseExtraGetNum(); nInd++)
+  {
+    const CompSig sEntry = db.DatabaseExtraGet(nInd);
+    out << QString("harness: add-db next start entry %1: editor=%2 make=\"%3\" model=\"%4\" quality=\"%5\" sig=%6 "
+                   "sigrot=%7 css=%8 software=\"%9\"\n")
+             .arg(nInd + 1)
+             .arg(static_cast<int>(sEntry.eEditor))
+             .arg(sEntry.strXMake, sEntry.strXModel, sEntry.strUmQual, sEntry.strCSig, sEntry.strCSigRot,
+                  sEntry.strXSubsamp, sEntry.strMSwDisp);
+  }
+}
+
+// The report's signature search: its count line, the user entries matched
+// ("*" lines) and a note about the user database
+static void addDbReport(MainWindow &window, const QString &strWhen, QTextStream &out)
+{
+  const QStringList astrLines = window.textEdit->toPlainText().split('\n');
+  bool bAny = false;
+  for(const QString &strLine : astrLines)
+  {
+    if(strLine.startsWith("  Searching Compression Signatures:") || strLine.startsWith("    *") ||
+       strLine.startsWith("  NOTE: User database") || strLine.startsWith("  ASSESSMENT:"))
+    {
+      out << "harness: add-db report " << strWhen << ": " << strLine.trimmed() << "\n";
+      bAny = true;
+    }
+  }
+  if(!bAny)
+    out << "harness: add-db report " << strWhen << ": no signature search\n";
+}
+
+// Tools > Add Camera/SW to DB as a user chooses it (see --add-db above). A
+// message box it shows is printed and closed as it opens.
+static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDbDir, const QString &strSettingsDir,
+                      QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("Add Camera/SW to DB..."));
+  QAction *pConfig = findAction(window, QStringLiteral("Configuration..."));
+  if(!pAction || !pConfig)
+  {
+    out << "harness: menu Add Camera/SW to DB unavailable\n";
+    return;
+  }
+  out << "harness: add-db " << menuPlace(pAction) << "\n";
+  addDbReport(window, "before", out);
+
+  QStringList astrSteps;
+  QString strFolder;            // for a folder= opening: the folder to choose
+  bool bFolder = false;
+  bool bBusy = false;
+  bool bShown = false;
+
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QDialog *pDlg = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if(bBusy || !pDlg)
+      return;
+
+    // Options > Configuration: choose the folder, Save
+    if(bFolder && pDlg->inherits("SnoopConfigDialog"))
+    {
+      bBusy = true;
+      bShown = true;
+      QLineEdit *pPath = pDlg->findChild<QLineEdit *>("leDbPath");
+      QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+      if(!pPath || !pButtons || !pButtons->button(QDialogButtonBox::Save))
+      {
+        out << "harness: add-db configuration widgets not found\n";
+        pDlg->reject();
+      }
+      else
+      {
+        pPath->setText(strFolder);
+        pButtons->button(QDialogButtonBox::Save)->click();
+      }
+      bBusy = false;
+      return;
+    }
+
+    if(bFolder || (pDlg->objectName() != QLatin1String("addDbDialog")))
+      return;
+    bBusy = true;
+    bShown = true;
+
+    QLineEdit *pMake = pDlg->findChild<QLineEdit *>("exifMake");
+    QLineEdit *pModel = pDlg->findChild<QLineEdit *>("exifModel");
+    QLineEdit *pExifSw = pDlg->findChild<QLineEdit *>("exifSoftware");
+    QLineEdit *pSig = pDlg->findChild<QLineEdit *>("signature");
+    QLineEdit *pQual = pDlg->findChild<QLineEdit *>("quality");
+    QLineEdit *pSoftware = pDlg->findChild<QLineEdit *>("userSoftware");
+    QRadioButton *pCam = pDlg->findChild<QRadioButton *>("sourceCam");
+    QRadioButton *pSw = pDlg->findChild<QRadioButton *>("sourceSw");
+    QRadioButton *pUnsure = pDlg->findChild<QRadioButton *>("sourceUnsure");
+    QLabel *pNote = pDlg->findChild<QLabel *>("dbNote");
+    QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+    if(!pMake || !pModel || !pExifSw || !pSig || !pQual || !pSoftware || !pCam || !pSw || !pUnsure || !pNote ||
+       !pButtons || !pButtons->button(QDialogButtonBox::Ok) || !pButtons->button(QDialogButtonBox::Cancel))
+    {
+      out << "harness: add-db dialog widgets not found\n";
+      pDlg->reject();
+      bBusy = false;
+      return;
+    }
+
+    auto fields = [&]() {
+      const QString strSource = pCam->isChecked()      ? QStringLiteral("cam")
+                                : pSw->isChecked()     ? QStringLiteral("sw")
+                                : pUnsure->isChecked() ? QStringLiteral("unsure")
+                                                       : QStringLiteral("none");
+      return QString("make=\"%1\" model=\"%2\" exif-software=\"%3\" sig=%4 quality=\"%5\" source=%6 software=\"%7\" "
+                     "read-only=%8")
+               .arg(pMake->text(), pModel->text(), pExifSw->text(), pSig->text(), pQual->text(), strSource,
+                    pSoftware->text())
+               .arg((pMake->isReadOnly() && pModel->isReadOnly() && pExifSw->isReadOnly() && pSig->isReadOnly() &&
+                     !pQual->isReadOnly() && !pSoftware->isReadOnly())
+                      ? 1
+                      : 0);
+    };
+    out << "harness: add-db dialog: " << pDlg->windowTitle() << " (" << fields() << ")\n";
+    out << "harness: add-db note: " << QString(pNote->text()).replace('\n', QStringLiteral(" / ")) << "\n";
+
+    while(!astrSteps.isEmpty())
+    {
+      const QString strStep = astrSteps.takeFirst();
+      if(strStep.startsWith("quality=") || strStep.startsWith("software="))
+      {
+        const qsizetype nEq = strStep.indexOf('=');
+        QLineEdit *pField = strStep.startsWith("quality=") ? pQual : pSoftware;
+        pField->setFocus();
+        pField->selectAll();
+        const QString strText = QUrl::fromPercentEncoding(strStep.mid(nEq + 1).toUtf8());
+        if(strText.isEmpty())
+          QTest::keyClick(pField, Qt::Key_Backspace);
+        else
+          QTest::keyClicks(pField, strText);
+        out << "harness: add-db typed " << strStep << " (" << fields() << ")\n";
+      }
+      else if(strStep.startsWith("paste-software="))
+      {
+        // As Edit > Paste would (a newline can come in this way)
+        QApplication::clipboard()->setText(QUrl::fromPercentEncoding(strStep.mid(15).toUtf8()));
+        pSoftware->setFocus();
+        pSoftware->selectAll();
+        QTest::keySequence(pSoftware, QKeySequence::Paste);
+        out << "harness: add-db pasted " << strStep << " (" << fields().replace('\n', QStringLiteral("\\n")) << ")\n";
+      }
+      else if(strStep.startsWith("source="))
+      {
+        const QString strSource = strStep.mid(7);
+        QRadioButton *pRadio = (strSource == "cam") ? pCam : ((strSource == "sw") ? pSw : pUnsure);
+        pRadio->click();
+        out << "harness: add-db chose " << strStep << " (" << fields() << ")\n";
+      }
+      else if((strStep == "ok") || (strStep == "return"))
+      {
+        // A refused entry shows a message box, printed and closed; the steps
+        // left carry on after it
+        if(strStep == "ok")
+          pButtons->button(QDialogButtonBox::Ok)->click();
+        else
+        {
+          QWidget *pTarget = QApplication::focusWidget();
+          QTest::keyClick((pTarget && (pTarget->window() == pDlg)) ? pTarget : pQual, Qt::Key_Return);
+        }
+        QCoreApplication::processEvents();
+        if(!pDlg->isVisible())
+        {
+          out << "harness: add-db " << strStep << " closed the dialog\n";
+          out.flush();
+          astrSteps.clear();
+          bBusy = false;
+          return;
+        }
+        out << "harness: add-db " << strStep << " left the dialog open (" << fields() << ")\n";
+      }
+      else if((strStep == "cancel") || (strStep == "escape"))
+      {
+        if(strStep == "escape")
+        {
+          QWidget *pTarget = QApplication::focusWidget();
+          QTest::keyClick((pTarget && (pTarget->window() == pDlg)) ? pTarget : pQual, Qt::Key_Escape);
+        }
+        else
+          pButtons->button(QDialogButtonBox::Cancel)->click();
+        out << "harness: add-db " << strStep << (pDlg->isVisible() ? " didn't close the dialog\n" : " closed the dialog\n");
+        if(pDlg->isVisible())
+          pDlg->reject();
+        out.flush();
+        bBusy = false;
+        return;
+      }
+      else if(strStep == "fields")
+        out << "harness: add-db fields (" << fields() << ")\n";
+      else
+        out << "harness: unknown add-db step " << strStep << "\n";
+    }
+
+    out << "harness: add-db dialog still open: cancelled\n";
+    pDlg->reject();
+    bBusy = false;
+  });
+  timer.start(50);
+
+  for(const QString &strOpening : opts.strAddDb.split('+'))
+  {
+    bShown = false;
+    if(strOpening.startsWith("folder="))
+    {
+      // Options > Configuration: the user database folder (a name in the
+      // settings folder; empty for none)
+      bFolder = true;
+      const QString strName = QUrl::fromPercentEncoding(strOpening.mid(7).toUtf8());
+      strFolder = strName.isEmpty() ? QString() : (strSettingsDir + "/" + strName);
+      pConfig->trigger();
+      QCoreApplication::processEvents();
+      out << "harness: add-db folder " << (strName.isEmpty() ? QStringLiteral("(none)") : strName)
+          << (bShown ? "\n" : ": dialog not shown\n");
+      strDbDir = strFolder;
+      bFolder = false;
+      continue;
+    }
+    astrSteps = strOpening.split(',', Qt::SkipEmptyParts);
+    pAction->trigger();
+    QCoreApplication::processEvents();
+    if(!bShown)
+      out << "harness: add-db dialog not shown\n";
+  }
+  timer.stop();
+
+  if(!strDbDir.isEmpty())
+  {
+    dumpUserDb(strDbDir, out);
+    nextStartUserDb(strDbDir, out);
+  }
+  window.reprocess();
+  QCoreApplication::processEvents();
+  addDbReport(window, "after", out);
+  out.flush();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -2483,6 +2840,26 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 {
   useGuiSettings(strSettingsDir, opts);
 
+  // The user database folder: the settings folder, or a folder in it
+  // (--db-dir, not made), with any databases given copied in (--user-db)
+  QString strDbDir = strSettingsDir;
+  if(!opts.strDbDir.isEmpty())
+  {
+    strDbDir = strSettingsDir + "/" + opts.strDbDir;
+    QSettings().setValue("General\\UserDbPath", strDbDir);
+  }
+  for(const QString &strUserDb : opts.astrUserDb)
+  {
+    const qsizetype nColon = strUserDb.indexOf(':');
+    const QString strFolder = (nColon < 0) ? strDbDir : (strSettingsDir + "/" + strUserDb.left(nColon));
+    QDir().mkpath(strFolder);
+    const QString strTarget = QDir(strFolder).filePath("JPEGsnoop_db.dat");
+    if(!QFile::copy(QDir(opts.strFilesDir).filePath(strUserDb.mid(nColon + 1)), strTarget))
+      fprintf(stderr, "cannot copy the user database %s\n", qPrintable(strUserDb));
+    else if((nColon < 0) && !opts.strUserDbMode.isEmpty())
+      chmod(QFile::encodeName(strTarget).constData(), static_cast<mode_t>(opts.strUserDbMode.toUInt(nullptr, 8)));
+  }
+
   if(opts.bDark)
     QApplication::setPalette(darkPalette());
 
@@ -2527,6 +2904,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
   {
     out << "harness: dqt before any file\n";
     dqtMenu(window, opts, out);
+  }
+
+  // Tools > Add Camera/SW to DB before any file has been opened
+  if(!opts.strAddDb.isEmpty() && (opts.nAddDbAt == 0))
+  {
+    out << "harness: add-db before any file\n";
+    addDbMenu(window, opts, strDbDir, strSettingsDir, out);
   }
 
   // File > Reprocess (or auto-reprocess after an option change) before any
@@ -2593,6 +2977,9 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 
       if((nRound == 0) && !opts.strDqt.isEmpty() && (nFileInd == opts.nDqtAt))
         dqtMenu(window, opts, out);
+
+      if((nRound == 0) && !opts.strAddDb.isEmpty() && (nFileInd == opts.nAddDbAt))
+        addDbMenu(window, opts, strDbDir, strSettingsDir, out);
 
       if(nRound == 0)
       {
@@ -3487,11 +3874,12 @@ int main(int argc, char **argv)
   batchOpts.bCompare = args.removeAll("--batch-compare") > 0;
   batchOpts.bReopenMissing = args.removeAll("--batch-open-missing") > 0;
   // Options that can be given more than once
-  for(const char *pszOpt : { "--batch-cat", "--batch-unreadable", "--batch-mode", "--batch-link" })
+  for(const char *pszOpt : { "--batch-cat", "--batch-unreadable", "--batch-mode", "--batch-link", "--user-db" })
   {
     QStringList &astrValues = (QLatin1String(pszOpt) == QLatin1String("--batch-cat"))          ? batchOpts.astrCat
                               : (QLatin1String(pszOpt) == QLatin1String("--batch-unreadable")) ? batchOpts.astrUnreadable
                               : (QLatin1String(pszOpt) == QLatin1String("--batch-mode"))       ? batchOpts.astrModes
+                              : (QLatin1String(pszOpt) == QLatin1String("--user-db"))          ? guiOpts.astrUserDb
                                                                                                : batchOpts.astrLinks;
     for(qsizetype nInd = args.indexOf(QLatin1String(pszOpt)); nInd >= 0; nInd = args.indexOf(QLatin1String(pszOpt)))
     {
@@ -3511,7 +3899,7 @@ int main(int argc, char **argv)
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
-                             "--batch" })
+                             "--batch", "--add-db", "--user-db-mode", "--db-dir" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3551,6 +3939,12 @@ int main(int argc, char **argv)
       guiOpts.strDqt = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--batch"))
       batchOpts.strSteps = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--add-db"))
+      guiOpts.strAddDb = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--user-db-mode"))
+      guiOpts.strUserDbMode = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--db-dir"))
+      guiOpts.strDbDir = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -3558,7 +3952,7 @@ int main(int argc, char **argv)
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
-                             "--batch-close-after" })
+                             "--batch-close-after", "--add-db-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3589,6 +3983,8 @@ int main(int argc, char **argv)
       guiOpts.nLookupAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--dqt-at"))
       guiOpts.nDqtAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--add-db-at"))
+      guiOpts.nAddDbAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

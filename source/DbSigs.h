@@ -59,8 +59,8 @@ struct CompSigConst
 // Signature structure for runtime table (can use QStrings)
 struct CompSig
 {
-  bool bValid;                  // Set to FALSE for removal
-  teEditor eEditor;
+  bool bValid = false;          // Set to FALSE for removal
+  teEditor eEditor = ENUM_EDITOR_UNSET;
   QString strXMake;             // Blank for editors
   QString strXModel;            // Blank for editors
   QString strUmQual;
@@ -87,9 +87,31 @@ public:
   uint32_t DatabaseExtraGetNum();
   CompSig DatabaseExtraGet(uint32_t nInd);
 
-  void DatabaseExtraAdd(QString strExifMake, QString strExifModel,
-                        QString strQual, QString strSig, QString strSigRot, QString strCss,
-                        teSource eUserSource, QString strUserSoftware);
+  // The user database: JPEGsnoop_db.dat in the folder SetDbDir() gave (empty
+  // if none was)
+  QString DatabaseExtraPath() const;
+
+  // Read the user database again (at startup, and when its folder changes).
+  // A missing file is an empty database.
+  void DatabaseExtraLoad();
+
+  // Why the user database file couldn't be read in full, or empty if it
+  // could (or there is none). Its entries before the problem are used.
+  QString DatabaseExtraLoadError() const { return m_strLoadError; }
+
+  enum class AddResult
+  {
+    Added,                      // strDetail: a note about the old file, if any
+    AlreadyIn,                  // built in, or the same user entry
+    Full,                       // DBEX_ENTRIES_MAX user entries already
+    SaveFailed                  // strDetail: why; the entry isn't kept
+  };
+
+  // Add an entry to the user database and save it (Tools > Add Camera/SW to
+  // DB). For software, the make and model aren't kept.
+  AddResult DatabaseExtraAdd(QString strExifMake, QString strExifModel,
+                             QString strQual, QString strSig, QString strSigRot, QString strCss,
+                             teSource eUserSource, QString strUserSoftware, QString &strDetail);
 
   bool SearchCom(QString strCom);
 
@@ -108,15 +130,10 @@ private:
   void SetEntryValid(uint32_t nInd, bool bValid);
 
   void DatabaseExtraClean();
-  void DatabaseExtraLoad();
-  void DatabaseExtraStore();
+  bool DatabaseExtraStore(QString &strError);
 
-  bool BufReadNum(quint8 * pBuf, uint32_t &nOut, uint32_t nMaxBytes, uint32_t &nOffsetBytes);
-  bool BufReadStr(quint8 * pBuf, QString & strOut, uint32_t nMaxBytes, bool bUni, uint32_t &nOffsetBytes);
-  bool BufWriteNum(quint8 * pBuf, uint32_t nIn, uint32_t nMaxBytes, uint32_t &nOffsetBytes);
-  bool BufWriteStr(quint8 * pBuf, QString strIn, uint32_t nMaxBytes, bool bUni, uint32_t &nOffsetBytes);
-
-  bool SearchSignatureExactInternal(QString strMake, QString strModel, QString strSig);
+  bool IsBuiltInEntry(const CompSig &sEntry) const;
+  bool IsUserEntry(const CompSig &sEntry) const;
 
   CSnoopConfig *m_pAppConfig;
 
@@ -125,7 +142,6 @@ private:
 
   int32_t m_nSigListNum;
   static const CompSigConst m_sSigList[];       // Built-in entries
-  QList<CompSigConst>m_qSigList;
 
   int32_t m_nExcMmNoMkrListNum;
   static const CompExcMm m_sExcMmNoMkrList[];
@@ -141,4 +157,7 @@ private:
   QStringList m_sSwIjgList;
 
   bool m_bFirstRun;             // First time running app?
+
+  QString m_strLoadError;       // See DatabaseExtraLoadError()
+  bool m_bKeepOldFile = false;  // Copy the file to .bak before replacing it
 };
