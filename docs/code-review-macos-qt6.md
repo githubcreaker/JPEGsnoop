@@ -1315,6 +1315,98 @@ items not yet ported, such as Tools > Image Search Fwd and Rev (which also set t
 offset), Lookup MCU Offset, Search Executable for DQT, and the signature database
 items.
 
+### Tools > Image Search Fwd and Rev
+
+Tools > Image Search Fwd and Rev did nothing: the menu items had no handlers. On Windows
+they step through the JPEGs in a file, such as a video's frames or the previews in a
+camera's raw file. Now, as there:
+- **The menu items** are the first two in the Tools menu. Their shortcuts are Ctrl+2
+  (Fwd) and Ctrl+1 (Rev), which are Cmd+2 and Cmd+1 on macOS. Their status tips are
+  "Search for next Image" and "Search for previous Image".
+- **Fwd** finds the next SOI marker (FF D8 FF) after the start offset and decodes the
+  file from there, as File > Offset does. If there is none, it says so and the offset
+  stays.
+- **Rev** finds the one before the start offset. If there is none, it says so and
+  decodes the file from its start, where the file was decoded from when opened.
+- **The search sees the File Overlay,** as the decoder does: an overlay can hide an
+  SOI or make one.
+- **The offset found applies as File > Offset's does:** Reprocess and Export JPEG keep
+  it, and opening a file starts from 0 again.
+- **The menu items are on once a file has been opened.** After a file that couldn't be
+  opened, or was empty, they say why.
+- **A file moved, removed or emptied since it was opened:** the report says so, as
+  after Reprocess, and the preview of what was there goes.
+
+**Found and fixed** (both as on Windows 1.8.0):
+- **The search was slow:** master compared each position through `Buf()` three times,
+  about 60 MB/s here. Searching 300 MB took about 5 s, and the window doesn't respond
+  while it runs, with no way to stop it. To the end of a 2 GB video, that is about half
+  a minute. `CwindowBuf::BufSearch` now reads the file in 64 KiB blocks with the
+  overlay applied, as `Buf()` reads it, and compares the bytes in memory. The same
+  search takes about 0.6 s (measured with hyperfine against opening the file alone).
+  Extract All (in Export JPEG and Batch Process) uses the same search. A scratch
+  program compared it with master's loop:
+  - 2.4 million searches on random files, with overlays and with searches across the
+    block edges;
+  - the same position every time, found or not.
+- **Rev at the start of the file did nothing,** with no message. It now says there is
+  nothing before it to search.
+
+**Changes from Windows:** the messages name the offset searched from ("No JPEG found
+after offset 0x0000062C (no SOI marker, FF D8 FF)."), and Rev's says that the file is
+decoded from its start. Master showed that message before decoding again, so the report
+behind it still showed the old offset; it now comes after.
+
+**Unchanged from Windows:** Rev with no JPEG before the offset goes back to the start
+of the file, even when there is no JPEG there.
+
+**The shortcuts with the image window in front:** the image window is a window of its
+own, and it comes to the front when it first shows an image. On macOS the main window's
+menu bar stays in place while it is in front, and the menu bar takes Cmd+2 and Cmd+1
+before any window does (from Qt's Cocoa code), so holding Cmd+2 steps through a video's
+frames. Offscreen, the main window's shortcuts work only with that window in front, so
+the test driver brings it there first, as a click on it would.
+
+**Tests:** 31 new `IS` cases (524 in all). `gui --search STEPS` prints the menu items'
+places and shortcuts. Its steps choose Fwd and Rev, press Ctrl+2 and Ctrl+1, or move
+the file away for the next step. It prints `--offset`'s summary of the report and
+preview after each step and after File > Reprocess. The cases cover:
+- **The menu items:** their place, tips and shortcuts; off with no file or after a
+  failed first open; and the message after a missing or empty file.
+- **Fwd:** each JPEG in a file in turn, then none (the message, and the offset stays);
+  from an offset File > Offset set; and with the scan at the start decoded first.
+- **Rev:** the JPEG before; none (back to the start, and the message); at the start;
+  a JPEG at offset 0; and from an offset.
+- **The shortcuts.**
+- **Where the offset applies:** Reprocess, Export JPEG and the next file.
+- **The File Overlay:** hiding an SOI, and making one, found both ways.
+- **A file moved away** since it was opened.
+- **A file over 128 KiB,** with a JPEG whose SOI runs across a block edge.
+
+On the previous commit 28 fail. The other three check what held because nothing moved:
+the menu items are off with no file or after a failed first open, and the next file
+starts from 0. Nine deliberate breaks each fail their own cases:
+- **The menu items always on:** the two cases with no file fail.
+- **No shortcut for Fwd:** 3 cases fail.
+- **Not checking that the file was analyzed:** the missing and empty file cases fail.
+- **Master's Rev at the start** (nothing): 1 case fails.
+- **Keeping the preview when the file has gone:** 1 case fails.
+- **Rev staying put when it finds nothing:** 1 case fails.
+- **Fwd from the start offset itself, not after it:** 12 cases fail.
+- **Blocks without the bytes after their last position:** the block-edge case fails.
+- **A search that doesn't see the overlay:** the 3 overlay cases fail.
+
+**Checks:**
+- **All 524 pass** with and without ASan/UBSan.
+- **Not checked:**
+  - on the macOS platform: the shortcuts with the image window in front, the wait cursor
+    and the status bar's "Searching forward..." during a long search;
+  - a real video's frames.
+
+**Still open:** Developer ID signing and notarization (M5); latent code; the other menu
+items not yet ported, such as Lookup MCU Offset, Search Executable for DQT, and the
+signature database items.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

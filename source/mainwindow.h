@@ -91,6 +91,8 @@ private slots:
   void onFileOverlay();
   void onBatchProcess();
   void onFileOffset();
+  void onImageSearchFwd();
+  void onImageSearchRev();
   void onAbout();
 
 private:
@@ -106,6 +108,7 @@ private:
   void moveFindDialogOffSelection();
   bool currentOverlay(QByteArray &abData, uint32_t &nStart);
   void setCurrentOverlay(const QByteArray &abData, uint32_t nStart);
+  void imageSearch(bool bForward);
   void clearImageViews();
   void AnalyzeFile();
   bool AnalyzeOpen();

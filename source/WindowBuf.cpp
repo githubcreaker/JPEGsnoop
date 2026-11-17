@@ -162,96 +162,129 @@ void CwindowBuf::BufFileUnset()
 // RETURN:
 // - Success in finding the value
 //
+// The bytes are read a block at a time, as Buf() reads them: the file's, 0
+// past its end, with any enabled overlay in place. Master called Buf() three
+// times for each position, about 60 MB/s, so a search to the end of a large
+// video kept the window from responding for half a minute. The positions
+// compared, and so what is found, are those of master's loop.
 bool CwindowBuf::BufSearch(uint32_t nStartPos, uint32_t nSearchVal, uint32_t nSearchLen,
                            bool bDirFwd, uint32_t &nFoundPos)
 {
-  // Save the current position
-  uint32_t nCurPos;
+  nFoundPos = nStartPos;
 
-  uint32_t nCurVal;
-
-  QString strStatus;
-
-  time_t tmLast = clock();
-
-  nCurPos = nStartPos;
-  bool bDone = false;
-
-  bool bFound = false;
-
-  while(!bDone)
+  if((nSearchLen < 1) || (nSearchLen > 4))
   {
-    // Update progress in status bar
-    // - Note that we only check timer when step counter has
-    //   reached a certain threshold. This limits the overhead
-    //   associated with the timer comparison
-    if(((nCurPos % (16 * 1024)) == 0) && (m_pStatBar))
+    msgBox.setText("ERROR: Unexpected nSearchLen");
+    msgBox.exec();
+    return false;
+  }
+
+  uint8_t anSearch[4];
+
+  for(uint32_t nInd = 0; nInd < nSearchLen; nInd++)
+  {
+    anSearch[nInd] = static_cast<uint8_t>(nSearchVal >> (8 * (nSearchLen - 1 - nInd)));
+  }
+
+  // The first and last positions compared, in search order: forward, from
+  // the one after nStartPos to the first whose value reaches the end of the
+  // file; reverse, from the one before nStartPos (or 0 from 0) to 0
+  const int64_t nEof = static_cast<int64_t>(m_nPosEof);
+  int64_t nFirst;
+  int64_t nLast;
+
+  if(bDirFwd)
+  {
+    nFirst = static_cast<int64_t>(nStartPos) + 1;
+    nLast = qMax(nFirst, nEof + 1 - static_cast<int64_t>(nSearchLen));
+  }
+  else
+  {
+    nFirst = (nStartPos > 0) ? static_cast<int64_t>(nStartPos) - 1 : 0;
+    nLast = 0;
+  }
+
+  // Each block holds kBlock positions and the bytes their values run on to
+  constexpr int64_t kBlock = 65536;
+  QByteArray abBlock(static_cast<qsizetype>(kBlock + nSearchLen - 1), '\0');
+  uint8_t *pBlock = reinterpret_cast<uint8_t *>(abBlock.data());
+  const int64_t nPositions = (bDirFwd ? (nLast - nFirst) : (nFirst - nLast)) + 1;
+  clock_t tmLast = clock();
+
+  for(int64_t nDone = 0; nDone < nPositions; nDone += kBlock)
+  {
+    const int64_t nCount = qMin(kBlock, nPositions - nDone);
+    const int64_t nBlockStart = bDirFwd ? (nFirst + nDone) : (nFirst - nDone - nCount + 1);
+
+    BufReadBlock(nBlockStart, pBlock, static_cast<uint32_t>(nCount + nSearchLen - 1));
+
+    for(int64_t nStep = 0; nStep < nCount; nStep++)
     {
-      time_t tmNow = clock();
+      const int64_t nInd = bDirFwd ? nStep : (nCount - 1 - nStep);
+
+      if((pBlock[nInd] == anSearch[0]) && (memcmp(pBlock + nInd + 1, anSearch + 1, nSearchLen - 1) == 0))
+      {
+        nFoundPos = static_cast<uint32_t>(nBlockStart + nInd);
+        return true;
+      }
+    }
+
+    // Update progress in status bar (at most 8 times a second)
+    if(m_pStatBar)
+    {
+      const clock_t tmNow = clock();
 
       if((tmNow - tmLast) > (CLOCKS_PER_SEC / 8))
       {
         tmLast = tmNow;
-        float fProgress = (nCurPos * 100.0f) / m_nPosEof;
+        const int64_t nCurPos = bDirFwd ? (nBlockStart + nCount) : nBlockStart;
+        const double dProgress =
+          (m_nPosEof > 0) ? ((static_cast<double>(nCurPos) * 100.0) / static_cast<double>(m_nPosEof)) : 100.0;
 
-        strStatus = QString("Searching %1% (%2 of %3)...").arg(fProgress, 3, 'f', 0).arg(nCurPos).arg(m_nPosEof);
-        m_pStatBar->showMessage(strStatus);
+        m_pStatBar->showMessage(
+          QString("Searching %1% (%2 of %3)...").arg(dProgress, 3, 'f', 0).arg(nCurPos).arg(m_nPosEof));
       }
-    }
-
-    if(bDirFwd)
-    {
-      nCurPos++;
-
-      if(nCurPos + (nSearchLen - 1) >= m_nPosEof)
-      {
-        bDone = true;
-      }
-    }
-    else
-    {
-      if(nCurPos > 0)
-      {
-        nCurPos--;
-      }
-      else
-      {
-        bDone = true;
-      }
-    }
-
-    if(nSearchLen == 4)
-    {
-      nCurVal = (static_cast<uint32_t>(Buf(nCurPos + 0)) << 24) + (static_cast<uint32_t>(Buf(nCurPos + 1)) << 16) + (static_cast<uint32_t>(Buf(nCurPos + 2)) << 8) + Buf(nCurPos + 3);
-    }
-    else if(nSearchLen == 3)
-    {
-      nCurVal = (static_cast<uint32_t>(Buf(nCurPos + 0)) << 16) + (static_cast<uint32_t>(Buf(nCurPos + 1)) << 8) + Buf(nCurPos + 2);
-    }
-    else if(nSearchLen == 2)
-    {
-      nCurVal = (static_cast<uint32_t>(Buf(nCurPos + 0)) << 8) + Buf(nCurPos + 1);
-    }
-    else if(nSearchLen == 1)
-    {
-      nCurVal = Buf(nCurPos + 0);
-    }
-    else
-    {
-      msgBox.setText("ERROR: Unexpected nSearchLen");
-      msgBox.exec();
-      nCurVal = 0x0000;
-    }
-
-    if(nCurVal == nSearchVal)
-    {
-      bFound = true;
-      bDone = true;
     }
   }
 
-  nFoundPos = nCurPos;
-  return bFound;
+  // Not found: the last position compared, as master gave
+  nFoundPos = static_cast<uint32_t>(nLast);
+  return false;
+}
+
+// Copies the nLen bytes from nOffset on to pDst as Buf() reads them: the
+// file's, 0 past its end, with any enabled overlay in place (a later one
+// over an earlier one)
+void CwindowBuf::BufReadBlock(int64_t nOffset, uint8_t *pDst, uint32_t nLen)
+{
+  memset(pDst, 0, nLen);
+
+  const int64_t nEof = static_cast<int64_t>(m_nPosEof);
+
+  if(m_pBufFile && (nOffset < nEof) && m_pBufFile->seek(nOffset))
+  {
+    // A short read leaves 0s, as Buf() returns past what it could read
+    const qint64 nWant = qMin(static_cast<qint64>(nLen), nEof - nOffset);
+    static_cast<void>(m_pBufFile->read(reinterpret_cast<char *>(pDst), nWant));
+  }
+
+  for(uint32_t nOvr = 0; nOvr < m_nOverlayNum; nOvr++)
+  {
+    const sOverlay *pOvr = m_psOverlay[nOvr];
+
+    if(!pOvr || !pOvr->bEn)
+    {
+      continue;
+    }
+
+    const int64_t nFrom = qMax(nOffset, static_cast<int64_t>(pOvr->nStart));
+    const int64_t nTo = qMin(nOffset + nLen, static_cast<int64_t>(pOvr->nStart) + pOvr->nLen);
+
+    if(nFrom < nTo)
+    {
+      memcpy(pDst + (nFrom - nOffset), pOvr->anData + (nFrom - pOvr->nStart), static_cast<size_t>(nTo - nFrom));
+    }
+  }
 }
 
 //SetStatusText

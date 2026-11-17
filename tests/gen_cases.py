@@ -2176,6 +2176,96 @@ batch_case("BP_offset_not_used", BP_RUN, "^harness: cat: Start Offset: 0x0000000
 batch_case("BP_offset_kept", BP_RUN, "harness: batch after reprocess offset: " + FO_SECOND,
            names=("bp_tree", "e_two.jpg"), extra="--offset value=62C,ok")
 
+# --- IS: Tools > Image Search Fwd and Rev ------------------------------------------------
+# They did nothing. As on Windows, Fwd decodes the file from the next SOI marker
+# (FF D8 FF) after the start offset and Rev from the one before it, or from the
+# start of the file if there is none. gui --search chooses them (fwd, rev),
+# presses their shortcuts (ctrl2, ctrl1) or moves the file away for the next
+# step (gone), printing the summary of --offset after each.
+def search_case(cid, steps, expect, names=("e_two.jpg",), extra="", forbid="-"):
+    case(cid, "IS", "gui", list(names), ("--search " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+IS_FIRST = "start=0x00000064 soi=1 scan=1 sig=100 assessment=skipped preview=64x48 md5=[0-9a-f]{8} ref=same$"
+IS_NONE_AFTER = "harness: message box: No JPEG found after offset 0x{} \\(no SOI marker, FF D8 FF\\)\\.$"
+IS_NONE_BEFORE = ("harness: message box: No JPEG found before offset 0x{} \\(no SOI marker, FF D8 FF\\), so the file "
+                  "is decoded from its start\\.$")
+
+# The menu items, where Windows has them; off until a file is open
+search_case("IS_menu_fwd", "fwd",
+            'harness: search Image Search Fwd menu=&Tools after="-" separator=0 enabled=1 tip="Search for next Image" '
+            "shortcut=Ctrl\\+2$")
+search_case("IS_menu_rev", "fwd",
+            'harness: search Image Search Rev menu=&Tools after="Image Search Fwd" separator=0 enabled=1 '
+            'tip="Search for previous Image" shortcut=Ctrl\\+1$')
+search_case("IS_off_no_file", "fwd,rev", "harness: search rev: unavailable$", extra="--search-at 0")
+search_case("IS_off_failed_open", "fwd", "harness: search fwd: unavailable$", names=("f4_no_such_file.jpg",))
+# They stay on after a file that couldn't be opened, or was empty
+for cid, name in (("IS_not_analyzed", "f4_no_such_file.jpg"), ("IS_not_analyzed_empty", "f4_empty.jpg")):
+    search_case(cid, "fwd",
+                "harness: message box: The file shown couldn't be analyzed, so it can't be searched\\.$",
+                names=("e_two.jpg", name), extra="--search-at 2")
+
+# Fwd: each JPEG in turn, then a message, and the offset stays
+search_case("IS_fwd_first", "fwd", "harness: search fwd: " + IS_FIRST)
+search_case("IS_fwd_second", "fwd,fwd", "harness: search fwd: " + FO_SECOND)
+search_case("IS_fwd_none", "fwd,fwd,fwd", IS_NONE_AFTER.format("0000062C"))
+search_case("IS_fwd_none_stays", "fwd,fwd,fwd", "harness: search after reprocess: " + FO_SECOND)
+# From the offset File > Offset set (here inside the first JPEG)
+search_case("IS_fwd_from_offset", "fwd", "harness: search fwd: " + FO_SECOND, extra="--offset value=100,ok")
+# With the scan at the start decoded: Windows marked the image source changed
+# before decoding again, and so does this (see FO_after_scan_decoded)
+search_case("IS_fwd_after_scan_decoded", "fwd",
+            "harness: search fwd: start=0x000005C8 soi=1 scan=1 sig=1480 assessment=skipped preview=64x48 "
+            "md5=[0-9a-f]{8} ref=same$", names=("fo_start_two.jpg",))
+
+# Rev: the JPEG before, or with none, the start of the file (as on Windows),
+# where there is nothing before to search (Windows did nothing)
+search_case("IS_rev_previous", "fwd,fwd,rev", "harness: search rev: " + IS_FIRST)
+search_case("IS_rev_none_to_start", "rev", "harness: search rev: " + FO_START, extra="--offset value=64,ok")
+search_case("IS_rev_none_message", "fwd,rev", IS_NONE_BEFORE.format("00000064"))
+search_case("IS_rev_at_start", "rev",
+            "harness: message box: The file is decoded from its start, so there is nothing before it to search\\.$")
+search_case("IS_rev_finds_start", "rev",
+            "harness: search rev: start=0x00000000 soi=1 scan=1 sig=0 assessment=done preview=64x48 "
+            "md5=[0-9a-f]{8} ref=same$", names=("fo_start_two.jpg",), extra="--offset value=5C8,ok")
+search_case("IS_rev_from_offset", "rev", "harness: search rev: " + FO_SECOND, extra="--offset value=700,ok")
+
+# The shortcuts, Ctrl+2 and Ctrl+1 (Cmd on macOS), as on Windows
+search_case("IS_ctrl2", "ctrl2,ctrl2", "harness: search ctrl2: " + FO_SECOND)
+search_case("IS_ctrl1", "ctrl2,ctrl2,ctrl1", "harness: search ctrl1: " + IS_FIRST)
+
+# The offset found lasts as File > Offset's does: Reprocess and Export JPEG
+# use it, and opening a file starts from 0 again
+search_case("IS_reprocess_keeps", "fwd,fwd", "harness: search after reprocess: " + FO_SECOND)
+search_case("IS_next_file_resets", "fwd", "harness: search file 2: start=0x00000000 soi=0 ",
+            names=("e_two.jpg", "e_two.jpg"))
+search_case("IS_export_found", "fwd,fwd", "harness: menu Export JPEG\\.\\.\\. wrote=1 size=1067$",
+            extra="--export-menus")
+
+# The search sees the File Overlay, as on Windows and as the decoder does: one
+# can hide an SOI or make one
+search_case("IS_overlay_hides", "fwd,fwd", IS_NONE_AFTER.format("00000064"),
+            extra="--overlay on,offset=62C,value=00,ok")
+search_case("IS_overlay_makes", "fwd", "harness: search fwd: start=0x00000030 soi=1 ",
+            extra="--overlay on,offset=30,value=FFD8FF,ok")
+search_case("IS_overlay_makes_rev", "rev", "harness: search rev: start=0x00000030 soi=1 ",
+            extra="--overlay on,offset=30,value=FFD8FF,ok --offset value=64,ok")
+
+# A file moved away since it was opened: the report says so, as after
+# Reprocess, and the preview goes
+search_case("IS_file_gone", "gone,fwd", "harness: message box: ERROR: Couldn't open file: \\[.*e_two\\.jpg\\]$")
+search_case("IS_file_gone_preview", "fwd,gone,fwd", "harness: search fwd: start=- soi=0 scan=0 .* preview=none ")
+
+# The search reads the file a block (64 KiB) at a time. is_far.jpg has a JPEG
+# at 0x10000, the last position of the first block searched from 0 (its SOI
+# runs on into the next), and another at 0x20564.
+write("is_far.jpg", junk * 655 + junk[:36] + c444 + junk * 655 + junk[:36] + c420)
+search_case("IS_far_fwd", "fwd,fwd", "harness: search fwd: start=0x00020564 soi=1 scan=1 ", names=("is_far.jpg",))
+search_case("IS_far_first", "fwd", "harness: search fwd: start=0x00010000 soi=1 scan=1 ", names=("is_far.jpg",))
+search_case("IS_far_rev", "fwd,fwd,rev", "harness: search rev: start=0x00010000 soi=1 scan=1 ", names=("is_far.jpg",))
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

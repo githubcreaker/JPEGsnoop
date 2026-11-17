@@ -445,11 +445,15 @@ void MainWindow::createActions(void)
   // Tools
   imgSearchFwdAct = new QAction(tr("Image Search Fwd"), this);
   imgSearchFwdAct->setShortcut(tr("Ctrl+2"));
+  imgSearchFwdAct->setStatusTip(tr("Search for next Image"));
   imgSearchFwdAct->setEnabled(false);
+  connect(imgSearchFwdAct, &QAction::triggered, this, &MainWindow::onImageSearchFwd);
 
   imgSearchRevAct = new QAction(tr("Image Search Rev"), this);
   imgSearchRevAct->setShortcut(tr("Ctrl+1"));
+  imgSearchRevAct->setStatusTip(tr("Search for previous Image"));
   imgSearchRevAct->setEnabled(false);
+  connect(imgSearchRevAct, &QAction::triggered, this, &MainWindow::onImageSearchRev);
 
   lookupMcuOffAct = new QAction(tr("Lookup MCU Offset..."), this);
   lookupMcuOffAct->setEnabled(false);
@@ -1790,6 +1794,88 @@ void MainWindow::onFileOffset()
 
   m_pAppConfig->setStartPos(dlg.offset());
   reprocess();
+}
+
+//-----------------------------------------------------------------------------
+// Tools > Image Search Fwd and Rev: decode the file from the next JPEG after
+// the start offset, or the one before it (master's
+// CJPEGsnoopDoc::OnToolsSearchforward and OnToolsSearchreverse). A JPEG is
+// found by its SOI marker, FF D8 FF. The offset found becomes the start
+// offset, as File > Offset sets it. As on Windows, the search sees the File
+// Overlay, as the decoder does, and when Rev finds no JPEG it goes back to
+// the start of the file, where the file was decoded from when opened.
+void MainWindow::onImageSearchFwd()
+{
+  imageSearch(true);
+}
+
+void MainWindow::onImageSearchRev()
+{
+  imageSearch(false);
+}
+
+void MainWindow::imageSearch(bool bForward)
+{
+  if(m_currentFile.isEmpty())
+  {
+    return;
+  }
+
+  // The menu stays enabled after a file that couldn't be opened
+  if(!m_bFileAnalyzed)
+  {
+    QMessageBox::warning(this, "JPEGsnoop", tr("The file shown couldn't be analyzed, so it can't be searched."));
+    return;
+  }
+
+  const uint32_t nStart = m_pAppConfig->startPos();
+  const QString strStart = COffsetDialog::offsetText(nStart, true);
+
+  // (Windows did nothing here)
+  if(!bForward && (nStart == 0))
+  {
+    QMessageBox::information(this, "JPEGsnoop",
+                             tr("The file is decoded from its start, so there is nothing before it to search."));
+    return;
+  }
+
+  // The file as it is now, as decoding it again reads it
+  if(!AnalyzeOpen())
+  {
+    // Moved, removed or emptied: the report says so, as after Reprocess,
+    // and the preview of what was there goes
+    clearImageViews();
+    m_bFileAnalyzed = false;
+    return;
+  }
+
+  m_StatusBar->showMessage(bForward ? tr("Searching forward...") : tr("Searching reverse..."));
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  uint32_t nFound = 0;
+  const bool bFound = m_pWBuf->BufSearch(nStart, 0xFFD8FF, 3, bForward, nFound);
+  QApplication::restoreOverrideCursor();
+  m_StatusBar->clearMessage();
+  AnalyzeClose();
+
+  if(bFound)
+  {
+    m_pAppConfig->setStartPos(nFound);
+    reprocess();
+  }
+  else if(bForward)
+  {
+    QMessageBox::information(this, "JPEGsnoop",
+                             tr("No JPEG found after offset %1 (no SOI marker, FF D8 FF).").arg(strStart));
+  }
+  else
+  {
+    m_pAppConfig->setStartPos(0);
+    reprocess();
+    QMessageBox::information(this, "JPEGsnoop",
+                             tr("No JPEG found before offset %1 (no SOI marker, FF D8 FF), so the file is decoded "
+                                "from its start.")
+                               .arg(strStart));
+  }
 }
 
 //-----------------------------------------------------------------------------

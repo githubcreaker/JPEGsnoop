@@ -152,6 +152,16 @@
 //     end, and the summary after each opening and after File > Reprocess.
 //     The batch mode takes --offset too, for the file opened first.
 //
+// gui ... --search STEPS
+//     For each file, print a "harness: search file N" summary of the report
+//     and preview, as for --offset. After the first file (or file N with
+//     --search-at N; 0 is before any file, and with --offset, after its
+//     steps), print the places of Tools > Image Search Fwd and Rev in the
+//     menu, then take STEPS, a comma-separated list of fwd and rev (choose
+//     those), ctrl2 and ctrl1 (press their shortcuts) and gone (move the file
+//     away for the next step, then put it back). Print the summary after each
+//     step and after File > Reprocess.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -241,7 +251,7 @@ static void usage()
           "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
           "                          [--auto-reprocess] [--no-decode-image]] [--about]\n"
           "                         [--edit STEPS [--edit-before]] [--overlay STEPS [--overlay-at N]]\n"
-          "                         [--offset STEPS [--offset-at N]]\n"
+          "                         [--offset STEPS [--offset-at N]] [--search STEPS [--search-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -947,6 +957,8 @@ struct GuiOptions
   int nOverlayAt = 1;             // --overlay-at N
   QString strOffset;              // --offset STEPS
   int nOffsetAt = 1;              // --offset-at N
+  QString strSearch;              // --search STEPS
+  int nSearchAt = 1;              // --search-at N
 };
 
 // Memory the process is using, as Activity Monitor shows it ("Memory")
@@ -1452,6 +1464,38 @@ static QString offsetReport(MainWindow &window, const QString &strFile, const QS
                 img.isNull() ? QStringLiteral("-") : imageMd5(img).left(8), strRef);
 }
 
+// Where a menu item is: the menu's title, the item before it and whether a
+// separator is between them, then whether it is enabled and its status tip
+static QString menuPlace(QAction *pAction)
+{
+  QString strMenu = "-";
+  QString strBefore = "-";
+  bool bSeparator = false;
+  const QList<QObject *> objects = pAction->associatedObjects();
+  for(QObject *pObj : objects)
+  {
+    QMenu *pMenu = qobject_cast<QMenu *>(pObj);
+    if(!pMenu)
+      continue;
+    strMenu = pMenu->title();
+    const QList<QAction *> actions = pMenu->actions();
+    for(qsizetype nInd = actions.indexOf(pAction) - 1; nInd >= 0; nInd--)
+    {
+      if(!actions.at(nInd)->isSeparator())
+      {
+        strBefore = actions.at(nInd)->text();
+        break;
+      }
+      bSeparator = true;
+    }
+  }
+  return QString("menu=%1 after=\"%2\" separator=%3 enabled=%4 tip=\"%5\"")
+           .arg(strMenu, strBefore)
+           .arg(bSeparator ? 1 : 0)
+           .arg(pAction->isEnabled() ? 1 : 0)
+           .arg(pAction->statusTip());
+}
+
 // File > Offset as a user chooses it (see --offset above). The dialog is
 // found by name, so the driver also builds with versions without it.
 static void offsetMenu(MainWindow &window, const QString &strSteps, const QString &strFile, const QString &strDbDir,
@@ -1464,33 +1508,7 @@ static void offsetMenu(MainWindow &window, const QString &strSteps, const QStrin
     return;
   }
 
-  // Where it is: the menu's title, the item before it and whether a
-  // separator is between them
-  {
-    QString strMenu = "-";
-    QString strBefore = "-";
-    bool bSeparator = false;
-    const QList<QObject *> objects = pAction->associatedObjects();
-    for(QObject *pObj : objects)
-    {
-      QMenu *pMenu = qobject_cast<QMenu *>(pObj);
-      if(!pMenu)
-        continue;
-      strMenu = pMenu->title();
-      const QList<QAction *> actions = pMenu->actions();
-      for(qsizetype nInd = actions.indexOf(pAction) - 1; nInd >= 0; nInd--)
-      {
-        if(!actions.at(nInd)->isSeparator())
-        {
-          strBefore = actions.at(nInd)->text();
-          break;
-        }
-        bSeparator = true;
-      }
-    }
-    out << "harness: offset menu=" << strMenu << " after=\"" << strBefore << "\" separator=" << (bSeparator ? 1 : 0)
-        << " enabled=" << (pAction->isEnabled() ? 1 : 0) << " tip=\"" << pAction->statusTip() << "\"\n";
-  }
+  out << "harness: offset " << menuPlace(pAction) << "\n";
   if(!pAction->isEnabled())
   {
     out << "harness: menu Offset unavailable\n";
@@ -1595,6 +1613,87 @@ static void offsetMenu(MainWindow &window, const QString &strSteps, const QStrin
   window.reprocess();
   QCoreApplication::processEvents();
   out << "harness: offset after reprocess: " << offsetReport(window, strFile, strDbDir) << "\n";
+  out.flush();
+}
+
+// Tools > Image Search Fwd and Rev as a user chooses them (see --search
+// above). A message box the search shows is printed and closed as it opens.
+static void searchMenu(MainWindow &window, const QString &strSteps, const QString &strFile, const QString &strDbDir,
+                       QTextStream &out)
+{
+  QAction *pFwd = findAction(window, QStringLiteral("Image Search Fwd"));
+  QAction *pRev = findAction(window, QStringLiteral("Image Search Rev"));
+  for(QAction *pAction : { pFwd, pRev })
+  {
+    if(pAction)
+      out << "harness: search " << pAction->text() << " " << menuPlace(pAction)
+          << " shortcut=" << pAction->shortcut().toString() << "\n";
+  }
+  if(!pFwd || !pRev)
+  {
+    out << "harness: menu Image Search unavailable\n";
+    return;
+  }
+
+  bool bGone = false;
+  const QStringList astrSteps = strSteps.split(',', Qt::SkipEmptyParts);
+  for(const QString &strStep : astrSteps)
+  {
+    if(strStep == "gone")
+    {
+      bGone = true;
+      continue;
+    }
+
+    const bool bFwd = (strStep == "fwd") || (strStep == "ctrl2");
+    const bool bKey = (strStep == "ctrl2") || (strStep == "ctrl1");
+    if(!bFwd && (strStep != "rev") && (strStep != "ctrl1"))
+    {
+      out << "harness: unknown search step " << strStep << "\n";
+      continue;
+    }
+
+    QAction *pAction = bFwd ? pFwd : pRev;
+    if(!pAction->isEnabled())
+    {
+      out << "harness: search " << strStep << ": unavailable\n";
+      continue;
+    }
+
+    // The file is closed between decodes, so it can be moved away and back
+    const QString strGone = strFile + ".harness-gone";
+    if(bGone && !QFile::rename(strFile, strGone))
+      out << "harness: couldn't move the file away\n";
+
+    if(bKey)
+    {
+      // The image window, shown by the first decode, takes the focus, and
+      // offscreen the main window's shortcuts work only in front (on macOS
+      // the menu bar takes them first): bring it there, as a click would
+      if(QApplication::activeWindow() != &window)
+      {
+        window.activateWindow();
+        static_cast<void>(QTest::qWaitFor([&window]() { return QApplication::activeWindow() == &window; }, 1000));
+      }
+      QTest::keyClick(&window, bFwd ? Qt::Key_2 : Qt::Key_1, Qt::ControlModifier);
+    }
+    else
+      pAction->trigger();
+    QCoreApplication::processEvents();
+
+    if(bGone)
+    {
+      if(!QFile::rename(strGone, strFile))
+        out << "harness: couldn't put the file back\n";
+      bGone = false;
+    }
+    out << "harness: search " << strStep << ": " << offsetReport(window, strFile, strDbDir) << "\n";
+    out.flush();
+  }
+
+  window.reprocess();
+  QCoreApplication::processEvents();
+  out << "harness: search after reprocess: " << offsetReport(window, strFile, strDbDir) << "\n";
   out.flush();
 }
 
@@ -2070,6 +2169,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     offsetMenu(window, opts.strOffset, QString(), strSettingsDir, out);
   }
 
+  // Tools > Image Search before any file has been opened (--search-at 0)
+  if(!opts.strSearch.isEmpty() && (opts.nSearchAt == 0))
+  {
+    out << "harness: search before any file\n";
+    searchMenu(window, opts.strSearch, QString(), strSettingsDir, out);
+  }
+
   // File > Reprocess (or auto-reprocess after an option change) before any
   // file has been opened
   if(opts.bReprocessFirst)
@@ -2114,6 +2220,15 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           offsetMenu(window, opts.strOffset, strFile, strSettingsDir, out);
         if(!opts.strOverlay.isEmpty())
           out << "harness: overlay with offset: " << overlayReport(window) << "\n";
+      }
+
+      if((nRound == 0) && !opts.strSearch.isEmpty())
+      {
+        out << "harness: search file " << nFileInd << ": " << offsetReport(window, strFile, strSettingsDir) << "\n";
+        if(nFileInd == opts.nSearchAt)
+          searchMenu(window, opts.strSearch, strFile, strSettingsDir, out);
+        if(!opts.strOverlay.isEmpty())
+          out << "harness: overlay with search: " << overlayReport(window) << "\n";
       }
 
       if(nRound == 0)
@@ -3032,7 +3147,7 @@ int main(int argc, char **argv)
   QString strFormat;
   QString strDetail;
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
-                             "--edit", "--overlay", "--offset", "--batch" })
+                             "--edit", "--overlay", "--offset", "--search", "--batch" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3062,6 +3177,8 @@ int main(int argc, char **argv)
       guiOpts.strOverlay = exportOpts.strOverlay = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--offset"))
       guiOpts.strOffset = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--search"))
+      guiOpts.strSearch = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--batch"))
       batchOpts.strSteps = args.at(nInd + 1);
     args.remove(nInd, 2);
@@ -3070,7 +3187,7 @@ int main(int argc, char **argv)
   // Options with a numeric value
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
-                             "--offset-at", "--batch-cancel-after", "--batch-close-after" })
+                             "--offset-at", "--search-at", "--batch-cancel-after", "--batch-close-after" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -3095,6 +3212,8 @@ int main(int argc, char **argv)
       guiOpts.nOverlayAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--offset-at"))
       guiOpts.nOffsetAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--search-at"))
+      guiOpts.nSearchAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

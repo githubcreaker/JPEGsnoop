@@ -112,6 +112,7 @@ public:
 
 private:
   void Reset();
+  void BufReadBlock(int64_t nOffset, uint8_t *pDst, uint32_t nLen);
 
   CwindowBuf &operator = (const CwindowBuf&);
   CwindowBuf(CwindowBuf&);

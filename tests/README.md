@@ -120,6 +120,15 @@ when it is installed, so Pillow needn't be installed separately).
       shows and after `hex` and `dec`, and the summary after each opening and
       after File > Reprocess. (The offscreen platform doesn't activate the
       dialog again after a message box, so focus then shows as none.)
+    - `--search STEPS` prints a `harness: search file N` summary of each file,
+      as `--offset` does. After the first file (or file N with
+      `--search-at N`; `0` is before any file, and with `--offset`, after its
+      steps) it prints the places and shortcuts of Tools > Image Search Fwd
+      and Rev, then takes STEPS: `fwd` and `rev` (choose those), `ctrl2` and
+      `ctrl1` (press their shortcuts, with the main window brought to the
+      front first: offscreen, its shortcuts don't reach the image window) and
+      `gone` (move the file away for the next step, then put it back). It
+      prints the summary after each step and after File > Reprocess.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -202,7 +211,8 @@ are in its "Follow-up review" section, `PSD` in its "PSD decoding" section, `E`
 in its "Export JPEG and Export TIFF" section, `D` in its "Detailed Decode"
 section, `A` in its "About" section, `T` in its "Select All and Copy"
 section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
-`BP` in its "Batch Process" section, and `FO` in its "File > Offset" section);
+`BP` in its "Batch Process" section, `FO` in its "File > Offset" section, and `IS`
+in its "Tools > Image Search Fwd and Rev" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case
