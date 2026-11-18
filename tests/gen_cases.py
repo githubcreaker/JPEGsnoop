@@ -3318,6 +3318,110 @@ mcu_grid_case("MG_resize", MG_BIG, MG_ON + ",scroll=40;33,size=600;600,buffer", 
 mcu_grid_case("MG_scroll_grid_off", MG_BIG, "zoom=100,scroll=7;5,buffer", mg_buffer("7,5", "400x400", dots="0"))
 
 
+# --- The red line where the image ends inside its MCUs --------------------------
+# Black images, so that the line's red and white pixels and the grid's dark
+# grey ones all differ from the image: 61x45 inside MCUs of 8x8 (4:4:4 and
+# grayscale) and 16x16 (4:2:0), both 64x48; 61x48 and 64x45, which end inside
+# MCUs one way only; 64x48, which fills them; and 1021x1019, to scroll
+BLACK = (0, 0, 0)
+write("ie_444.jpg", jpeg(Image.new("RGB", (61, 45), BLACK), quality=95, subsampling=0))
+write("ie_420.jpg", jpeg(Image.new("RGB", (61, 45), BLACK), quality=95, subsampling=2))
+write("ie_gray.jpg", jpeg(Image.new("L", (61, 45), 0), quality=95))
+write("ie_right.jpg", jpeg(Image.new("RGB", (61, 48), BLACK), quality=95, subsampling=0))
+write("ie_bottom.jpg", jpeg(Image.new("RGB", (64, 45), BLACK), quality=95, subsampling=0))
+write("ie_full.jpg", jpeg(Image.new("RGB", (64, 48), BLACK), quality=95, subsampling=0))
+write("ie_big.jpg", jpeg(Image.new("RGB", (1021, 1019), BLACK), quality=95, subsampling=2))
+
+
+def end_case(cid, names, steps, expect, extra="", forbid="-"):
+    case(cid, "IE", "gui", list(names), ("--mcu-grid " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+def ie_line(when, zoom, screen, right, bottom, red, white, scale=1, grid=0):
+    """The line's report: right and bottom are (place, from, to[, first red]) or None"""
+    def part(where, along):
+        if where is None:
+            return "none"
+        at, lo, hi, first = (where + (0,))[:4]
+        return f"{at} {along}={lo}-{hi} every=3 from={first}"
+    return rx(f"harness: image-end {when}: zoom={zoom} scale={scale} screen={screen} right={part(right, 'rows')} "
+              f"bottom={part(bottom, 'cols')} red={red} white={white} stray=0 grid={grid} other=0") + "$"
+
+
+IE_444 = ("ie_444.jpg",)
+# Just right of the image's own width, as tall as its own height, and just
+# below it, as wide (not at the corner between them); red on every third
+# pixel from the top or the left, white between; with the grid off. MCUs of
+# 8x8, 16x16 and a grayscale image's 8x8.
+IE_61X45 = {"right": (61, 0, 44), "bottom": (45, 0, 60), "red": 36, "white": 70}
+end_case("IE_444", IE_444, "zoom=100", ie_line("file 1", 1, "64x48", **IE_61X45))
+end_case("IE_420", ("ie_420.jpg",), "zoom=100", ie_line("file 1", 1, "64x48", **IE_61X45))
+end_case("IE_gray", ("ie_gray.jpg",), "zoom=100", ie_line("file 1", 1, "64x48", **IE_61X45))
+# Inside the MCUs one way only: one line; none for an image that fills them
+end_case("IE_right_only", ("ie_right.jpg",), "zoom=100",
+         ie_line("file 1", 1, "64x48", (61, 0, 47), None, red=16, white=32))
+end_case("IE_bottom_only", ("ie_bottom.jpg",), "zoom=100",
+         ie_line("file 1", 1, "64x48", None, (45, 0, 63), red=22, white=42))
+end_case("IE_full", ("ie_full.jpg",), "zoom=100", ie_line("file 1", 1, "64x48", None, None, red=0, white=0))
+# Each zoom, also 12.5% (where there is no grid), the places cut short to
+# whole screen pixels as Windows' were (61 x 1.5 = 91.5 is 91)
+end_case("IE_zoom_12", IE_444, "zoom=12.5", ie_line("file 1", 0.125, "8x6", (7, 0, 4), (5, 0, 6), red=5, white=7))
+end_case("IE_zoom_25", IE_444, "zoom=25", ie_line("file 1", 0.25, "16x12", (15, 0, 10), (11, 0, 14), red=9, white=17))
+end_case("IE_zoom_50", IE_444, "zoom=50", ie_line("file 1", 0.5, "32x24", (30, 0, 21), (22, 0, 29), red=18, white=34))
+end_case("IE_zoom_150", IE_444, "zoom=150",
+         ie_line("file 1", 1.5, "96x72", (91, 0, 66), (67, 0, 90), red=54, white=104))
+end_case("IE_zoom_200", IE_444, "zoom=200",
+         ie_line("file 1", 2, "128x96", (122, 0, 89), (90, 0, 121), red=71, white=141))
+end_case("IE_zoom_800", IE_444, "zoom=800",
+         ie_line("file 1", 8, "512x384", (488, 0, 359), (360, 0, 487), red=283, white=565))
+# A Retina screen: still one screen pixel wide, in the same screen pixels
+end_case("IE_retina_100", IE_444, "zoom=100", ie_line("file 1", 1, "64x48", scale=2, **IE_61X45), extra="--scale 2")
+end_case("IE_retina_200", IE_444, "zoom=200",
+         ie_line("file 1", 2, "128x96", (122, 0, 89), (90, 0, 121), red=71, white=141, scale=2), extra="--scale 2")
+end_case("IE_retina_50", IE_444, "zoom=50",
+         ie_line("file 1", 0.5, "32x24", (30, 0, 21), (22, 0, 29), red=18, white=34, scale=2), extra="--scale 2")
+# The grid is drawn over it, as on Windows: its dots cover the 8 places where
+# its columns cross the bottom line (3 of them red); the grid is unchanged
+end_case("IE_grid_over", IE_444, "zoom=100,toggle",
+         ie_line("file 1", 1, "64x48", (61, 0, 44), (45, 1, 60, 3), red=33, white=65, grid=254))
+end_case("IE_grid_unchanged", IE_444, "zoom=100,toggle",
+         rx("harness: mcu-grid file 1: checked=1 zoom=1 scale=1 screen=64x48 cols=0,8,16,24,32,40,48,56 "
+            "rows=0,8,16,24,32,40 gap=3 colours=202020 stray=0") + "$")
+end_case("IE_grid_12", IE_444, "zoom=12.5,toggle",
+         ie_line("file 1", 0.125, "8x6", (7, 0, 4), (5, 0, 6), red=5, white=7))
+# Another channel, and back
+end_case("IE_channel", IE_444, "zoom=100,channel=Cb,end", ie_line("end", 1, "64x48", **IE_61X45))
+end_case("IE_channel_back", IE_444, "zoom=100,channel=Cb,channel=RGB", ie_line("file 1", 1, "64x48", **IE_61X45))
+# Each file's own: gone for one that fills its MCUs and a Photoshop file's
+# image (no MCUs), and back after them
+IE_FILES = ("ie_444.jpg", "ie_full.jpg", "psd_rgb_rle.psd", "ie_right.jpg")
+end_case("IE_next_full", IE_FILES, "zoom=100", ie_line("file 2", 1, "64x48", None, None, red=0, white=0))
+end_case("IE_psd", IE_FILES, "zoom=100", ie_line("file 3", 1, "37x23", None, None, red=0, white=0))
+end_case("IE_after_psd", IE_FILES, "zoom=100", ie_line("file 4", 1, "64x48", (61, 0, 47), None, red=16, white=32))
+# Scrolled into view (only what comes into view is painted) or shown by
+# making the window larger: as painting it all again draws it
+IE_BIG = ("ie_big.jpg",)
+IE_BUFFER = "harness: image-end buffer: red pixels=[1-9][0-9]*$"
+IE_REPAINTED = "changed by painting it all=([1-9]|-)"
+end_case("IE_big", IE_BIG, "zoom=100", ie_line("file 1", 1, "1024x1024", (1021, 0, 1018), (1019, 0, 1020),
+                                               red=681, white=1359))
+end_case("IE_scroll", IE_BIG, "zoom=100,scroll=640;640,scroll=9999;9999,buffer", IE_BUFFER, forbid=IE_REPAINTED)
+end_case("IE_scroll_150", IE_BIG, "zoom=150,scroll=1100;1100,scroll=9999;9999,buffer", IE_BUFFER,
+         forbid=IE_REPAINTED)
+end_case("IE_scroll_50", IE_BIG, "zoom=50,scroll=100;100,scroll=9999;9999,buffer", IE_BUFFER, forbid=IE_REPAINTED)
+end_case("IE_scroll_grid", IE_BIG, "zoom=100,toggle,scroll=640;640,scroll=9999;9999,buffer", IE_BUFFER,
+         forbid=IE_REPAINTED)
+end_case("IE_resize", IE_BIG, "zoom=100,scroll=9999;9999,size=600;600,buffer", IE_BUFFER, forbid=IE_REPAINTED)
+# Scrolled back a little with it in view: the dots copied must fall where the
+# ones painted next to them do
+end_case("IE_scroll_back", IE_BIG, "zoom=100,scroll=9999;9999,scroll=642;653,buffer", IE_BUFFER, forbid=IE_REPAINTED)
+end_case("IE_scroll_back_grid", IE_BIG, "zoom=100,toggle,scroll=9999;9999,scroll=642;653,buffer", IE_BUFFER,
+         forbid=IE_REPAINTED)
+end_case("IE_scroll_back_150", IE_BIG, "zoom=150,scroll=9999;9999,scroll=1154;1186,buffer", IE_BUFFER,
+         forbid=IE_REPAINTED)
+
+
 # --- View > Toolbar and Status Bar ----------------------------------------------
 def bars_case(cid, steps, expect, names=("mg_white_420.jpg",), extra="", forbid="-"):
     case(cid, "VB", "gui", list(names), ("--bars " + steps + " " + extra).strip(), timeout=30, expect=expect,

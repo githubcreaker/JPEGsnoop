@@ -2093,7 +2093,7 @@ the start, not saved.
 
 **Not ported:** Windows' drawing routine also drew a red line where the image ends inside
 its last, partial MCUs, whether or not the grid was on. The image window draws no such
-line.
+line. (Ported since: see "The red line where the image ends inside its MCUs".)
 
 **Tests:** 30 new `MG` cases (860 in all).
 - **The driver:** `gui --mcu-grid STEP[,STEP...]` (`--mcu-grid-at N`, 0 before any file)
@@ -2530,6 +2530,85 @@ previous commit and with the image window's key removed.
 **Still open:**
 - **Windows' red line** where the image ends inside its last MCUs (see View > Overlays >
   MCU Grid).
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
+### The red line where the image ends inside its MCUs
+
+A JPEG's image is decoded in whole MCUs, so one whose width or height isn't a whole
+number of MCUs is shown with padding on the right or at the bottom. Windows marked where
+the image's own size ends with a dotted red line (`CimgDecode::ViewOnDraw`). The Qt port
+drew nothing there. Now, as on Windows:
+- **Where:** down the column just right of the image's own width, as tall as its own
+  height, and along the row just below its own height, as wide as its own width. So the
+  line is on the first column and row of the padding, and not on the corner pixel between
+  them (Windows' `LineTo()` stopped short of its end point).
+- **At each zoom,** 12.5% too, with its place cut short to whole screen pixels as
+  Windows' was: a 61x45 image's line is at column 91 and row 67 at 150%, not 92 and 68.
+- **Whether or not the grid is on,** and under it: the grid's dots are drawn over the
+  line where they cross it.
+- **Only where it is needed:** an image that fills its last MCUs one way has no line
+  that way, and one that fills them both ways has none. (On Windows that line was drawn
+  on the image's frame, which then covered it; here it falls just off the image.) A
+  Photoshop file's image has no MCUs and no line (Windows' size was 0 for it).
+- **Its look:** red dots, one screen pixel each, on every third pixel counted from the
+  image's top or left edge, as the MCU grid's are (also on a Retina screen). Windows
+  drew it with its default opaque background mode, where the grid set a transparent one,
+  so the two pixels between the red dots are white.
+
+**Changes from Windows:** none. As the grid is, the line is drawn by the image window
+(`PreviewCanvas`) from the decoder's frame size (`CimgDecode::GetFrameSize()`), not by
+the decoder.
+
+**Tests:** 32 new `IE` cases (990 in all).
+- **The driver:** `gui --mcu-grid ...` gains `end`, which prints where the line is, and
+  prints the same after every file. The report finds the line from what the image window
+  draws, against the decoded image: the screen column down the right and the row along
+  the bottom, the rows and columns each spans, the red dots' spacing and first place, how
+  many pixels are red and white, and how many differ elsewhere. `buffer` also prints how
+  many of the window's pixels are the line's red.
+- **The driver's other checks:** `--check-preview` and the MCU grid's report now expect
+  the line where the image ends inside its MCUs, so it doesn't count as a stray pixel.
+- **Test images:** black ones, so the line's red and white pixels and the grid's dark
+  grey ones all differ from the image.
+
+The cases cover:
+- **Its place and look:** 61x45 images inside MCUs of 8x8, 16x16 and a grayscale
+  image's 8x8; ones that end inside their MCUs one way only, and one that fills them.
+- **Every zoom** from 12.5% to 800%, and a Retina screen at 50%, 100% and 200%.
+- **With the grid:** drawn over the line, unchanged by it, and none at 12.5% while the
+  line stays.
+- **Another channel,** and back.
+- **Later files:** gone for an image that fills its MCUs and a Photoshop file, and back
+  after them.
+- **Scrolling** a 1021x1019 image to its end at 50%, 100% and 150%, with and without
+  the grid, and making the window larger: the line is painted as painting the whole
+  window again paints it. Also scrolling back a little with the line in view, where
+  copied dots meet newly painted ones.
+
+On the previous commit 28 of them fail. The other 4 check what was already so: no line
+for an image that fills its MCUs, first or as the next file, or for a Photoshop file,
+and the grid unchanged. All the MCU grid's cases still pass there with the new driver. Eleven
+deliberate breaks each fail their own cases:
+- **Not drawn,** 30 fail; **drawn only with the grid on,** 24 fail; **not at 12.5%,**
+  2 fail.
+- **Its place:** rounded rather than cut short, 5 fail (12.5%, 50%, 150%); on the image's
+  last pixels, 45 fail; as long as the padded image, 19 fail; including the corner pixel,
+  19 fail.
+- **Its look:** solid red, 25 fail; no white between the dots, 22 fail; drawn over the
+  grid, 1 fails; the dots counted from where the painting starts rather than from the
+  image's edge, 3 fail (the scroll-back cases).
+
+**Checks:**
+- **All 990 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** finds nothing new in the changed files.
+- **Not checked:** the line on the macOS platform, on a real screen.
+
+**Still open:**
 - **For a decision:** Options > Check for Updates (Windows fetched a file over plain
   HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
   and Options > Configuration's "Submit signature to Online DB", which does nothing.

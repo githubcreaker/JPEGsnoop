@@ -58,6 +58,15 @@ void PreviewCanvas::setMcuGrid(const QSize &sizeMcu)
   }
 }
 
+void PreviewCanvas::setFrameSize(const QSize &sizeFrame)
+{
+  if(sizeFrame != m_sizeFrame)
+  {
+    m_sizeFrame = sizeFrame;
+    update();
+  }
+}
+
 // Widget (logical) pixels per image pixel. On a Retina screen there are two
 // device pixels per logical pixel, so 100% is half an image pixel per point.
 double PreviewCanvas::logicalPerImagePixel() const
@@ -132,7 +141,94 @@ void PreviewCanvas::paintEvent(QPaintEvent *pEvent)
     painter.drawImage(rectDst, m_img, rectSrc);
   }
 
-  paintMcuGrid(painter, pEvent->rect());
+  // As on Windows, the grid is drawn over the line
+  const QRect rectScreen = screenRect(pEvent->rect());
+  paintImageEnd(painter, rectScreen);
+  paintMcuGrid(painter, rectScreen);
+}
+
+// The part of the area being painted that is on the image, in screen pixels:
+// an image pixel is m_dZoom of them
+QRect PreviewCanvas::screenRect(const QRect &rectDirty) const
+{
+  const double dDpr = devicePixelRatioF();
+  return QRectF(rectDirty.x() * dDpr, rectDirty.y() * dDpr, rectDirty.width() * dDpr, rectDirty.height() * dDpr)
+           .toAlignedRect() &
+         QRect(0, 0, qCeil(m_img.width() * m_dZoom), qCeil(m_img.height() * m_dZoom));
+}
+
+// The first pixel from nFrom on that a dotted line has a dot on: every third
+// pixel counted from the canvas's top or left edge, so a dot is in the same
+// place however much of the canvas is painted. (With a dotted pen, the dots
+// started where the area being painted started: scrolling copies what is
+// shown and paints only what comes into view, and the new dots fell between
+// the copied ones.)
+static int firstDot(int nFrom)
+{
+  return nFrom + ((3 - (nFrom % 3)) % 3);
+}
+
+// Where the image ends inside its last, partial MCUs, as on Windows
+// (CimgDecode::ViewOnDraw): a dotted red line just right of the image's own
+// width, as tall as its own height, and one just below its own height, as
+// wide as its own width, on the padding that fills the last MCUs. Windows
+// drew it at every zoom, under the MCU grid, whether or not the grid was on,
+// with its positions cut short to whole screen pixels. It didn't set a
+// transparent background for it, as it did for the grid, so between the red
+// dots the line is white. An image that fills its last MCUs has none: the
+// line is just off the canvas (on Windows, the image's frame covered it).
+//
+// Each dot is one screen pixel, as the grid's are, on every third pixel.
+void PreviewCanvas::paintImageEnd(QPainter &painter, const QRect &rectScreen)
+{
+  if(m_sizeFrame.isEmpty() || rectScreen.isEmpty())
+  {
+    return;
+  }
+
+  const int nEndX = static_cast<int>(m_sizeFrame.width() * m_dZoom);
+  const int nEndY = static_cast<int>(m_sizeFrame.height() * m_dZoom);
+  QList<QRect> aWhite;
+  QList<QRect> aRed;
+
+  // Down the right: column nEndX, rows 0 to nEndY - 1
+  if((nEndX >= rectScreen.left()) && (nEndX <= rectScreen.right()))
+  {
+    const int nTop = rectScreen.top();
+    const int nBottom = qMin(nEndY - 1, rectScreen.bottom());
+    if(nTop <= nBottom)
+    {
+      aWhite.append(QRect(nEndX, nTop, 1, nBottom - nTop + 1));
+      for(int nY = firstDot(nTop); nY <= nBottom; nY += 3)
+        aRed.append(QRect(nEndX, nY, 1, 1));
+    }
+  }
+  // Along the bottom: row nEndY, columns 0 to nEndX - 1
+  if((nEndY >= rectScreen.top()) && (nEndY <= rectScreen.bottom()))
+  {
+    const int nLeft = rectScreen.left();
+    const int nRight = qMin(nEndX - 1, rectScreen.right());
+    if(nLeft <= nRight)
+    {
+      aWhite.append(QRect(nLeft, nEndY, nRight - nLeft + 1, 1));
+      for(int nX = firstDot(nLeft); nX <= nRight; nX += 3)
+        aRed.append(QRect(nX, nEndY, 1, 1));
+    }
+  }
+  if(aWhite.isEmpty())
+  {
+    return;
+  }
+
+  painter.save();
+  painter.scale(1.0 / devicePixelRatioF(), 1.0 / devicePixelRatioF());
+  painter.setRenderHint(QPainter::Antialiasing, false);
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(Qt::white);
+  painter.drawRects(aWhite);
+  painter.setBrush(QColor(255, 0, 0));
+  painter.drawRects(aRed);
+  painter.restore();
 }
 
 // View > Overlays > MCU Grid, as on Windows (CimgDecode::ViewMcuOverlay): a
@@ -140,49 +236,34 @@ void PreviewCanvas::paintEvent(QPaintEvent *pEvent)
 // image showing between the dots. Not at 12.5%, where an MCU of 8 pixels is
 // one screen pixel and the lines would hide the image.
 //
-// Each dot is one screen pixel, on every third pixel counted from the
-// canvas's top or left edge, so a dot is in the same place however much of
-// the canvas is painted. (With a dotted pen, the dots started where the area
-// being painted started: scrolling copies what is shown and paints only what
-// comes into view, and the new dots fell between the copied ones.)
-void PreviewCanvas::paintMcuGrid(QPainter &painter, const QRect &rectDirty)
+// Each dot is one screen pixel, on every third pixel (see firstDot()).
+void PreviewCanvas::paintMcuGrid(QPainter &painter, const QRect &rectScreen)
 {
-  if(m_sizeMcu.isEmpty() || (m_dZoom < 0.25))
+  if(m_sizeMcu.isEmpty() || (m_dZoom < 0.25) || rectScreen.isEmpty())
   {
     return;
   }
-
-  // In screen pixels from here: an image pixel is m_dZoom of them
-  const double dDpr = devicePixelRatioF();
-  const QRect rectPaint = QRectF(rectDirty.x() * dDpr, rectDirty.y() * dDpr, rectDirty.width() * dDpr,
-                                 rectDirty.height() * dDpr).toAlignedRect() &
-                          QRect(0, 0, qCeil(m_img.width() * m_dZoom), qCeil(m_img.height() * m_dZoom));
-  if(rectPaint.isEmpty())
-  {
-    return;
-  }
-  auto firstDot = [](int nFrom) { return nFrom + ((3 - (nFrom % 3)) % 3); };
 
   QList<QRect> aDots;
   for(int nX = 0; nX < m_img.width(); nX += m_sizeMcu.width())
   {
     const int nDevX = qRound(nX * m_dZoom);
-    if((nDevX < rectPaint.left()) || (nDevX > rectPaint.right()))
+    if((nDevX < rectScreen.left()) || (nDevX > rectScreen.right()))
       continue;
-    for(int nDevY = firstDot(rectPaint.top()); nDevY <= rectPaint.bottom(); nDevY += 3)
+    for(int nDevY = firstDot(rectScreen.top()); nDevY <= rectScreen.bottom(); nDevY += 3)
       aDots.append(QRect(nDevX, nDevY, 1, 1));
   }
   for(int nY = 0; nY < m_img.height(); nY += m_sizeMcu.height())
   {
     const int nDevY = qRound(nY * m_dZoom);
-    if((nDevY < rectPaint.top()) || (nDevY > rectPaint.bottom()))
+    if((nDevY < rectScreen.top()) || (nDevY > rectScreen.bottom()))
       continue;
-    for(int nDevX = firstDot(rectPaint.left()); nDevX <= rectPaint.right(); nDevX += 3)
+    for(int nDevX = firstDot(rectScreen.left()); nDevX <= rectScreen.right(); nDevX += 3)
       aDots.append(QRect(nDevX, nDevY, 1, 1));
   }
 
   painter.save();
-  painter.scale(1.0 / dDpr, 1.0 / dDpr);
+  painter.scale(1.0 / devicePixelRatioF(), 1.0 / devicePixelRatioF());
   painter.setRenderHint(QPainter::Antialiasing, false);
   painter.setPen(Qt::NoPen);
   painter.setBrush(QColor(32, 32, 32));
@@ -362,6 +443,7 @@ void Q_Viewer::onCanvasMoved(QPoint ptImg, bool bInside)
 void Q_Viewer::clearImage()
 {
   canvas->setImage(QImage(), scaleFactor);
+  canvas->setFrameSize(QSize());
 }
 
 void Q_Viewer::drawImage()
@@ -382,6 +464,12 @@ void Q_Viewer::drawImage()
   else
     setWindowTitle("Image " + m_strZoom);
   canvas->setImage(*m_pImgDecoder->m_pDibTemp, scaleFactor);
+  // A JPEG's own size, for the line where it ends inside its last MCUs (a
+  // Photoshop file's image has no MCUs; on Windows its size was 0 for this)
+  uint32_t nFrameX = 0;
+  uint32_t nFrameY = 0;
+  const bool bFrame = m_pImgDecoder->IsPreviewReady() && m_pImgDecoder->GetFrameSize(nFrameX, nFrameY);
+  canvas->setFrameSize(bFrame ? QSize(static_cast<int>(nFrameX), static_cast<int>(nFrameY)) : QSize());
   updateMcuGrid();
   scrollArea->setVisible(true);
   setVisible(true);

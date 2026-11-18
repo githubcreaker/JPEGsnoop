@@ -241,11 +241,16 @@
 //     window there, in points), size=W;H (make it that size), grid (print
 //     where the grid is drawn) and buffer (print how many of the image
 //     window's pixels painting it all again changes, and how many have the
-//     grid's colour). After each other step print whether it is checked and
-//     how often Find Next ran. After every file, print where the grid is
-//     drawn as "harness: mcu-grid file N:": the screen columns and rows its
-//     dots are on, their spacing and colours, and other pixels that differ
-//     from the image.
+//     grid's colour, then how many the red line's), and end (print where the
+//     red line is drawn where the image ends inside its last, partial MCUs).
+//     After each other step print whether it is checked and how often Find
+//     Next ran. After every file, print where the grid is drawn as
+//     "harness: mcu-grid file N:": the screen columns and rows its dots are
+//     on, their spacing and colours, and other pixels that differ from the
+//     image; then where the red line is as "harness: image-end file N:": the
+//     screen column down the right and the row along the bottom, the rows
+//     and columns each spans, its red dots' spacing and first place, how
+//     many pixels are red and white, and the pixels that differ elsewhere.
 //
 // gui ... --bars STEP[,STEP...] [--bars-at N]
 //     After the first file (or file N; 0 is before any file), print the
@@ -845,9 +850,34 @@ static void exerciseMouse()
   QCoreApplication::processEvents();
 }
 
+// Windows' red line where the image ends inside its last, partial MCUs, as
+// the canvas is to draw it over the image: is screen (device) pixel nDevX,
+// nDevY on it, and its colour there. Down the right of the image's own width
+// (just right of it), as tall as its own height, and along the bottom, as
+// wide; red on every third pixel from the canvas's top or left edge, white
+// between. (imageEndReport() reports what is drawn, without this.)
+static bool imageEndPixel(const PreviewCanvas *pCanvas, int nDevX, int nDevY, QRgb &nRgb)
+{
+  const QSize &sizeFrame = pCanvas->frameSize();
+  if(sizeFrame.isEmpty())
+    return false;
+  const int nEndX = static_cast<int>(sizeFrame.width() * pCanvas->zoom());
+  const int nEndY = static_cast<int>(sizeFrame.height() * pCanvas->zoom());
+  int nAlong;
+  if((nDevX == nEndX) && (nDevY >= 0) && (nDevY < nEndY))
+    nAlong = nDevY;
+  else if((nDevY == nEndY) && (nDevX >= 0) && (nDevX < nEndX))
+    nAlong = nDevX;
+  else
+    return false;
+  nRgb = ((nAlong % 3) == 0) ? qRgb(255, 0, 0) : qRgb(255, 255, 255);
+  return true;
+}
+
 // Compare the preview with the decoded image at the current zoom and screen
 // scale: the canvas size, where mouse positions land in the image, and the
-// pixels drawn, in screen (device) pixels. Below 100% each screen pixel must
+// pixels drawn, in screen (device) pixels, with the line where the image ends
+// inside its last MCUs (see imageEndPixel()). Below 100% each screen pixel must
 // be one pixel of the smoothly reduced image; from 100% each image pixel must
 // be a sharp block of zoom x zoom screen pixels.
 static void checkPreview(QTextStream &out, const QString &strWhat = QStringLiteral("preview"))
@@ -940,6 +970,9 @@ static void checkPreview(QTextStream &out, const QString &strWhat = QStringLiter
           continue;
         nWant = img.pixel(nPixX, nPixY);
       }
+      QRgb nLine;
+      if(imageEndPixel(pCanvas, nDevX, nDevY, nLine))
+        nWant = nLine;
       nChecked++;
       if((imgGrab.pixel(x, y) & 0xFFFFFF) != (nWant & 0xFFFFFF))
         nBad++;
@@ -2801,7 +2834,8 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
 }
 
 // The MCU grid as the image window draws it: the preview drawn now, in screen
-// (device) pixels, against the decoded image drawn as checkPreview() expects.
+// (device) pixels, against the decoded image drawn as checkPreview() expects
+// (with the line where the image ends inside its last MCUs).
 // The screen columns and rows that the grid's dots are on, their colours, and
 // the pixels changed elsewhere (stray). A line's dots are on every third
 // pixel; a column the other way's lines cross gets at most one for every four
@@ -2853,6 +2887,9 @@ static void mcuGridReport(QAction *pGrid, const QString &strWhen, QTextStream &o
           continue;
         nWant = img.pixel(nPixX, nPixY);
       }
+      QRgb nLine;
+      if(imageEndPixel(pCanvas, x, y, nLine))
+        nWant = nLine;
       const QRgb nGot = imgGrab.pixel(x, y);
       if((nGot & 0xFFFFFF) != (nWant & 0xFFFFFF))
       {
@@ -2916,6 +2953,131 @@ static void mcuGridReport(QAction *pGrid, const QString &strWhen, QTextStream &o
       << " gap=" << nGap << " colours=" << astrColours.join(',') << " stray=" << nStray << "\n";
 }
 
+// Windows' red line where the image ends inside its last, partial MCUs, as the
+// image window draws it: the screen (device) pixels drawn now that differ from
+// the decoded image (drawn as checkPreview() expects, without the line) and are
+// red or white. The column with the most of them (right) and the rows they span
+// in it, the row with the most (bottom) and the columns they span in it; along
+// each, the red dots' spacing (every) and the first one's place (from). Then
+// how many are red and white, how many are elsewhere (stray), and how many of
+// the pixels that differ have the grid's colour (grid) or another (other).
+// Found from what is drawn alone, so use an image that is neither red, white
+// nor the grid's dark grey.
+static void imageEndReport(const QString &strWhen, QTextStream &out)
+{
+  out << "harness: image-end " << strWhen << ":";
+  Q_Viewer *pViewer = findViewer();
+  PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+  if(!pCanvas || pCanvas->image().isNull() || !pViewer->isVisible())
+  {
+    out << " preview=none\n";
+    return;
+  }
+
+  const QImage &img = pCanvas->image();
+  const double dZoom = pCanvas->zoom();
+  const QImage imgGrab = pCanvas->grab().toImage();
+  QImage imgRef;
+  if(dZoom < 1.0)
+  {
+    imgRef = img.scaled(qMax(1, qRound(img.width() * dZoom)), qMax(1, qRound(img.height() * dZoom)),
+                        Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+  }
+
+  const int nW = imgGrab.width();
+  const int nH = imgGrab.height();
+  QList<int> anCol(nW, 0);
+  QList<int> anRow(nH, 0);
+  QList<QPoint> aLine;          // red or white, and not the image's
+  QSet<QPoint> setRed;
+  int nGrid = 0;
+  int nOther = 0;
+  for(int y = 0; y < nH; y++)
+  {
+    for(int x = 0; x < nW; x++)
+    {
+      QRgb nWant;
+      if(dZoom < 1.0)
+      {
+        if((x >= imgRef.width()) || (y >= imgRef.height()))
+          continue;
+        nWant = imgRef.pixel(x, y);
+      }
+      else
+      {
+        const int nPixX = qFloor((x + 0.5) / dZoom);
+        const int nPixY = qFloor((y + 0.5) / dZoom);
+        if((nPixX >= img.width()) || (nPixY >= img.height()))
+          continue;
+        nWant = img.pixel(nPixX, nPixY);
+      }
+      const QRgb nGot = imgGrab.pixel(x, y) & 0xFFFFFF;
+      if(nGot == (nWant & 0xFFFFFF))
+        continue;
+      if((nGot == 0xFF0000) || (nGot == 0xFFFFFF))
+      {
+        aLine.append(QPoint(x, y));
+        anCol[x]++;
+        anRow[y]++;
+        if(nGot == 0xFF0000)
+          setRed.insert(QPoint(x, y));
+      }
+      else if(nGot == 0x202020)
+        nGrid++;
+      else
+        nOther++;
+    }
+  }
+
+  out << QString(" zoom=%1 scale=%2 screen=%3x%4").arg(dZoom).arg(pCanvas->devicePixelRatioF()).arg(nW).arg(nH);
+  // The line along one column (bVert) or row: where, the span of its pixels,
+  // and its red dots' spacing and first place
+  auto line = [&](const QList<int> &anCount, bool bVert, int &nAt) {
+    nAt = -1;
+    for(int i = 0; i < anCount.size(); i++)
+    {
+      if((anCount[i] >= 2) && ((nAt < 0) || (anCount[i] > anCount[nAt])))
+        nAt = i;
+    }
+    if(nAt < 0)
+      return QStringLiteral("none");
+    int nFrom = -1;
+    int nTo = -1;
+    int nFirstRed = -1;
+    int nLastRed = -1;
+    int nEvery = 0;
+    for(const QPoint &pt : std::as_const(aLine))
+    {
+      if((bVert ? pt.x() : pt.y()) != nAt)
+        continue;
+      const int nPos = bVert ? pt.y() : pt.x();
+      nFrom = (nFrom < 0) ? nPos : qMin(nFrom, nPos);
+      nTo = qMax(nTo, nPos);
+    }
+    for(int nPos = nFrom; nPos <= nTo; nPos++)
+    {
+      if(!setRed.contains(bVert ? QPoint(nAt, nPos) : QPoint(nPos, nAt)))
+        continue;
+      if(nFirstRed < 0)
+        nFirstRed = nPos;
+      else if((nEvery == 0) || (nPos - nLastRed < nEvery))
+        nEvery = nPos - nLastRed;
+      nLastRed = nPos;
+    }
+    return QString("%1 %2=%3-%4 every=%5 from=%6")
+      .arg(nAt).arg(bVert ? "rows" : "cols").arg(nFrom).arg(nTo).arg(nEvery).arg(nFirstRed);
+  };
+  int nCol;
+  int nRow;
+  const QString strRight = line(anCol, true, nCol);
+  const QString strBottom = line(anRow, false, nRow);
+  const auto nStray = std::count_if(aLine.cbegin(), aLine.cend(),
+                                    [&](const QPoint &pt) { return (pt.x() != nCol) && (pt.y() != nRow); });
+  out << " right=" << strRight << " bottom=" << strBottom << " red=" << setRed.size()
+      << " white=" << (aLine.size() - setRed.size()) << " stray=" << nStray << " grid=" << nGrid
+      << " other=" << nOther << "\n";
+}
+
 // View > Overlays > MCU Grid as a user chooses it (see --mcu-grid above)
 static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream &out)
 {
@@ -2970,6 +3132,11 @@ static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream
       mcuGridReport(pGrid, QStringLiteral("grid"), out);
       continue;
     }
+    else if(strStep == "end")
+    {
+      imageEndReport(QStringLiteral("end"), out);
+      continue;
+    }
     else if(strStep.startsWith("scroll=") || strStep.startsWith("size="))
     {
       // Scroll the image window to X;Y (points), or make it W;H
@@ -3011,6 +3178,7 @@ static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream
       const QImage imgAgain = pScreen->grabWindow(pViewer->winId()).toImage();
       int nDiff = 0;
       int nDots = 0;            // the grid's colour
+      int nRed = 0;             // the image end line's
       if(imgShown.size() != imgAgain.size())
         nDiff = -1;
       else
@@ -3023,6 +3191,8 @@ static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream
               nDiff++;
             if((imgShown.pixel(x, y) & 0xFFFFFF) == 0x202020)
               nDots++;
+            if((imgShown.pixel(x, y) & 0xFFFFFF) == 0xFF0000)
+              nRed++;
           }
         }
       }
@@ -3036,6 +3206,7 @@ static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream
                .arg(imgShown.height())
                .arg(nDots)
                .arg(nDiff);
+      out << "harness: image-end buffer: red pixels=" << nRed << "\n";
       continue;
     }
     else
@@ -4290,6 +4461,7 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
             mcuGridMenu(window, opts.strMcuGrid, out);
           if(QAction *pGrid = findAction(window, QStringLiteral("MCU Grid")))
             mcuGridReport(pGrid, QString("file %1").arg(nFileInd), out);
+          imageEndReport(QString("file %1").arg(nFileInd), out);
         }
         if(!opts.strDetailDlg.isEmpty())
         {

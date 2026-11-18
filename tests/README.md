@@ -41,7 +41,8 @@ when it is installed, so Pillow needn't be installed separately).
     - `--zoom PCT` picks that View > Zoom level (`800` for 800%), and
       `--max-zoom-mb N` reports whether showing it took more than N MB;
     - `--check-preview` compares the preview with the decoded image: its size, where
-      mouse positions land in the image, and the pixels drawn, in screen pixels
+      mouse positions land in the image, and the pixels drawn, in screen pixels,
+      with the red line where the image ends inside its last, partial MCUs
       (with `--cycle-channels`, again after the channels, as "preview after
       channels");
     - `--check-histo` checks that the histograms are drawn at screen resolution;
@@ -193,16 +194,24 @@ when it is installed, so Pillow needn't be installed separately).
       each STEP: `toggle` (choose the menu item), `key` (press its shortcut),
       `cmd-g` (press Cmd+G, Edit > Find Next's key on macOS), `zoom=PCT`,
       `channel=NAME` (View > Image Chan), `scroll=X;Y` (scroll the image
-      window there, in points), `size=W;H` (make it that size), `grid` and
-      `buffer`. After each step it prints the check mark and how often Find
-      Next ran. `grid`, and every file after it is shown, print where the grid
-      is drawn: the screen columns and rows its dots are on, their spacing
-      (`gap`) and colours, and how many other pixels differ from the decoded
-      image (`stray`). `buffer` grabs the image window as it was painted (a
-      scroll copies what was shown and paints only what comes into view) and
-      prints how many of its pixels painting it all again changes, and how
-      many have the grid's colour. On a Retina screen the grab has one pixel
-      per point.
+      window there, in points), `size=W;H` (make it that size), `grid`, `end`
+      and `buffer`. After each step it prints the check mark and how often
+      Find Next ran. `grid`, and every file after it is shown, print where the
+      grid is drawn: the screen columns and rows its dots are on, their
+      spacing (`gap`) and colours, and how many other pixels differ from the
+      decoded image and the red line (`stray`). `end`, and every file, print
+      where the red line is drawn where the image ends inside its last,
+      partial MCUs, found from the red and white pixels that differ from the
+      image (use an image that is neither): the screen column down the right
+      and the row along the bottom, the rows and columns each spans, its red
+      dots' spacing (`every`) and the first one's place (`from`), how many
+      pixels are red and white, how many are elsewhere (`stray`), and how
+      many that differ have the grid's colour or another. `buffer` grabs the
+      image window as it was painted (a scroll copies what was shown and
+      paints only what comes into view) and prints how many of its pixels
+      painting it all again changes, how many have the grid's colour, and
+      how many the red line's. On a Retina screen the grab has one pixel per
+      point.
     - `--bars STEP[,STEP...]` (`--bars-at N`; `0` is before any file) prints
       the places of View > Toolbar and View > Status Bar, and whether the
       toolbar, the main window's status bar and the image window's are shown
@@ -338,8 +347,9 @@ Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
 `AD` in its "Tools > Add Camera/SW to DB" section, `MD` in its "Tools >
 Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
 `VB` in its "View > Toolbar and Status Bar" section, `PS` in its "File > Print
-Setup" section, `RF` in its "File > Recent File" section, and `NB` in its "The
-toolbar's New button" section);
+Setup" section, `RF` in its "File > Recent File" section, `NB` in its "The
+toolbar's New button" section, and `IE` in its "The red line where the image
+ends inside its MCUs" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

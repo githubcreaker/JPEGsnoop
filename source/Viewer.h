@@ -48,10 +48,12 @@ public:
   void setImage(const QImage &img, double dZoom);   // image is shared, not copied
   void setZoom(double dZoom);
   void setMcuGrid(const QSize &sizeMcu);            // empty: no grid
+  void setFrameSize(const QSize &sizeFrame);        // a JPEG's own size; empty: none
   bool widgetToImage(const QPointF &ptWidget, QPoint &ptImg) const;
 
   const QImage &image() const { return m_img; }
   double zoom() const { return m_dZoom; }
+  const QSize &frameSize() const { return m_sizeFrame; }
 
 signals:
   void moved(QPoint ptImg, bool bInside);      // bInside: ptImg is in the image
@@ -67,12 +69,15 @@ protected:
 private:
   double logicalPerImagePixel() const;
   void rebuild();             // reduced copy and widget size for zoom and screen
-  void paintMcuGrid(QPainter &painter, const QRect &rectDirty);
+  QRect screenRect(const QRect &rectDirty) const;   // in screen pixels, on the image
+  void paintImageEnd(QPainter &painter, const QRect &rectScreen);
+  void paintMcuGrid(QPainter &painter, const QRect &rectScreen);
 
   QImage m_img;
   QImage m_imgReduced;        // only below 100%
   double m_dZoom;
   QSize m_sizeMcu;            // MCU grid, in image pixels (empty: none)
+  QSize m_sizeFrame;          // where the image ends inside its MCUs (empty: none)
 };
 
 class Q_Viewer : public QWidget
