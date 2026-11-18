@@ -2815,6 +2815,65 @@ done, and the PDF printed. Nine more deliberate breaks each fail their own cases
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### The toolbar's Copy and About buttons
+
+Windows' toolbar had Copy and About buttons; the port's had neither. Now, as on Windows:
+- **Copy** copies the part of the report that is selected, and is off while none is
+  (MFC's `CRichEditView` command, on only with a selection: `OnUpdateNeedSel()`). It is
+  Edit > Copy itself, so it puts the same plain text and HTML on the clipboard.
+- **About** opens the About box: it is Help > About JPEGsnoop itself.
+- **Their tips are Windows':** "Copy the selection and put it on the Clipboard" and
+  "About JPEGsnoop" in the status bar, and "Copy" and "About" as their tooltips.
+- **Their places are Windows':** New, Open, Save Log | Copy | Print, About, with the
+  separators where Windows had them. The image's zoom, which this version adds, follows
+  as before. (Before, Print followed Save Log with no separator.)
+
+**Changes from Windows:**
+- **No Cut or Paste buttons.** Windows had them beside Copy, but both would change the
+  report, which is read-only there (`SetReadOnly(true)` in `CJPEGsnoopView`) and here.
+- **The icons** are macOS's own symbols on macOS, as for the other buttons (Qt's theme
+  names `edit-copy` and `help-about`). Without the theme's icon, Copy has the image set's
+  `editcopy.png`, and About the app's own art, as the About box shows it.
+
+**Unchanged from Windows:** what each button does, when Copy is on, and the other
+buttons.
+
+**Tests:** 10 new `TB` cases (1,057 in all).
+- **The driver:** `gui --buttons` prints the toolbar's buttons in order, each by its
+  tooltip, and for each its tip, key, menus, whether it is on and whether it has an
+  icon. `--about-button` opens the About box with the button, as `--about` does with the
+  menu item, and `--edit`'s `button:copy` step clicks Copy.
+- **The cases:** the toolbar's order and separators; each button's tips, key, menu and
+  icon, and Copy off with nothing selected; Copy clicked with the whole report or a part
+  selected (the same clipboard text and formats as Edit > Copy), and with nothing
+  selected, also before any file (nothing copied); About opening the About box, which
+  then closes.
+
+On the previous commit all 10 fail. Eleven deliberate breaks each fail their own cases:
+- **Copy:** not on the toolbar, 7 fail; a button of its own that is always on, 6 fail;
+  no tip, 1 fails; no icon without the theme's, 1 fails.
+- **About:** not on the toolbar, 4 fail; before Print, 1 fails; no tip, 1 fails; the
+  menu item's name as its tooltip, 2 fail; no icon without the theme's, 1 fails.
+- **Both:** no separators, 1 fails.
+
+**Checks:**
+- **All 1,057 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** finds nothing new in the changed files.
+- **On the macOS platform,** Qt's theme gives both buttons an icon, as it does New's and
+  Zoom In's (checked with a small Qt app, which showed no window).
+- **Not checked:** the toolbar's look in the app, and its tooltips and status bar tips,
+  on the macOS platform.
+
+**Still open:**
+- **Not yet ported:** Windows' command-line mode (its options; see "Opening a file from
+  outside the app"). File > Open's list of types also lacks Windows' "AVI Movie".
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

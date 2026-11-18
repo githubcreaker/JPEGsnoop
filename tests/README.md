@@ -66,14 +66,19 @@ when it is installed, so Pillow needn't be installed separately).
       `--mark X,Y/X,Y...` first clicks the image at those pixels after each file;
       `--auto-reprocess` turns on Automatic Reprocessing and `--no-decode-image`
       turns off Decode Image.
-    - `--about` chooses Help > About JPEGsnoop after the first file and prints
+    - `--about` chooses Help > About JPEGsnoop after the first file
+      (`--about-button` clicks the toolbar's About button instead) and prints
       the item's menu role, the dialog's texts and links, and its icon's size,
       pixel ratio and number of colours, then clicks OK.
+    - `--buttons` prints, after the first file, the toolbar's buttons in
+      order, each by its tooltip (`-` for a separator), and for each its tip,
+      key, menus, whether it is on and whether it has an icon.
     - `--edit STEPS` runs STEPS on the report after each file (and, with
       `--edit-before`, once before the first): a comma-separated list of
       `state`, `selectall` and `copy` (choose Edit > Select All or Copy),
-      `key:NAME` (press `selectall`, `copy`, `cut`, `paste`, `undo`,
-      `backspace` or `shift-up`, as Cmd+A and so on, in the focused widget),
+      `button:copy` (click the toolbar's Copy button), `key:NAME` (press
+      `selectall`, `copy`, `cut`, `paste`, `undo`, `backspace` or
+      `shift-up`, as Cmd+A and so on, in the focused widget),
       `type:TEXT`, `click` (click in the report) and `unfocus`. The keys and
       clicks go through Qt's shortcut handling, as a user's do (QtTest). After
       each step it prints how much of the report is selected (`all`, `part` or
@@ -376,8 +381,9 @@ Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
 `VB` in its "View > Toolbar and Status Bar" section, `PS` in its "File > Print
 Setup" section, `RF` in its "File > Recent File" section, `NB` in its "The
 toolbar's New button" section, `IE` in its "The red line where the image
-ends inside its MCUs" section, and `OF` in its "Opening a file from outside the
-app: a drop, Finder, the command line" section);
+ends inside its MCUs" section, `OF` in its "Opening a file from outside the
+app: a drop, Finder, the command line" section, and `TB` in its "The toolbar's
+Copy and About buttons" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

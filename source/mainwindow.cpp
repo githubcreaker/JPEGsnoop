@@ -279,7 +279,6 @@ void MainWindow::createActions(void)
   newAct->setShortcuts(QKeySequence::New);
   newAct->setStatusTip(tr("Create a new document"));
   connect(newAct, &QAction::triggered, this, &MainWindow::onFileNew);
-  fileToolBar->addAction(newAct);
   addAction(newAct);
   imgWindow->addAction(newAct);
 
@@ -287,7 +286,6 @@ void MainWindow::createActions(void)
   openAct = new QAction(openIcon, tr("&Open Image..."), this);
   openAct->setShortcuts(QKeySequence::Open);
   openAct->setStatusTip(tr("Open"));
-  fileToolBar->addAction(openAct);
   connect(openAct, &QAction::triggered, this, &MainWindow::open);
 
   const QIcon saveIcon = QIcon::fromTheme("document-save", QIcon(rsrcPath + "/filesave.png"));
@@ -295,7 +293,6 @@ void MainWindow::createActions(void)
   saveLogAct->setShortcuts(QKeySequence::Save);
   saveLogAct->setEnabled(false);
   saveLogAct->setStatusTip(tr("Save Log"));
-  fileToolBar->addAction(saveLogAct);
   connect(saveLogAct, &QAction::triggered, this, &MainWindow::saveLog);
 
   reprocessAct = new QAction(tr("Reprocess File"), this);
@@ -317,10 +314,7 @@ void MainWindow::createActions(void)
   printAct = new QAction(printIcon, tr("&Print..."), this);
   printAct->setShortcuts(QKeySequence::Print);
   printAct->setStatusTip(tr("Print the document"));
-  fileToolBar->addAction(printAct);
   connect(printAct, &QAction::triggered, this, &MainWindow::filePrint);
-
-  fileToolBar->addSeparator();
 
   printPreviewAct = new QAction(tr("Print Preview"), this);
 //   printPreviewAct->setStatusTip(tr("Print the document"));
@@ -357,8 +351,10 @@ void MainWindow::createActions(void)
   // and Find while the report has any text (also when it only holds the error
   // for a file that couldn't be opened or was empty); and Find Next while it
   // has text and there has been a search. See updateTextActions().
-  copyAct = new QAction(tr("&Copy"), this);
+  const QIcon copyIcon = QIcon::fromTheme("edit-copy", QIcon(rsrcPath + "/editcopy.png"));
+  copyAct = new QAction(copyIcon, tr("&Copy"), this);
   copyAct->setShortcuts(QKeySequence::Copy);
+  copyAct->setStatusTip(tr("Copy the selection and put it on the Clipboard"));
   copyAct->setEnabled(false);
   connect(copyAct, &QAction::triggered, textEdit, &QPlainTextEdit::copy);
   connect(textEdit, &QPlainTextEdit::copyAvailable, copyAct, &QAction::setEnabled);
@@ -444,13 +440,11 @@ void MainWindow::createActions(void)
   zoomInAct = new QAction(zoomInIcon, tr("Zoom In"), this);
   zoomInAct->setData(PRV_ZOOM_IN);
   zoomInAct->setShortcuts(QKeySequence::ZoomIn);
-  fileToolBar->addAction(zoomInAct);
 
   const QIcon zoomOutIcon = QIcon::fromTheme("zoom-out", QIcon(rsrcPath + "/zoomout.png"));
   zoomOutAct = new QAction(zoomOutIcon, tr("Zoom Out"), this);
   zoomOutAct->setData(PRV_ZOOM_OUT);
   zoomOutAct->setShortcuts(QKeySequence::ZoomOut);
-  fileToolBar->addAction(zoomOutAct);
 
   zoomInOutGroup = new QActionGroup(this);
   zoomInOutGroup->addAction(zoomInAct);
@@ -662,10 +656,31 @@ void MainWindow::createActions(void)
   connect(detailedDecodeAct, &QAction::triggered, this, &MainWindow::onDetailedDecode);
 
   // Help menu
-  aboutAct = new QAction(tr("&About JPEGsnoop..."), this);
+  // (Without the theme's icon, the app's own art, as the About box shows it)
+  const QIcon aboutIcon = QIcon::fromTheme("help-about", QIcon(AboutDialog::iconPixmap(1.0)));
+  aboutAct = new QAction(aboutIcon, tr("&About JPEGsnoop..."), this);
+  aboutAct->setStatusTip(tr("About JPEGsnoop"));
+  aboutAct->setToolTip(tr("About"));
   // On macOS: JPEGsnoop > About JPEGsnoop, where Mac apps have it
   aboutAct->setMenuRole(QAction::AboutRole);
   connect(aboutAct, &QAction::triggered, this, &MainWindow::onAbout);
+
+  // The toolbar, as on Windows: New, Open and Save Log; Copy (Windows' Cut
+  // and Paste, beside it, could only change the report, which is read-only
+  // there and here); Print and About. Then the image's zoom, which this
+  // version adds. Copy and About are the Edit and Help items themselves, so
+  // Copy is on only while part of the report is selected, as Windows' was.
+  fileToolBar->addAction(newAct);
+  fileToolBar->addAction(openAct);
+  fileToolBar->addAction(saveLogAct);
+  fileToolBar->addSeparator();
+  fileToolBar->addAction(copyAct);
+  fileToolBar->addSeparator();
+  fileToolBar->addAction(printAct);
+  fileToolBar->addAction(aboutAct);
+  fileToolBar->addSeparator();
+  fileToolBar->addAction(zoomInAct);
+  fileToolBar->addAction(zoomOutAct);
 
   if(DEBUG_EN)
     m_pAppConfig->DebugLogAdd("MainWindow::createActions() End");

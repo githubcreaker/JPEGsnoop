@@ -3846,6 +3846,43 @@ for kind in ("print", "setup"):
 outside_case("OF_finder_in_print_printed", "in-print=finder=ok_420.jpg",
              rx("harness: outside in-print=finder=ok_420.jpg: printed: pdf pages=") + "[1-9]")
 
+
+# --- The toolbar's Copy and About buttons ------------------------------------------
+# Windows' toolbar: New, Open, Save Log | Cut, Copy, Paste | Print, About. Copy
+# and About are the Edit and Help items themselves, with Windows' tips; Cut and
+# Paste (which could only change the read-only report) aren't added. The zoom
+# follows, as before. gui --buttons prints the toolbar and each button.
+def button_case(cid, extra, expect, names=("ok_444.jpg",), forbid="-"):
+    case(cid, "TB", "gui", list(names), extra, timeout=30, expect=expect, forbid=forbid)
+
+
+button_case("TB_layout", "--buttons",
+            rx("harness: buttons: New|Open Image|Save Log|-|Copy|-|Print|About|-|Zoom In|Zoom Out") + "$")
+button_case("TB_copy", "--buttons",
+            rx('harness: button Copy: tip="Copy the selection and put it on the Clipboard" key=Ctrl+C menus=&Edit '
+               "on=0 icon=1") + "$")
+button_case("TB_about", "--buttons",
+            rx('harness: button About: tip="About JPEGsnoop" key= menus=&Help on=1 icon=1') + "$")
+# Clicked, Copy copies the selection, as Edit > Copy does (the whole report,
+# part of it, with the same clipboard formats); without one it is off, and a
+# click does nothing, also before any file
+button_case("TB_copy_all", "--edit selectall,button:copy",
+            "harness: edit button:copy: selected=all .* clipboard=report$")
+button_case("TB_copy_part", "--edit selectall,key:shift-up,button:copy",
+            "harness: edit button:copy: selected=part chars=[0-9]+ copy=1 .* clipboard=selection$")
+button_case("TB_copy_html", "--edit selectall,button:copy",
+            f"harness: edit clipboard formats=text/plain,text/html html colours={LIGHT_COLOURS} fonts=Courier "
+            f"report colours={LIGHT_COLOURS}$")
+button_case("TB_copy_off", "--edit button:copy",
+            "harness: edit button:copy: selected=none chars=[0-9]+ copy=0 .* report=same clipboard=unchanged$")
+button_case("TB_copy_before_file", "--edit button:copy --edit-before",
+            "harness: edit button:copy: selected=none chars=[0-9]+ copy=0 .* clipboard=unchanged$")
+# About opens the About box, as Help > About JPEGsnoop does
+button_case("TB_about_opens", "--about-button",
+            f"harness: about: About JPEGsnoop \\(JPEGsnoop / Version {ver_re} / Copyright [^ ]+ 2017 Calvin Hass / "
+            "Qt 6\\.[0-9]+\\.[0-9]+\\)$")
+button_case("TB_about_closes", "--about-button", "harness: about closed=1$")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

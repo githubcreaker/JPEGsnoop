@@ -90,15 +90,22 @@
 //     --auto-reprocess turns on Automatic Reprocessing; --no-decode-image
 //     turns off Options > Scan Segment > Decode Image.
 //
-// gui ... --about
-//     After the first file, choose Help > About JPEGsnoop and print its menu
-//     role, what the dialog shows (texts, links, the icon's size, pixel ratio
-//     and number of colours), then click OK.
+// gui ... --about | --about-button
+//     After the first file, choose Help > About JPEGsnoop (or click the
+//     toolbar's About button) and print its menu role, what the dialog shows
+//     (texts, links, the icon's size, pixel ratio and number of colours),
+//     then click OK.
+//
+// gui ... --buttons
+//     After the first file, print the toolbar's buttons in order, each by its
+//     tooltip ("-" for a separator), and for each its tip, key, menus,
+//     whether it is on and whether it has an icon.
 //
 // gui ... --edit STEPS [--edit-before]
 //     After each file (and with --edit-before, also once before the first),
 //     run STEPS on the report, a comma-separated list of: state (nothing),
-//     selectall and copy (choose Edit > Select All or Copy), key:NAME (press
+//     selectall and copy (choose Edit > Select All or Copy), button:copy
+//     (click the toolbar's Copy button), key:NAME (press
 //     selectall, copy, cut, paste, undo, backspace or shift-up, as Cmd+A and
 //     so on, in the focused widget), type:TEXT (type it), click (click at the
 //     report's top left) and unfocus (take the focus from the report). The
@@ -448,7 +455,8 @@ static void usage()
           "                         [--export-menus | --export-menus-cancel | --export-menus-all]\n"
           "                         [--old-numbered] [--replace]\n"
           "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
-          "                          [--auto-reprocess] [--no-decode-image]] [--about]\n"
+          "                          [--auto-reprocess] [--no-decode-image]]\n"
+          "                         [--about | --about-button] [--buttons]\n"
           "                         [--edit STEPS [--edit-before]] [--overlay STEPS [--overlay-at N]]\n"
           "                         [--offset STEPS [--offset-at N]] [--search STEPS [--search-at N]]\n"
           "                         [--lookup STEPS [--lookup-at N] [--hover X,Y[/X,Y...]]]\n"
@@ -1189,6 +1197,8 @@ struct GuiOptions
   bool bAutoReprocess = false;    // --auto-reprocess
   bool bNoDecodeImage = false;    // --no-decode-image
   bool bAbout = false;            // --about
+  bool bAboutButton = false;      // --about-button
+  bool bButtons = false;          // --buttons
   QString strEdit;                // --edit STEPS
   bool bEditBefore = false;       // --edit-before
   QString strOverlay;             // --overlay STEPS
@@ -4128,13 +4138,60 @@ static void outsideSteps(MainWindow &window, const GuiOptions &opts, QTextStream
   out.flush();
 }
 
-// Help > About JPEGsnoop as a user chooses it (see --about above)
-static void aboutMenu(MainWindow &window, QTextStream &out)
+// The toolbar's button for pAction, if it has one
+static QToolButton *toolbarButton(MainWindow &window, QAction *pAction)
+{
+  QToolBar *pTb = window.findChild<QToolBar *>();
+  return (pTb && pAction) ? qobject_cast<QToolButton *>(pTb->widgetForAction(pAction)) : nullptr;
+}
+
+// The toolbar's buttons (see --buttons above)
+static void toolbarButtons(MainWindow &window, QTextStream &out)
+{
+  QToolBar *pTb = window.findChild<QToolBar *>();
+  if(!pTb)
+  {
+    out << "harness: buttons: no toolbar\n";
+    return;
+  }
+  QStringList astrButtons;
+  QStringList astrLines;
+  for(QAction *pAction : pTb->actions())
+  {
+    if(pAction->isSeparator())
+    {
+      astrButtons << QStringLiteral("-");
+      continue;
+    }
+    const QToolButton *pButton = qobject_cast<QToolButton *>(pTb->widgetForAction(pAction));
+    const QString strName = pButton ? pButton->toolTip() : QStringLiteral("?");
+    astrButtons << strName;
+    QStringList astrMenus;
+    for(QObject *pObj : pAction->associatedObjects())
+    {
+      if(const QMenu *pMenu = qobject_cast<QMenu *>(pObj))
+        astrMenus << pMenu->title();
+    }
+    astrLines << QString("harness: button %1: tip=\"%2\" key=%3 menus=%4 on=%5 icon=%6")
+                   .arg(strName, pAction->statusTip(), pAction->shortcut().toString(QKeySequence::PortableText),
+                        astrMenus.isEmpty() ? QStringLiteral("none") : astrMenus.join('|'))
+                   .arg((pButton && pButton->isEnabled()) ? 1 : 0)
+                   .arg((pButton && !pButton->icon().isNull()) ? 1 : 0);
+  }
+  out << "harness: buttons: " << astrButtons.join('|') << "\n";
+  for(const QString &strLine : astrLines)
+    out << strLine << "\n";
+}
+
+// Help > About JPEGsnoop as a user chooses it, or the toolbar's About button
+// as a user clicks it (see --about above)
+static void aboutMenu(MainWindow &window, bool bButton, QTextStream &out)
 {
   QAction *pAction = findAction(window, QStringLiteral("&About JPEGsnoop..."));
-  if(!pAction || !pAction->isEnabled())
+  QToolButton *pButton = bButton ? toolbarButton(window, pAction) : nullptr;
+  if(!pAction || !pAction->isEnabled() || (bButton && !pButton))
   {
-    out << "harness: menu About unavailable\n";
+    out << "harness: " << (bButton ? "button" : "menu") << " About unavailable\n";
     return;
   }
   out << "harness: about role=" << ((pAction->menuRole() == QAction::AboutRole) ? "about" : "other") << "\n";
@@ -4183,7 +4240,10 @@ static void aboutMenu(MainWindow &window, QTextStream &out)
       static_cast<QDialog *>(pDlg)->reject();
   });
   timer.start(50);
-  pAction->trigger();
+  if(pButton)
+    pButton->click();
+  else
+    pAction->trigger();
   QCoreApplication::processEvents();
   timer.stop();
 
@@ -4473,6 +4533,16 @@ static void editSteps(MainWindow &window, const QString &strSteps, QTextStream &
       QAction *pAction = findAction(window, (strStep == "copy") ? QStringLiteral("&Copy") : QStringLiteral("Select All"));
       if(pAction)
         pAction->trigger();    // does nothing while disabled, as the menu
+    }
+    else if(strStep == "button:copy")
+    {
+      QToolButton *pButton = toolbarButton(window, findAction(window, QStringLiteral("&Copy")));
+      if(!pButton)
+      {
+        out << "harness: edit: no Copy button\n";
+        continue;
+      }
+      pButton->click();        // does nothing while disabled, as a click
     }
     else if(strStep.startsWith("key:"))
     {
@@ -4790,8 +4860,10 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           checkTheme(window, out);
         if(opts.nExportMenus != 0)
           exportMenus(window, opts, strSettingsDir + "/menu-export-" + QString::number(nFileInd), out);
-        if(opts.bAbout && (nFileInd == 1))
-          aboutMenu(window, out);
+        if(opts.bButtons && (nFileInd == 1))
+          toolbarButtons(window, out);
+        if((opts.bAbout || opts.bAboutButton) && (nFileInd == 1))
+          aboutMenu(window, opts.bAboutButton, out);
         if(!opts.strEdit.isEmpty())
           editSteps(window, opts.strEdit, out);
         if(!opts.strPrint.isEmpty() && (nFileInd == opts.nPrintAt))
@@ -5679,6 +5751,8 @@ int main(int argc, char **argv)
   guiOpts.bAutoReprocess = args.removeAll("--auto-reprocess") > 0;
   guiOpts.bNoDecodeImage = args.removeAll("--no-decode-image") > 0;
   guiOpts.bAbout = args.removeAll("--about") > 0;
+  guiOpts.bAboutButton = args.removeAll("--about-button") > 0;
+  guiOpts.bButtons = args.removeAll("--buttons") > 0;
   guiOpts.bEditBefore = args.removeAll("--edit-before") > 0;
   ExportOptions exportOpts;
   exportOpts.sJpeg.bExtractAll = args.removeAll("--all") > 0;
