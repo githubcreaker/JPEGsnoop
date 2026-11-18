@@ -2247,6 +2247,127 @@ and checked at the start. Eight deliberate breaks each fail their own cases:
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### File > Print Setup
+
+File > Print Setup did nothing: the menu item had no handler. Print and Print Preview
+each made a printer of their own, so nothing chosen in one carried over to the other.
+Now, as on Windows:
+- **Print Setup** shows the page setup dialog (on macOS, the system's page layout panel)
+  for the printer, paper and orientation, with MFC's status tip "Change the printer and
+  printing options". It needs no file open.
+- **Print, Print Preview and Print Setup share one printer** for the session, as MFC's
+  shared printer settings did. What one of them sets, the others use: for example,
+  landscape chosen in Print Setup is what Print prints and Print Preview shows, and so is
+  a change made in Print's dialog. The setting isn't saved.
+- **A page range is for one job:** each Print and Print Preview starts with every page.
+  Choosing Selection for one job isn't kept for the next, which on the shared printer
+  would have printed or previewed only a selection that might be gone.
+
+**Found and fixed** (the Qt port's):
+- **Print Setup did nothing.**
+- **Choices didn't carry over.** Print and Print Preview each made a new printer, so the
+  paper and orientation chosen for one were gone for the other and for the next job.
+
+**Changes from Windows:**
+- **The dialog** is the system's page layout panel on macOS, which sets the paper, the
+  orientation and the printer to format for, rather than Windows' Print Setup dialog.
+  For a printer that makes PDF files it is this version's own (see "Second check"
+  below). The menu item keeps Windows' name.
+- **`MainWindow::setPrintDialogRunner()`** runs Print Setup's and Print's system
+  dialogs, and shows them unless something else is set. On macOS they are the system's
+  panels, which the test driver can't answer, so it sets its own. Print Preview's
+  dialog and Print Setup's own dialog are Qt windows, so the driver answers them as it
+  does other dialogs.
+
+**Unchanged from Windows:** the name and place (after Print Preview), shared for the
+session, not saved.
+
+**Tests:** 21 new `PS` cases (906 in all).
+- **The driver:** `gui --print STEP[,STEP...]` (`--print-at N`) prints the item's place.
+  It makes the shared printer write a PDF in the settings folder, so nothing is ever
+  printed. Even on the test platform, the printer is this Mac's real default printer
+  until then. It answers Print Setup's dialog (landscape, portrait, A4, Letter, Cancel)
+  and Print's (all, Selection, landscape, Cancel), and refuses Print if it isn't writing
+  a PDF. It reads the PDF's pages and page size, and Print Preview's printer and pages.
+  It can also select text in the report.
+
+The cases cover:
+- **The item:** its place and tip.
+- **Print Setup:** its dialog edits the shared printer; landscape, portrait again,
+  Letter, Letter in landscape, and Cancel, each as Print then prints it; landscape as
+  Print Preview shows it, and twice in a row; before any file is open.
+- **Sharing:** Print's and Print Preview's printer is the shared one; landscape chosen
+  in Print's dialog is what Print Preview shows next; Cancel in Print writes nothing.
+- **Selection:** offered only when report text is selected; printing it gives one page;
+  the next Print and Print Preview are of every page again.
+
+The 5 cases that don't choose Print all fail on the previous commit. The 16 that do
+weren't run there, as its Print shows the system's print panel, which could print to a
+real printer; the driver's copy for that run skips Print. Nine deliberate breaks each
+fail their own cases:
+- **Print Setup:** no handler, 9 fail; its dialog on a printer of its own, 9 fail; no
+  tip, 1 fails.
+- **Print:** a printer of its own, 12 fail; the range not reset, 1 fails; Selection not
+  offered, 1 fails.
+- **Print Preview:** a printer of its own, 4 fail; the range not reset, 1 fails.
+- **A new printer each time it is asked for:** all 21 fail (the driver crashes: the
+  printer it set up is gone).
+
+**Second check:** a review before the commit found one problem, reproduced and now
+fixed. Qt's macOS page setup dialog does nothing for a printer that makes PDF files:
+its `exec()` returns Rejected at once, and `setVisible()` returns early
+([`qpagesetupdialog_mac.mm`](https://github.com/qt/qtbase/blob/dev/src/printsupport/dialogs/qpagesetupdialog_mac.mm)).
+The shared printer is one when no printer is set up, and after Save as PDF in the print
+panel, which sets a `.pdf` file. Print Setup then opened nothing, for the rest of the
+session. The tests didn't see it, because the driver answered every page setup dialog
+itself.
+
+Now, on macOS, Print Setup shows this version's own dialog for such a printer. It offers
+the paper size (the common sizes, and the printer's own if it isn't one of them) and
+the orientation, starting from the printer's, with OK and Cancel. It changes only those:
+the printer keeps making PDF files, to the same file, with the same margins. The driver
+now answers the page layout panel as Qt's macOS dialog does, doing nothing for such a
+printer, and answers the new dialog on screen. Its printer line gains the format and the
+margins. It also gains `printer=native` (this Mac's default printer, which only Print
+Setup and Print Preview use, as the driver's Print refuses it) and `print=save-pdf`.
+
+9 new cases, one replaced (29 `PS`, 914 in all), cover:
+- **The new dialog:** its fields, starting from the printer's paper and orientation;
+  keeping the margins and the file.
+- **The system's dialog** for this Mac's printer, and Print Preview after it.
+- **Save as PDF** then Print Setup: the new dialog shows, and Print then uses what it
+  set.
+
+The 6 of them that don't choose Print fail on the previous commit; the 3 that do weren't
+run there. Six new breaks each fail their own cases:
+- **The earlier code,** which showed Qt's dialog for every printer: 14 fail.
+- **Switching the printer to the system's** before Print Setup, so it stops making PDF
+  files: 15 fail.
+- **The new dialog:** OK not applied, 11 fail; only the paper, 10 fail; only the
+  orientation, 4 fail; not starting from the printer's, 5 fail.
+
+The 9 earlier breaks still fail their cases. The one that gives Print Setup's dialog a
+printer of its own now fails 4, as only the system's dialog is given the printer.
+
+**Checks:**
+- **All 914 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** found one new finding, a parameter named `printer` hiding the new
+  `printer()`; it is renamed, and there is nothing else new.
+- **Not checked:** the system's page layout and print panels themselves; the new
+  dialog's look on the macOS platform; printing on paper. The shared printer was checked
+  with PDF output, and with this Mac's printer for Print Setup and Print Preview only.
+
+**Still open:**
+- **Windows' red line** where the image ends inside its last MCUs (see View > Overlays >
+  MCU Grid).
+- **Menu items not yet ported:** File > Recent File, and the toolbar's New button.
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

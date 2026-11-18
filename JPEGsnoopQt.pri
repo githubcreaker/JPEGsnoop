@@ -85,6 +85,7 @@ SOURCES += \
     $$PWD/source/finddialog.cpp \
     $$PWD/source/lookupdialog.cpp \
     $$PWD/source/offsetdialog.cpp \
+    $$PWD/source/pdfpagesetupdialog.cpp \
     $$PWD/source/overlaydialog.cpp \
     $$PWD/source/q_decodedetaildlg.cpp \
     $$PWD/source/reportview.cpp \
@@ -115,6 +116,7 @@ HEADERS += \
     $$PWD/source/finddialog.h \
     $$PWD/source/lookupdialog.h \
     $$PWD/source/offsetdialog.h \
+    $$PWD/source/pdfpagesetupdialog.h \
     $$PWD/source/overlaydialog.h \
     $$PWD/source/q_decodedetaildlg.h \
     $$PWD/source/reportview.h \

@@ -26,9 +26,13 @@
 #include <QPlainTextEdit>
 #include <QPainter>
 
+#include <functional>
+#include <memory>
+
 #include "exportdialogs.h"
 #include "reportview.h"
 
+class QDialog;
 class QPrinter;
 class QProgressDialog;
 struct BatchList;
@@ -58,6 +62,16 @@ public:
   // driver uses them). Both act on the file shown; Export JPEG analyzes it
   // again first, and adds what it did to the report.
   bool exportJpeg(const QString &strOut, const ExportJpegSettings &sSettings);
+
+  // File > Print, Print Preview and Print Setup share one printer, as on
+  // Windows, for the session (made when first needed)
+  QPrinter &printer();
+
+  // Runs Print Setup's and Print's system dialogs: exec() unless set. On
+  // macOS they are the system's page layout and print panels, which the test
+  // driver can't answer, so it sets its own. (Not Print Setup's dialog for a
+  // printer that makes PDF files, which is this version's own.)
+  void setPrintDialogRunner(std::function<int(QDialog &)> fnRun);
   bool exportTiff(const QString &strOut, FileTiff::teFormat eFormat, QString &strError);
   bool canExportTiff();
   bool canExportYcc();
@@ -84,6 +98,7 @@ private slots:
   void onConfig();
   void filePrint();
   void filePrintPreview();
+  void filePrintSetup();
   void printPreview(QPrinter *);
   void onExportJpeg();
   void onExportTiff();
@@ -104,6 +119,9 @@ private slots:
 private:
   MainWindow &operator = (const MainWindow&);
   MainWindow(MainWindow&);
+
+  std::unique_ptr<QPrinter> m_pPrinter;                       // see printer()
+  std::function<int(QDialog &)> m_fnRunPrintDialog;           // see setPrintDialogRunner()
   
   void createActions(void);
   void createMenus(void);

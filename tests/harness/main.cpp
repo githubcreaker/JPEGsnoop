@@ -259,6 +259,25 @@
 //     shorter or stayed the same. After every file, print the same as
 //     "harness: bars file N:".
 //
+// gui ... --print STEP[,STEP...] [--print-at N]
+//     After the first file (or file N; 0 is before any file), print the
+//     place of File > Print Setup in the menu, make the shared printer write
+//     a PDF in the settings folder (so nothing is printed, and the system's
+//     panels, which the driver can't answer, are never shown), and print its
+//     orientation, paper and range. Then do each STEP: setup=landscape,
+//     setup=portrait, setup=a4, setup=letter or setup=cancel (choose Print
+//     Setup and answer its dialog so: this version's own for a printer that
+//     makes PDF files, or the system's, as Qt's macOS one, which does
+//     nothing for such a printer), print, print=selection, print=landscape,
+//     print=save-pdf (as Save as PDF in the system's print panel) or
+//     print=cancel (choose Print and answer its dialog so; the PDF's pages and
+//     first page size are printed), preview (choose Print Preview, print its
+//     printer's orientation and its pages, and close it), printer=native or
+//     printer=pdf (make the printer this Mac's default, which Print refuses,
+//     or a PDF again), select=N, select-all and select-none (select the
+//     report's first N characters, all of it, or none). Print each dialog's
+//     printer and options when it shows, and the printer after each step.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -266,6 +285,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
@@ -283,9 +303,15 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
+#include <QPageSetupDialog>
+#include <QPageSize>
 #include <QPalette>
 #include <QPixmap>
 #include <QPointer>
+#include <QPrintDialog>
+#include <QPrintPreviewDialog>
+#include <QPrintPreviewWidget>
+#include <QPrinter>
 #include <QProcess>
 #include <QProgressBar>
 #include <QProgressDialog>
@@ -306,6 +332,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
+#include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
 #include <QTextStream>
@@ -365,6 +392,7 @@ static void usage()
           "                         [--db-dir NAME [--db-dir-mode OCTAL]]\n"
           "                         [--mcu-grid STEP[,STEP...] [--mcu-grid-at N]]\n"
           "                         [--bars STEP[,STEP...] [--bars-at N]]\n"
+          "                         [--print STEP[,STEP...] [--print-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1087,6 +1115,8 @@ struct GuiOptions
   int nMcuGridAt = 1;             // --mcu-grid-at N
   QString strBars;                // --bars STEP[,STEP...]
   int nBarsAt = 1;                // --bars-at N
+  QString strPrint;               // --print STEP[,STEP...]
+  int nPrintAt = 1;               // --print-at N
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -3079,6 +3109,228 @@ static void barsMenu(MainWindow &window, const QString &strSteps, QTextStream &o
   out.flush();
 }
 
+// A PDF the printer wrote: its pages, and the first page's size in points
+static QString pdfSummary(const QString &strPath)
+{
+  QFile file(strPath);
+  if(!file.open(QIODevice::ReadOnly))
+    return QStringLiteral("pdf=none");
+  const QString str = QString::fromLatin1(file.readAll());
+  static const QRegularExpression rePage(QStringLiteral("/Type\\s*/Page[^s]"));
+  static const QRegularExpression reBox(
+    QStringLiteral("/MediaBox\\s*\\[\\s*0\\s+0\\s+([0-9.]+)\\s+([0-9.]+)\\s*\\]"));
+  int nPages = 0;
+  for(QRegularExpressionMatchIterator it = rePage.globalMatch(str); it.hasNext(); it.next())
+    nPages++;
+  const QRegularExpressionMatch match = reBox.match(str);
+  if(!match.hasMatch())
+    return QString("pdf pages=%1 page=-").arg(nPages);
+  const double dW = match.captured(1).toDouble();
+  const double dH = match.captured(2).toDouble();
+  return QString("pdf pages=%1 page=%2x%3 (%4)")
+           .arg(nPages)
+           .arg(qRound(dW))
+           .arg(qRound(dH))
+           .arg((dW > dH) ? "landscape" : "portrait");
+}
+
+// File > Print Setup, Print and Print Preview as a user chooses them (see
+// --print above). The shared printer writes a PDF in strDir: nothing is ever
+// sent to a printer, and the system's panels are never shown.
+static void printMenu(MainWindow &window, const QString &strSteps, const QString &strDir, QTextStream &out)
+{
+  QAction *pSetup = findAction(window, QStringLiteral("Print Setup..."));
+  QAction *pPrint = findAction(window, QStringLiteral("&Print..."));
+  QAction *pPreview = findAction(window, QStringLiteral("Print Preview"));
+  if(!pSetup || !pPrint || !pPreview)
+  {
+    out << "harness: menu Print Setup unavailable\n";
+    return;
+  }
+  out << "harness: print " << menuPlace(pSetup) << "\n";
+
+  QPrinter &rPrinter = window.printer();
+  const QString strPdf = QDir(strDir).filePath(QStringLiteral("print.pdf"));
+  rPrinter.setOutputFormat(QPrinter::PdfFormat);
+  rPrinter.setOutputFileName(strPdf);
+  auto printerState = [&rPrinter, &strPdf]() {
+    const QPageLayout layout = rPrinter.pageLayout();
+    const QPrinter::PrintRange eRange = rPrinter.printRange();
+    const QMarginsF margins = layout.margins(QPageLayout::Millimeter);
+    const QString strFormat = (rPrinter.outputFormat() == QPrinter::NativeFormat) ? QStringLiteral("native")
+                              : (rPrinter.outputFileName() == strPdf)            ? QStringLiteral("pdf")
+                                                                                 : QStringLiteral("pdf elsewhere");
+    return QString("format=%1 orientation=%2 paper=%3 range=%4 margins=%5,%6,%7,%8mm")
+             .arg(strFormat)
+             .arg((layout.orientation() == QPageLayout::Landscape) ? "landscape" : "portrait")
+             .arg(layout.pageSize().name())
+             .arg((eRange == QPrinter::Selection) ? "selection" : (eRange == QPrinter::AllPages) ? "all" : "other")
+             .arg(margins.left(), 0, 'f', 1)
+             .arg(margins.top(), 0, 'f', 1)
+             .arg(margins.right(), 0, 'f', 1)
+             .arg(margins.bottom(), 0, 'f', 1);
+  };
+  out << "harness: print at first: " << printerState() << "\n";
+
+  // Answers Print Setup's and Print's dialogs, as strAnswer says
+  QString strAnswer;
+  window.setPrintDialogRunner([&](QDialog &dlg) -> int {
+    if(QPageSetupDialog *pSetupDlg = qobject_cast<QPageSetupDialog *>(&dlg))
+    {
+      out << "harness: print setup dialog: same printer=" << ((pSetupDlg->printer() == &rPrinter) ? 1 : 0) << "\n";
+      QPrinter *pDlgPrinter = pSetupDlg->printer();
+      // As Qt's macOS dialog does: nothing, for a printer that makes PDF files
+      if(pDlgPrinter->outputFormat() != QPrinter::NativeFormat)
+      {
+        out << "harness: print setup dialog: the printer makes PDF files: rejected at once, as on macOS\n";
+        return QDialog::Rejected;
+      }
+      if(strAnswer == "landscape")
+        pDlgPrinter->setPageOrientation(QPageLayout::Landscape);
+      else if(strAnswer == "portrait")
+        pDlgPrinter->setPageOrientation(QPageLayout::Portrait);
+      else if(strAnswer == "a4")
+        pDlgPrinter->setPageSize(QPageSize(QPageSize::A4));
+      else if(strAnswer == "letter")
+        pDlgPrinter->setPageSize(QPageSize(QPageSize::Letter));
+      return (strAnswer == "cancel") ? QDialog::Rejected : QDialog::Accepted;
+    }
+    if(QPrintDialog *pPrintDlg = qobject_cast<QPrintDialog *>(&dlg))
+    {
+      QPrinter *pDlgPrinter = pPrintDlg->printer();
+      out << "harness: print dialog: title=\"" << pPrintDlg->windowTitle()
+          << "\" same printer=" << ((pDlgPrinter == &rPrinter) ? 1 : 0)
+          << " selection offered=" << (pPrintDlg->testOption(QAbstractPrintDialog::PrintSelection) ? 1 : 0)
+          << " range=" << ((pDlgPrinter->printRange() == QPrinter::AllPages) ? "all" : "other") << "\n";
+      // Save as PDF in the system's print panel: Qt sets the file
+      if(strAnswer == "save-pdf")
+        pDlgPrinter->setOutputFileName(strPdf);
+      if(pDlgPrinter->outputFormat() != QPrinter::PdfFormat)
+      {
+        out << "harness: print dialog: not printing to a PDF, so refused\n";
+        return QDialog::Rejected;
+      }
+      if(strAnswer == "selection")
+        pDlgPrinter->setPrintRange(QPrinter::Selection);
+      else if(strAnswer == "landscape")
+        pDlgPrinter->setPageOrientation(QPageLayout::Landscape);
+      return (strAnswer == "cancel") ? QDialog::Rejected : QDialog::Accepted;
+    }
+    out << "harness: print unknown dialog " << dlg.metaObject()->className() << "\n";
+    return QDialog::Rejected;
+  });
+
+  // Print Setup's own dialog for a printer that makes PDF files: its fields,
+  // then answered as strAnswer says. Print Preview: its printer and pages,
+  // then closed.
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QDialog *pModal = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+    if(pModal && (pModal->objectName() == QLatin1String("pdfPageSetupDialog")))
+    {
+      QComboBox *pPaper = pModal->findChild<QComboBox *>("paperSize");
+      QRadioButton *pPortrait = pModal->findChild<QRadioButton *>("portrait");
+      QRadioButton *pLandscape = pModal->findChild<QRadioButton *>("landscape");
+      const QLabel *pNote = pModal->findChild<QLabel *>("note");
+      QDialogButtonBox *pButtons = pModal->findChild<QDialogButtonBox *>("buttonBox");
+      if(!pPaper || !pPortrait || !pLandscape || !pNote || !pButtons)
+      {
+        out << "harness: print pdf setup dialog widgets not found\n";
+        pModal->reject();
+        return;
+      }
+      QStringList astrSizes;
+      for(int nInd = 0; nInd < pPaper->count(); nInd++)
+        astrSizes << pPaper->itemText(nInd);
+      out << "harness: print pdf setup dialog: title=\"" << pModal->windowTitle() << "\" paper="
+          << pPaper->currentText() << " orientation=" << (pLandscape->isChecked() ? "landscape" : "portrait")
+          << " sizes=" << astrSizes.join('|') << " note=\"" << pNote->text() << "\"\n";
+      if(strAnswer == "landscape")
+        pLandscape->click();
+      else if(strAnswer == "portrait")
+        pPortrait->click();
+      else if((strAnswer == "a4") || (strAnswer == "letter"))
+      {
+        const QPageSize size((strAnswer == "a4") ? QPageSize::A4 : QPageSize::Letter);
+        for(int nInd = 0; nInd < pPaper->count(); nInd++)
+        {
+          if(pPaper->itemData(nInd).value<QPageSize>().isEquivalentTo(size))
+            pPaper->setCurrentIndex(nInd);
+        }
+      }
+      pButtons->button((strAnswer == "cancel") ? QDialogButtonBox::Cancel : QDialogButtonBox::Ok)->click();
+      return;
+    }
+    QPrintPreviewDialog *pDlg = qobject_cast<QPrintPreviewDialog *>(QApplication::activeModalWidget());
+    if(!pDlg)
+      return;
+    const QPrintPreviewWidget *pWidget = pDlg->findChild<QPrintPreviewWidget *>();
+    out << "harness: print preview: same printer=" << ((pDlg->printer() == &rPrinter) ? 1 : 0)
+        << " orientation=" << ((pDlg->printer()->pageLayout().orientation() == QPageLayout::Landscape) ? "landscape"
+                                                                                                    : "portrait")
+        << " pages=" << (pWidget ? pWidget->pageCount() : -1) << "\n";
+    pDlg->reject();
+  });
+  timer.start(50);
+
+  for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
+  {
+    const qsizetype nEq = strStep.indexOf('=');
+    const QString strName = (nEq < 0) ? strStep : strStep.left(nEq);
+    strAnswer = (nEq < 0) ? QString() : strStep.mid(nEq + 1);
+    if(strName == "setup")
+      pSetup->trigger();
+    else if(strName == "print")
+    {
+      QFile::remove(strPdf);
+      pPrint->trigger();
+    }
+    else if(strName == "preview")
+      pPreview->trigger();
+    else if(strName == "printer")
+    {
+      // The printer itself (native: this Mac's default; only Print Setup and
+      // Print Preview use it, as Print refuses it)
+      if(strAnswer == "native")
+        rPrinter.setOutputFormat(QPrinter::NativeFormat);
+      else
+      {
+        rPrinter.setOutputFormat(QPrinter::PdfFormat);
+        rPrinter.setOutputFileName(strPdf);
+      }
+    }
+    else if(strName == "select-all")
+      window.textEdit->selectAll();
+    else if(strName == "select")
+    {
+      // The report's first N characters
+      QTextCursor cursor = window.textEdit->textCursor();
+      cursor.setPosition(0);
+      cursor.setPosition(strAnswer.toInt(), QTextCursor::KeepAnchor);
+      window.textEdit->setTextCursor(cursor);
+    }
+    else if(strName == "select-none")
+    {
+      QTextCursor cursor = window.textEdit->textCursor();
+      cursor.clearSelection();
+      window.textEdit->setTextCursor(cursor);
+    }
+    else
+    {
+      out << "harness: unknown print step " << strStep << "\n";
+      continue;
+    }
+    QCoreApplication::processEvents();
+    out << "harness: print " << strStep << ": " << printerState();
+    if(strName == "print")
+      out << " " << pdfSummary(strPdf);
+    out << "\n";
+  }
+  timer.stop();
+  window.setPrintDialogRunner(nullptr);
+  out.flush();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -3603,6 +3855,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     dqtMenu(window, opts, out);
   }
 
+  // File > Print Setup, Print and Print Preview before any file has been opened
+  if(!opts.strPrint.isEmpty() && (opts.nPrintAt == 0))
+  {
+    out << "harness: print before any file\n";
+    printMenu(window, opts.strPrint, strSettingsDir, out);
+  }
+
   // View > Toolbar and Status Bar before any file has been opened
   if(!opts.strBars.isEmpty() && (opts.nBarsAt == 0))
   {
@@ -3708,6 +3967,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           aboutMenu(window, out);
         if(!opts.strEdit.isEmpty())
           editSteps(window, opts.strEdit, out);
+        if(!opts.strPrint.isEmpty() && (nFileInd == opts.nPrintAt))
+          printMenu(window, opts.strPrint, strSettingsDir, out);
         if(!opts.strBars.isEmpty())
         {
           if(nFileInd == opts.nBarsAt)
@@ -4624,7 +4885,7 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
-                             "--db-dir-mode", "--mcu-grid", "--bars" })
+                             "--db-dir-mode", "--mcu-grid", "--bars", "--print" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4676,6 +4937,8 @@ int main(int argc, char **argv)
       guiOpts.strMcuGrid = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--bars"))
       guiOpts.strBars = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--print"))
+      guiOpts.strPrint = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -4683,7 +4946,7 @@ int main(int argc, char **argv)
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
-                             "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at" })
+                             "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at", "--print-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4720,6 +4983,8 @@ int main(int argc, char **argv)
       guiOpts.nMcuGridAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--bars-at"))
       guiOpts.nBarsAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--print-at"))
+      guiOpts.nPrintAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

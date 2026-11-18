@@ -3364,6 +3364,98 @@ bars_case("VB_next_file", "statusbar,toolbar", rx("harness: bars file 2: " + vb_
           names=("mg_white_420.jpg", "mg_white_444.jpg"))
 
 
+# --- File > Print Setup ----------------------------------------------------------
+# The shared printer writes a PDF (switching to one makes its paper A4): no
+# printer and no system panel are ever used
+def print_case(cid, steps, expect, names=("ok_444.jpg",), extra="", forbid="-"):
+    case(cid, "PS", "gui", list(names), ("--print " + steps + " " + extra).strip(), timeout=60, expect=expect,
+         forbid=forbid)
+
+
+def ps_pdf(step, orientation, size, pages="[0-9]+", paper="A4", rng="all"):
+    w, h = size
+    return (rx(f"harness: print {step}: format=pdf orientation={orientation} paper={paper} range={rng} ") +
+            "margins=[^ ]+ " + rx("pdf pages=") + pages + rx(f" page={w}x{h} ({orientation})") + "$")
+
+
+def ps_state(step, fmt, orientation, paper, margins="[^ ]+"):
+    return (rx(f"harness: print {step}: format={fmt} orientation={orientation} paper={paper} range=all ") +
+            "margins=" + margins + "$")
+
+
+PS_SIZES = "A3|A4|A5|B4|B5|Letter / ANSI A|Legal|Tabloid / ANSI B|Executive (7.5 x 10 in)"
+
+
+def ps_pdf_dialog(paper, orientation):
+    return rx(f'harness: print pdf setup dialog: title="Print Setup" paper={paper} orientation={orientation} '
+              f'sizes={PS_SIZES} note="Printing makes a PDF file, which the system\'s page layout panel doesn\'t '
+              f'set up. These set its pages."') + "$"
+
+
+PS_A4 = (595, 842)
+PS_A4_WIDE = (842, 595)
+PS_MANY = "([2-9]|[1-9][0-9]+)"
+# The menu item, where Windows has it, with MFC's tip
+print_case("PS_menu", "setup=cancel", rx('harness: print menu=&File after="Print Preview" separator=0 enabled=1 '
+           'tip="Change the printer and printing options"') + "$")
+# Its dialog edits the printer Print and Print Preview use, for the session.
+# For a printer that makes PDF files (no printer set up, or after Save as PDF
+# in the print panel), this version's own: Qt's macOS dialog, the system's
+# page layout panel, does nothing for one (the driver's answer does the same).
+# It starts from the printer's paper and orientation, and keeps its margins
+# and its file.
+print_case("PS_pdf_dialog", "setup=cancel", ps_pdf_dialog("A4", "portrait"))
+print_case("PS_pdf_dialog_current", "setup=landscape,setup=letter,setup=cancel",
+           ps_pdf_dialog("Letter / ANSI A", "landscape"))
+print_case("PS_landscape", "setup=landscape", ps_state("setup=landscape", "pdf", "landscape", "A4"))
+print_case("PS_pdf_keeps", "setup=landscape,setup=letter", ps_state("setup=letter", "pdf", "landscape",
+           "Letter / ANSI A", rx("3.5,3.5,3.5,3.5mm")))
+# The system's dialog for this Mac's printer (answered by the driver)
+print_case("PS_native_dialog", "printer=native,setup=landscape", "harness: print setup dialog: same printer=1$")
+print_case("PS_native", "printer=native,setup=landscape", ps_state("setup=landscape", "native", "landscape",
+           "US Letter"))
+print_case("PS_native_preview", "printer=native,setup=landscape,preview",
+           "harness: print preview: same printer=1 orientation=landscape pages=" + PS_MANY + "$")
+# Save as PDF in the print panel makes the printer one that makes PDF files:
+# Print Setup then shows its own dialog, starting from the printer's paper as
+# it is then (Qt makes it A4, the PDF default, unless it was set)
+PS_SAVE_PDF = "printer=native,print=save-pdf"
+print_case("PS_save_pdf", PS_SAVE_PDF + ",setup=landscape", ps_pdf_dialog("A4", "portrait"))
+print_case("PS_save_pdf_print", PS_SAVE_PDF + ",setup=landscape,print", ps_pdf("print", "landscape", PS_A4_WIDE,
+                                                                               PS_MANY))
+print_case("PS_save_pdf_set", "printer=native,setup=letter,print=save-pdf,setup=landscape",
+           ps_pdf_dialog("Letter / ANSI A", "portrait"))
+print_case("PS_landscape_print", "setup=landscape,print", ps_pdf("print", "landscape", PS_A4_WIDE, PS_MANY))
+print_case("PS_landscape_preview", "setup=landscape,preview",
+           "harness: print preview: same printer=1 orientation=landscape pages=" + PS_MANY + "$")
+print_case("PS_landscape_again", "setup=landscape,print,print", ps_pdf("print", "landscape", PS_A4_WIDE, PS_MANY),
+           forbid="page=595x842")
+print_case("PS_portrait_back", "setup=landscape,setup=portrait,print", ps_pdf("print", "portrait", PS_A4, PS_MANY))
+print_case("PS_letter", "setup=letter,print", ps_pdf("print", "portrait", (612, 792), PS_MANY, paper="Letter / ANSI A"))
+print_case("PS_letter_landscape", "setup=letter,setup=landscape,print",
+           ps_pdf("print", "landscape", (792, 612), PS_MANY, paper="Letter / ANSI A"))
+print_case("PS_cancel", "setup=landscape,setup=cancel,print", ps_pdf("print", "landscape", PS_A4_WIDE, PS_MANY))
+print_case("PS_cancel_first", "setup=cancel,print", ps_pdf("print", "portrait", PS_A4, PS_MANY))
+# Print and Print Preview share it too: what Print's dialog sets, Preview uses
+print_case("PS_print_printer", "print", 'harness: print dialog: title="Print Document" same printer=1 ')
+print_case("PS_preview_printer", "preview", "harness: print preview: same printer=1 ")
+print_case("PS_print_to_preview", "print=landscape,preview", "harness: print preview: same printer=1 "
+           "orientation=landscape ")
+print_case("PS_print_cancel", "print=cancel", "harness: print print=cancel: .* pdf=none$")
+# A range chosen for one job isn't kept for the next
+print_case("PS_selection_offered", "select=200,print", "harness: print dialog: .* selection offered=1 range=all$")
+print_case("PS_selection_not_offered", "select-none,print", "harness: print dialog: .* selection offered=0 range=all$")
+print_case("PS_selection", "select=200,print=selection", ps_pdf("print=selection", "portrait", PS_A4, "1",
+           rng="selection"))
+print_case("PS_selection_next", "select=200,print=selection,select-none,print",
+           ps_pdf("print", "portrait", PS_A4, PS_MANY))
+print_case("PS_selection_preview", "select=200,print=selection,preview",
+           "harness: print preview: same printer=1 orientation=portrait pages=" + PS_MANY + "$")
+# Before any file is open
+print_case("PS_before_file", "setup=landscape,print", ps_pdf("print", "landscape", PS_A4_WIDE, "1"),
+           extra="--print-at 0")
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

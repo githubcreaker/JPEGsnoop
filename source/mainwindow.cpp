@@ -22,6 +22,7 @@
 
 #include <QtWidgets>
 #include <QtPrintSupport/qtprintsupportglobal.h>
+#include <QPageSetupDialog>
 #include <QPrintDialog>
 #include <QPrinter>
 #include <QPrintPreviewDialog>
@@ -37,6 +38,7 @@
 #include "finddialog.h"
 #include "lookupdialog.h"
 #include "offsetdialog.h"
+#include "pdfpagesetupdialog.h"
 #include "overlaydialog.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
@@ -270,8 +272,8 @@ void MainWindow::createActions(void)
   connect(printPreviewAct, &QAction::triggered, this, &MainWindow::filePrintPreview);
 
   printSetupAct = new QAction(tr("Print Setup..."), this);
-//   printAct->setStatusTip(tr("Print the document"));
-//   connect(printAct, &QAction::triggered, this, &MainWindow::print);
+  printSetupAct->setStatusTip(tr("Change the printer and printing options"));
+  connect(printSetupAct, &QAction::triggered, this, &MainWindow::filePrintSetup);
 
   recentFileAct = new QAction(tr("Recent File"), this);
   recentFileAct->setEnabled(false);
@@ -1180,24 +1182,70 @@ void MainWindow::onConfig()
 
 //-----------------------------------------------------------------------------
 
+// File > Print, Print Preview and Print Setup share this printer, as on
+// Windows: what one of them sets (the printer, the paper, the orientation)
+// the others use, for the session. (Print and Print Preview each made their
+// own, so nothing carried over, and Print Setup did nothing.) Each job starts
+// with every page: a range chosen for one job isn't kept for the next.
+QPrinter &MainWindow::printer()
+{
+  if(!m_pPrinter)
+  {
+    m_pPrinter = std::make_unique<QPrinter>(QPrinter::HighResolution);
+  }
+  return *m_pPrinter;
+}
+
+void MainWindow::setPrintDialogRunner(std::function<int(QDialog &)> fnRun)
+{
+  m_fnRunPrintDialog = std::move(fnRun);
+}
+
+// Show Print Setup's or Print's dialog
+static int runPrintDialog(const std::function<int(QDialog &)> &fnRun, QDialog &dlg)
+{
+  return fnRun ? fnRun(dlg) : dlg.exec();
+}
+
 void MainWindow::filePrint()
 {
-  QPrinter printer(QPrinter::HighResolution);
-  QPrintDialog *dlg = new QPrintDialog(&printer, this);
+  QPrinter &rPrinter = printer();
+  rPrinter.setPrintRange(QPrinter::AllPages);
+  rPrinter.setFromTo(0, 0);
 
-  if (textEdit->textCursor().hasSelection())
+  QPrintDialog dlg(&rPrinter, this);
+  if(textEdit->textCursor().hasSelection())
   {
-    dlg->setOption(QAbstractPrintDialog::PrintSelection);
+    dlg.setOption(QAbstractPrintDialog::PrintSelection);
   }
+  dlg.setWindowTitle(tr("Print Document"));
 
-  dlg->setWindowTitle(tr("Print Document"));
-
-  if (dlg->exec() == QDialog::Accepted)
+  if(runPrintDialog(m_fnRunPrintDialog, dlg) == QDialog::Accepted)
   {
-    textEdit->print(&printer);
+    textEdit->print(&rPrinter);
   }
+}
 
-  delete dlg;
+// File > Print Setup: the printer, paper and orientation that Print and Print
+// Preview use from then on (master's CWinApp::OnFilePrintSetup). On macOS, the
+// system's page layout panel.
+void MainWindow::filePrintSetup()
+{
+  QPrinter &rPrinter = printer();
+#ifdef Q_OS_MACOS
+  // Qt's macOS dialog does nothing for a printer that makes PDF files: its
+  // exec() returns at once. The printer is one when no printer is set up, and
+  // after Save as PDF in the print panel. This version's own dialog then sets
+  // its paper and orientation, and leaves the rest of it as it is.
+  if(rPrinter.outputFormat() != QPrinter::NativeFormat)
+  {
+    CPdfPageSetupDialog dlg(rPrinter, this);
+    dlg.exec();
+    return;
+  }
+#endif
+  QPageSetupDialog dlg(&rPrinter, this);
+  runPrintDialog(m_fnRunPrintDialog, dlg);
 }
 
 //-----------------------------------------------------------------------------
@@ -1243,17 +1291,20 @@ void MainWindow::reprocess()
 
 void MainWindow::filePrintPreview()
 {
-  QPrinter printer(QPrinter::HighResolution);
-  QPrintPreviewDialog preview(&printer, this);
+  QPrinter &rPrinter = printer();
+  rPrinter.setPrintRange(QPrinter::AllPages);
+  rPrinter.setFromTo(0, 0);
+
+  QPrintPreviewDialog preview(&rPrinter, this);
   connect(&preview, &QPrintPreviewDialog::paintRequested, this, &MainWindow::printPreview);
   preview.exec();
 }
 
 //-----------------------------------------------------------------------------
 
-void MainWindow::printPreview(QPrinter *printer)
+void MainWindow::printPreview(QPrinter *pPrinter)
 {
-  textEdit->print(printer);
+  textEdit->print(pPrinter);
 }
 
 //-----------------------------------------------------------------------------

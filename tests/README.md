@@ -213,6 +213,22 @@ when it is installed, so Pillow needn't be installed separately).
       prints the same, and whether the report and the image window's view got
       `taller`, `shorter` or stayed the `same`; after every file, the same as
       `harness: bars file N:`.
+    - `--print STEP[,STEP...]` (`--print-at N`; `0` is before any file) prints
+      File > Print Setup's place, makes the shared printer write a PDF in the
+      settings folder, and answers Print Setup's and Print's system dialogs
+      itself: nothing is printed, and the system's page layout and print
+      panels, which the driver can't answer, are never shown. Its answer to
+      the page layout panel does nothing for a printer that makes PDF files,
+      as Qt's macOS dialog does; Print Setup's own dialog for such a printer
+      is answered on screen. Steps: `setup=landscape`, `setup=portrait`,
+      `setup=a4`, `setup=letter` or `setup=cancel`; `print`, `print=selection`,
+      `print=landscape`, `print=save-pdf` (as Save as PDF in the print panel)
+      or `print=cancel` (the PDF's pages and first page size are printed);
+      `preview` (Print Preview's printer and pages, then closed);
+      `printer=native` (this Mac's default printer, which Print refuses) and
+      `printer=pdf`; `select=N`, `select-all` and `select-none` in the report.
+      It prints each dialog's printer and options when it shows, and the
+      printer's format, orientation, paper, range and margins after each step.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -303,7 +319,8 @@ in its "Tools > Image Search Fwd and Rev" section, `LM` in its "Tools > Lookup M
 Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
 `AD` in its "Tools > Add Camera/SW to DB" section, `MD` in its "Tools >
 Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
-`VB` in its "View > Toolbar and Status Bar" section);
+`VB` in its "View > Toolbar and Status Bar" section, and `PS` in its "File > Print
+Setup" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case
