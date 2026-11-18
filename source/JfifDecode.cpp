@@ -7809,7 +7809,7 @@ void CjfifDecode::SetStatusText(QString strText)
 
   // Repaint the status bar during long operations, but don't handle user
   // input here: a click could re-enter the decoder in the middle of a file.
-  QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+  ProcessWorkEvents();
 }
 
 //-----------------------------------------------------------------------------

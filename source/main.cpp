@@ -31,5 +31,8 @@ int main(int argc, char *argv[])
     MainWindow w;
     w.show();
 
+    // A file named on the command line, as on Windows
+    w.openArguments(QCoreApplication::arguments().mid(1));
+
     return a.exec();
 }

@@ -16,11 +16,17 @@
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 //
 
+#include <algorithm>
+
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QMimeData>
 #include <QTextCharFormat>
 #include <QTextCursor>
 #include <QTextDocument>
 #include <QTextDocumentFragment>
+#include <QUrl>
 
 #include "DocLog.h"
 #include "reportview.h"
@@ -91,6 +97,21 @@ private:
   const QFont m_font;
 };
 
+// The first file in a drag, or "" if it has none. On Windows the report took
+// files dropped from Explorer (DragAcceptFiles()), not text. It is taken only
+// as a copy, as on Windows, so whatever it came from never moves the file.
+QString draggedFile(const QDropEvent *pEvent)
+{
+  if(!(pEvent->possibleActions() & Qt::CopyAction))
+  {
+    return QString();
+  }
+  const QMimeData *pData = pEvent->mimeData();
+  const QList<QUrl> aUrls = pData ? pData->urls() : QList<QUrl>();
+  const auto itFile = std::find_if(aUrls.cbegin(), aUrls.cend(), [](const QUrl &url) { return url.isLocalFile(); });
+  return (itFile != aUrls.cend()) ? itFile->toLocalFile() : QString();
+}
+
 } // namespace
 
 // Read-only, as on Windows: it can be selected and copied but not typed into.
@@ -104,6 +125,9 @@ CReportView::CReportView(QWidget *pParent) :
   setReadOnly(true);
   setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
   setUndoRedoEnabled(false);
+
+  // Files can be dropped on it (see dropEvent())
+  setAcceptDrops(true);
 
   // A new report gets a new search (on Windows a search went on into the
   // next file's report, where its starting point meant nothing)
@@ -179,4 +203,45 @@ bool CReportView::findText(const QString &strFind, bool bDown, bool bCase, bool 
 QMimeData *CReportView::createMimeDataFromSelection() const
 {
   return new CReportMimeData(textCursor().selection(), document()->defaultFont());
+}
+
+//-----------------------------------------------------------------------------
+// A file dropped on the report is opened, as on Windows
+// (CJPEGsnoopView::OnDropFiles()): the first one, if several are dropped.
+// Text and other drags go to the text edit, which refuses them in a report
+// that can't be changed.
+
+void CReportView::dragEnterEvent(QDragEnterEvent *pEvent)
+{
+  if(draggedFile(pEvent).isEmpty())
+  {
+    QPlainTextEdit::dragEnterEvent(pEvent);
+    return;
+  }
+  pEvent->setDropAction(Qt::CopyAction);
+  pEvent->accept();
+}
+
+void CReportView::dragMoveEvent(QDragMoveEvent *pEvent)
+{
+  if(draggedFile(pEvent).isEmpty())
+  {
+    QPlainTextEdit::dragMoveEvent(pEvent);
+    return;
+  }
+  pEvent->setDropAction(Qt::CopyAction);
+  pEvent->accept();
+}
+
+void CReportView::dropEvent(QDropEvent *pEvent)
+{
+  const QString strFile = draggedFile(pEvent);
+  if(strFile.isEmpty())
+  {
+    QPlainTextEdit::dropEvent(pEvent);
+    return;
+  }
+  pEvent->setDropAction(Qt::CopyAction);
+  pEvent->accept();
+  emit fileDropped(strFile);
 }

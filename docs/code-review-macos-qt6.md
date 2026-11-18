@@ -2615,6 +2615,206 @@ deliberate breaks each fail their own cases:
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### Opening a file from outside the app: a drop, Finder, the command line
+
+A file could only be opened with File > Open or File > Recent File: the port took no
+file dropped on its window, Finder didn't offer it for any file, and it ignored the file
+it was started with. Now, as on Windows:
+- **A file dropped on the report** is opened (`CJPEGsnoopView::OnDropFiles()`): the
+  first file, if several are dropped. A drag of text or a web address isn't taken, nor a
+  drop anywhere else (the image window, the histograms, the toolbar): on Windows only the
+  report took files.
+- **A file named when the app is started** (`JPEGsnoopQt.app/Contents/MacOS/JPEGsnoopQt
+  photo.jpg`, as Windows' `JPEGsnoop.exe photo.jpg`) is opened once the window shows: the
+  last one, if several are named, as on Windows. A name is taken from the current folder
+  (Windows: `AfxFullPath()`), and a ".." in it is read as macOS reads it (below).
+- **Each is opened as File > Open opens one:** from its start, without the last file's
+  File Overlay, put first in File > Recent File, and with the usual "Couldn't open file"
+  message for one that can't be opened (a folder, say), which isn't added.
+
+**Added for macOS: Finder.** Finder doesn't start another copy of the app with the file's
+name, as Windows' Explorer did, but sends the file to the app (Qt's `QFileOpenEvent`):
+- **Open With and a drop on the Dock icon** open the file as a drop does: the first, if
+  several are sent. Finder sends one event for each file, one after another with nothing
+  between them (seen with a small Qt app and `open -a`).
+- **The main window comes forward,** out of the Dock if it was minimized there. A drop
+  and the file named at the start don't move it.
+- **Finder offers JPEGsnoop** in Open With for the types Windows' File > Open listed:
+  JPEG, Thumbnail (`.thm`), AVI, QuickTime, DNG, the RAW formats (CRW, CR2, NEF, ORF,
+  PEF), PDF and Photoshop (`CFBundleDocumentTypes` in `macos/Info.plist`). Each is
+  "Alternate", so JPEGsnoop never becomes the app that opens them by default. `.thm` has
+  no type of macOS's own, so it is named by its extension. (Windows registered no file
+  types: there it was chosen with "Open with" > "Choose another app".)
+
+**When:** a file handed over waits until the app is free.
+- **While a dialog is open** (a message, a batch's progress, the license terms at the
+  first start, any of the app's dialogs): Finder's file waits and is opened once the
+  dialog closes; a drop isn't taken (on Windows a dialog disabled the window behind it).
+  A later file replaces one still waiting.
+- **While a file is being decoded:** the decoder lets the window repaint as it goes, and
+  the events handled then include Finder's (seen with the small Qt app, during
+  `processEvents(ExcludeUserInputEvents)`), and timers. Opened then, the new file would
+  start in the middle of the other one's decode: with that check removed, the test
+  driver crashed (a segmentation fault). It now waits until the decode is done. The two
+  places the decoders let the window repaint call `ProcessWorkEvents()` (`General.cpp`),
+  which says while they are running. On Windows the decode handled no events, so a drop
+  waited.
+- **In File > Print and Print Setup:** Finder's file waits until the report is printed,
+  or Print Setup is closed. Qt runs these two macOS panels without a modal Qt window
+  (`qprintdialog_mac.mm`, `qpagesetupdialog_mac.mm`), so the check for a dialog doesn't
+  see them. It also handles the app's events just before showing Print's panel, and
+  timers fire while either panel is up. Opened then, the new file's report would be the
+  one printed. File > Open's panel, the save panels and the messages are seen as
+  dialogs: for those, Qt marks the dialog behind the panel as modal (checked with a
+  small Qt app on the macOS platform, with a message, File > Open's panel and a save
+  panel shown as a sheet).
+
+**Changes from Windows:**
+- **Finder (above):** new, as macOS hands files over differently.
+- **Windows' options** (`-i`, `-o`, `-b`, `-br`, `-scan` and the rest), which ran it
+  without its window and saved the report, aren't ported. With any argument that starts
+  with "-", nothing is opened and the app starts as usual (Windows ran its command-line
+  mode then, or showed its help). An empty argument is skipped. Windows also took "/" for
+  an option; on macOS it starts a path.
+- **".." in a name given at the start** is read as macOS reads it. When the folder
+  before it is a symbolic link, macOS goes up from where the link leads, not from the
+  folder holding the link. Windows' `AfxFullPath()` dropped "folder/.." from the name
+  alone, which is how Windows reads it, and so do Qt's `QFileInfo::absoluteFilePath()`
+  and `QDir::cleanPath()`. The part up to the last ".." is resolved first (`fullPath()`
+  in `mainwindow.cpp`), so the report and File > Recent File name the file macOS opens.
+  A name whose folder before ".." doesn't exist can't be opened, as macOS can't open
+  it either; dropped from the name alone, it would have opened another file. "." is
+  dropped, as on Windows.
+- **A drag is taken only as a copy,** so the app it comes from never moves the file; a
+  drag that only offers a move isn't taken. (Windows' drops were copies.)
+
+**Unchanged from Windows:** the report the only place a file can be dropped; the first
+file of a drop; the last file named at the start; the open itself, its message and File >
+Recent File.
+
+**Tests:** 57 new `OF` cases (1,047 in all).
+- **The driver:** `gui --outside STEP[,STEP...]` (`--outside-at N`) prints, after each
+  step, the file the report is of and its lines, File > Recent File's files, whether the
+  main window is minimized, and which window is active.
+  - **Drops** go through Qt's own entry points for a drag from another app
+    (`QWindowSystemInterface::handleDrag()` and `handleDrop()`), so Qt finds the widget
+    under the drop, and refuses a window behind a dialog, as for a real drag. The driver
+    prints what the drag and the drop were answered.
+  - **Finder's files** go through `handleFileOpenEvent()`, as Qt's macOS code sends them.
+  - **The arguments** go through `MainWindow::openArguments()`, which `main()` calls.
+  - **`in-dialog=`** hands a file over while a dialog is open. **`in-decode=`** does it
+    while a file is being decoded, at the decoder's first repaint, with a 5 MB file whose
+    decode repaints more than once. It prints whether that came during the decode, and
+    whether the report just after is the same as the file's first one.
+  - **`in-print=` and `in-setup=`** choose File > Print or Print Setup and hand a file
+    over while the panel is up, as Qt runs it on macOS: the Qt dialog shown but never
+    on the screen and not modal, and, for Print, the app's events handled just before
+    the panel. No panel is shown and nothing goes to a printer: Print prints to a PDF,
+    and Print Setup's panel is cancelled. The driver prints whether a dialog was modal
+    then (none, as on macOS), whether the report is the same when the panel closes, and
+    the PDF's pages.
+  - **`paths`** prints the whole path of the report's file and its size, and File >
+    Recent File's paths, from the cases' folder.
+
+The cases cover:
+- **A drop:** the file opened and listed, taken as a copy; the first of two; before any
+  file; an empty file; a name with a space, an accent and "&"; a folder (the message, not
+  listed). Not taken: a move only, text, a web address, on the image window, on the
+  histograms, behind a dialog. The window not brought forward.
+- **Finder:** the file opened and listed; the first of two; before any file; the name; a
+  web address ignored. The main window brought forward from behind the image window, and
+  out of the Dock. Behind a dialog: waiting, then opened; a later file replacing it.
+- **During a decode,** from Finder and dropped: the decode finishes as it would have,
+  then the file opens.
+- **In File > Print and Print Setup,** from Finder: the report unchanged while the panel
+  is up and when it closes, the PDF printed, then the file opened.
+- **At the start:** the file; the last of two; a name from the current folder; the name
+  with an accent; an option first or later (nothing opened); an empty argument, alone
+  and after a file; a file that can't be opened (the message, not listed); the window
+  not brought forward.
+- **".." after a symbolic link** to another folder, with a different file of the same
+  name beside the link: the one where the link leads opened and listed, also from the
+  current folder, with "." after "..", and with a second ".." before the link; "." and
+  "//" dropped; ".." after a folder that doesn't exist (the message). File > Recent File
+  also lists a file opened with ".." in its name by where it is.
+
+On the previous commit 35 of them fail. The other 22 check what was already so: the
+drops that aren't taken and what they leave, a folder and a file that can't be opened
+left out of File > Recent File, Finder's web address, nothing opened behind a dialog or
+during File > Print and Print Setup (that commit took no file from Finder), the PDF
+printed, nothing opened for an option or an empty argument, and the driver's own
+minimize and image window steps. Two faults in the new cases were found and fixed while checking
+them:
+- **The case for a file named at the start not bringing the window forward** passed
+  either way: the image window takes the focus when it first shows. The case now makes
+  the image window active after a file is open, then names the file.
+- **Skipping an empty argument** was tested only alone, where nothing opens either way;
+  a break showed it. A new case puts it after a file, which must still open.
+
+Twenty-one deliberate breaks each fail their own cases:
+- **A drop:** not taken, 9 fail; the last file, not the first, 1 fails; a move taken,
+  2 fail; a web address taken, 1 fails.
+- **Finder:** not watched for, 9 fail; each of several files opened, 1 fails; not
+  brought forward, 3 fail; not out of the Dock, 1 fails; a drop and the arguments
+  brought forward too, 2 fail.
+- **When:** opened at once, 9 fail; not waiting for a dialog, 2 fail; not waiting for a
+  decode, 4 fail (the driver crashed); the decoders' repaints not counted, 4 fail; the
+  image decoder's repaints not through `ProcessWorkEvents()`, 4 fail; a later file not
+  replacing one waiting, 1 fails.
+- **The open:** not as File > Open (left out of File > Recent File), 22 fail.
+- **At the start:** nothing opened, 7 fail; the first file, 1 fails; options not
+  checked, 2 fail; an empty argument kept, 1 fails.
+
+**Second check:** a review before the commit found two problems, each reproduced and now
+fixed:
+- **Print could print another file's report.** A file from Finder could be opened while
+  File > Print's panel was up, which the check for a dialog doesn't see (above), and the
+  panel then printed the new file's report. Print and Print Setup now hold any file
+  handed over until they are done. Before the fix, the driver's report changed to the
+  new file during the panel, and the report printed was the new one.
+- **".." after a symbolic link opened the wrong file.** A name given at the start was
+  made whole with `QFileInfo::absoluteFilePath()`, which drops "alias/.." from the name
+  alone. With `alias/../target.jpg`, where `alias` leads to another folder, it opened the
+  `target.jpg` beside the link (or said it couldn't open one), not the one macOS opens.
+  File > Recent File did the same with a file opened with ".." in its name. Both now go
+  through `fullPath()` (above).
+
+These added 13 of the cases above, and 9 of them fail without the fixes. The other 4
+check what was already so: "." dropped, the file opened once Print and Print Setup are
+done, and the PDF printed. Nine more deliberate breaks each fail their own cases:
+- **Print:** the hold not checked, 4 fail; not set by Print, 2 fail; not set by Print
+  Setup, 2 fail.
+- **".."**: dropped from the name alone at the start, 4 fail; in File > Recent File,
+  1 fails; resolved only up to the first "..", 1 fails; a name that can't be resolved
+  dropped from the name alone, 1 fails; "." not dropped from a name without "..",
+  1 fails; nor after "..", 1 fails.
+
+**Checks:**
+- **All 1,047 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings, and the built app's `Info.plist` has the
+  eight document types (`plutil -lint` passes). An existing build keeps its old
+  `Info.plist`: qmake's rule for it doesn't depend on `macos/Info.plist`, so it needs
+  `make -B JPEGsnoopQt.app/Contents/Info.plist` (or a fresh build).
+- **cppcheck 2.22** finds nothing new in the changed files (its one finding in the new
+  code, a loop that could be `std::find_if`, is fixed).
+- **Not checked** on the macOS platform:
+  - with the app itself: a real drag from Finder, Open With, and a drop on the Dock icon
+    (only the small Qt app was tried, which got the files Finder sends);
+  - Finder listing JPEGsnoop for each type, and the `.thm` entry (the app isn't
+    registered with Launch Services here);
+  - the real Print and Print Setup panels, which are never shown here (the driver runs
+    them as Qt does, without the panel), and whether macOS sends Finder's file while
+    one is up (the file waits either way).
+
+**Still open:**
+- **Not yet ported:** Windows' command-line mode (its options, above), and the toolbar's
+  Copy and About buttons. File > Open's list of types also lacks Windows' "AVI Movie".
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

@@ -27,6 +27,7 @@
 #include <QPrinter>
 #include <QPrintPreviewDialog>
 #include <QScopeGuard>
+#include <QScopedValueRollback>
 
 #include "DbSigs.h"
 #include "General.h"
@@ -74,12 +75,56 @@ const QString rsrcPath = ":/images/win";
 
 //-----------------------------------------------------------------------------
 
+namespace
+{
+
+// Finder sends the files it opens with the app (Open With, a drop on the Dock
+// icon) to the application, not to a window
+class CFileOpenWatcher : public QObject
+{
+public:
+  CFileOpenWatcher(QObject *pParent, std::function<void(const QString &)> fnOpen) :
+    QObject(pParent),
+    m_fnOpen(std::move(fnOpen))
+  {
+  }
+
+protected:
+  bool eventFilter(QObject *pObj, QEvent *pEvent) override
+  {
+    if(pEvent->type() == QEvent::FileOpen)
+    {
+      const QString strFile = static_cast<QFileOpenEvent *>(pEvent)->file();
+      if(!strFile.isEmpty())
+      {
+        m_fnOpen(strFile);
+        return true;
+      }
+    }
+    return QObject::eventFilter(pObj, pEvent);
+  }
+
+private:
+  const std::function<void(const QString &)> m_fnOpen;
+};
+
+} // namespace
+
+//-----------------------------------------------------------------------------
+
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new CReportView)
 {
   if(DEBUG_EN)
     qDebug() << "MainWindow::MainWindow() Begin";
 
   m_pFile = nullptr;            // AnalyzeFile() replaces it; freed in the destructor
+
+  // Files handed to the app from outside it (see openLater()). Finder's are
+  // watched for from the start: one can come while the license terms are
+  // shown, at the first start.
+  m_timerOpen.setSingleShot(true);
+  connect(&m_timerOpen, &QTimer::timeout, this, &MainWindow::openPending);
+  qApp->installEventFilter(new CFileOpenWatcher(this, [this](const QString &strPath) { fileFromFinder(strPath); }));
 
   QWidget *widget = new QWidget;
   setCentralWidget(widget);
@@ -183,6 +228,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new CRep
   // Re-colour the report when the light/dark appearance changes (the event
   // reaches the report view after its own palette has been updated)
   textEdit->installEventFilter(this);
+
+  // A file dropped on the report is opened, as on Windows
+  connect(textEdit, &CReportView::fileDropped, this, [this](const QString &strPath) { openLater(strPath, false); });
 
   // Coach Messages
   strLoRes = "Currently only decoding low-res view (DC-only). Full-resolution image decode can be enabled in [Options->Scan Segment->Full IDCT], but it is slower.";
@@ -796,6 +844,112 @@ bool MainWindow::openFile(const QString &strPath)
 }
 
 //-----------------------------------------------------------------------------
+// Opening a file handed to the app from outside it (see mainwindow.h)
+
+namespace
+{
+
+// strPath from the current folder (as Windows' AfxFullPath()), naming the file
+// macOS opens for it, with no "." or ".." left. QFileInfo's absoluteFilePath()
+// and QDir::cleanPath() drop "folder/.." from the name alone, which is what
+// Windows does; macOS goes up from where "folder" leads when it is a symbolic
+// link, so the part up to the last ".." is resolved as macOS resolves it. The
+// rest is kept as given. A path that can't be resolved is kept as given too:
+// it can't be opened either way, and the message names it so.
+QString fullPath(const QString &strPath)
+{
+  const QString strFull =
+    QDir::isAbsolutePath(strPath) ? strPath : (QDir::currentPath() + QLatin1Char('/') + strPath);
+  const QStringList astrParts = strFull.split(QLatin1Char('/'));
+  const qsizetype nLastUp = astrParts.lastIndexOf(QStringLiteral(".."));
+  if(nLastUp < 0)
+  {
+    return QDir::cleanPath(strFull);
+  }
+  const QString strReal = QFileInfo(astrParts.mid(0, nLastUp + 1).join(QLatin1Char('/'))).canonicalFilePath();
+  if(strReal.isEmpty())
+  {
+    return strFull;
+  }
+  return QDir::cleanPath(strReal + QLatin1Char('/') + astrParts.mid(nLastUp + 1).join(QLatin1Char('/')));
+}
+
+} // namespace
+
+void MainWindow::openLater(const QString &strPath, bool bFront)
+{
+  m_strOpenPending = fullPath(strPath);
+  m_bOpenFront = bFront;
+  m_timerOpen.start(0);
+}
+
+// Finder sends each file it opens with the app as an event of its own, one
+// after another with nothing between them. As when several files are dropped
+// on the report, only the first is opened.
+void MainWindow::fileFromFinder(const QString &strPath)
+{
+  if(m_bFinderSending)
+  {
+    return;
+  }
+  m_bFinderSending = true;
+  QTimer::singleShot(0, this, [this]() { m_bFinderSending = false; });
+  openLater(strPath, true);
+}
+
+// The file waiting is opened once the app is free: not while a dialog is open
+// (File > Open's, a message, a batch's progress), as on Windows, where one kept
+// a file from being dropped; nor while a file is being decoded, whose window
+// updates let this run (it would start on the other file in the middle); nor
+// in File > Print or Print Setup. Qt shows those two panels of macOS's own
+// with no modal Qt window, so activeModalWidget() doesn't see them, and lets
+// this run just before Print's panel and while either is up: Print would then
+// print the new file's report. A file from Finder brings the window forward,
+// out of the Dock if it was minimized there.
+void MainWindow::openPending()
+{
+  constexpr int kRetryMs = 100;
+  if(QApplication::activeModalWidget() || WorkEventsRunning() || m_bPrinting)
+  {
+    m_timerOpen.start(kRetryMs);
+    return;
+  }
+
+  const QString strPath = std::exchange(m_strOpenPending, QString());
+  if(strPath.isEmpty())
+  {
+    return;
+  }
+  if(m_bOpenFront)
+  {
+    setWindowState(windowState() & ~Qt::WindowMinimized);
+    raise();
+    activateWindow();
+  }
+  openFile(strPath);
+}
+
+void MainWindow::openArguments(const QStringList &astrArgs)
+{
+  QStringList astrFiles;
+  for(const QString &strArg : astrArgs)
+  {
+    if(strArg.startsWith(QLatin1Char('-')))
+    {
+      return;
+    }
+    if(!strArg.isEmpty())
+    {
+      astrFiles << strArg;
+    }
+  }
+  if(!astrFiles.isEmpty())
+  {
+    openLater(astrFiles.last(), false);
+  }
+}
+
+//-----------------------------------------------------------------------------
 // File > Recent File
 
 namespace
@@ -854,7 +1008,7 @@ QString MainWindow::recentFileName(const QString &strPath)
 // First in the list, once (Windows: CWinApp::AddToRecentFileList())
 void MainWindow::addRecentFile(const QString &strPath)
 {
-  const QString strFile = QDir::cleanPath(QFileInfo(strPath).absoluteFilePath());
+  const QString strFile = fullPath(strPath);
   m_astrRecentFiles.removeIf([&strFile](const QString &strListed) { return sameFile(strListed, strFile); });
   m_astrRecentFiles.prepend(strFile);
   while(m_astrRecentFiles.size() > CSnoopConfig::RECENT_FILES_MAX)
@@ -1379,6 +1533,8 @@ static int runPrintDialog(const std::function<int(QDialog &)> &fnRun, QDialog &d
 
 void MainWindow::filePrint()
 {
+  // A file handed over meanwhile waits until the report is printed
+  const QScopedValueRollback<bool> printing(m_bPrinting, true);
   QPrinter &rPrinter = printer();
   rPrinter.setPrintRange(QPrinter::AllPages);
   rPrinter.setFromTo(0, 0);
@@ -1401,6 +1557,8 @@ void MainWindow::filePrint()
 // system's page layout panel.
 void MainWindow::filePrintSetup()
 {
+  // A file handed over meanwhile waits until the panel is closed
+  const QScopedValueRollback<bool> printing(m_bPrinting, true);
   QPrinter &rPrinter = printer();
 #ifdef Q_OS_MACOS
   // Qt's macOS dialog does nothing for a printer that makes PDF files: its

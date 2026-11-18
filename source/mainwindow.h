@@ -25,6 +25,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPainter>
+#include <QTimer>
 
 #include <functional>
 #include <memory>
@@ -76,6 +77,12 @@ public:
   bool canExportTiff();
   bool canExportYcc();
 
+  // The files named when the app is started (main() passes its arguments),
+  // as on Windows: the last one is opened once the window shows. Windows'
+  // options (-i, -b and the rest), which ran it without its window, aren't
+  // ported, so with any argument that starts with "-" nothing is opened.
+  void openArguments(const QStringList &astrArgs);
+
 protected:
   void closeEvent(QCloseEvent *e) override;
   bool eventFilter(QObject *pObj, QEvent *pEvent) override;
@@ -122,6 +129,7 @@ private slots:
   void onMcuGrid(bool bOn);
   void onStatusBar(bool bOn);
   void onAbout();
+  void openPending();
 
 private:
   MainWindow &operator = (const MainWindow&);
@@ -298,6 +306,18 @@ private:
 
   // File > Batch Process's progress, while a batch runs
   QProgressDialog *m_pBatchProgress = nullptr;
+
+  // A file handed to the app from outside it: dropped on the report, sent by
+  // Finder (Open With, a drop on the Dock icon), or named when the app was
+  // started. It is opened as File > Open opens one, once the app is free (see
+  // openPending()); a later one replaces one still waiting.
+  void openLater(const QString &strPath, bool bFront);
+  void fileFromFinder(const QString &strPath);
+  QTimer m_timerOpen;
+  QString m_strOpenPending;
+  bool m_bOpenFront = false;    // bring the window forward first (Finder's)
+  bool m_bFinderSending = false; // Finder's files, one event each, are arriving
+  bool m_bPrinting = false;     // in File > Print or Print Setup (see openPending())
 };
 
 #endif // MAINWINDOW_H

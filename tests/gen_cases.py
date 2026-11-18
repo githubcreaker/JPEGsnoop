@@ -3682,6 +3682,170 @@ new_case("NB_key_image", "key-image", nb_start("key-image", 1))
 new_case("NB_key_image_hidden_toolbar", "hide-toolbar,key-image", nb_start("key-image", 1))
 
 
+
+# --- Opening a file from outside the app: a drop, Finder, the command line -----------
+def outside_case(cid, steps, expect, names=("ok_444.jpg",), extra="", forbid="-"):
+    case(cid, "OF", "gui", list(names), ("--outside " + steps + " " + extra).strip(), timeout=60, expect=expect,
+         forbid=forbid)
+
+
+def of_state(step, report, recent, window="normal", active=None, when=""):
+    """What a step leaves: the file the report is of, File > Recent File's files, the main window"""
+    return (rx(f"harness: outside {step}: {when}report={report} lines=") + "[0-9]+" +
+            rx(f" recent={recent} window={window} ") + ("active=" + rx(active) + "$" if active else "active="))
+
+
+# A file name with a space, an accent and "&" (dropped and sent as a URL)
+write("of photo \u00e9 & 1.jpg", c420)
+OF_NAME = "of%20photo%20%C3%A9%20%26%201.jpg"
+# Big enough that the decoder lets the window repaint more than once while it
+# decodes it
+of_rnd = random.Random(2026)
+write("of_big.jpg", jpeg(Image.frombytes("RGB", (2400, 2400), of_rnd.randbytes(2400 * 2400 * 3)), quality=90,
+                         subsampling=2))
+
+# Dropped on the report: opened as File > Open opens one (also put first in
+# File > Recent File), taken as a copy; the first of several; also before any
+# file, an empty file (it opens), a name with a space, an accent and "&"
+outside_case("OF_drop", "drop=ok_420.jpg", of_state("drop=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg"))
+outside_case("OF_drop_copy", "drop=ok_420.jpg", rx("harness: outside drop=ok_420.jpg: drag=copy drop=copy") + "$")
+outside_case("OF_drop_first", "drop=ok_gray.jpg+ok_420.jpg",
+             of_state("drop=ok_gray.jpg+ok_420.jpg", "ok_gray.jpg", "ok_gray.jpg|ok_444.jpg"))
+outside_case("OF_drop_before_file", "drop=ok_420.jpg", of_state("drop=ok_420.jpg", "ok_420.jpg", "ok_420.jpg"),
+             extra="--outside-at 0")
+outside_case("OF_drop_empty_file", "drop=dq_empty.bin",
+             rx('harness: outside drop=dq_empty.bin: report="ERROR: File length is zero, no decoding done. [') + ".*" +
+             rx('/dq_empty.bin]" lines=1 recent=dq_empty.bin|ok_444.jpg '))
+outside_case("OF_drop_name", "drop=" + OF_NAME,
+             of_state("drop=" + OF_NAME, "of photo \u00e9 & 1.jpg", "of photo \u00e9 & 1.jpg|ok_444.jpg"))
+# A folder can't be opened: the usual message, and it isn't added
+outside_case("OF_drop_folder", "drop=dq_folder", "harness: message box: ERROR: Couldn't open file: \\[/.*/dq_folder\\]$")
+outside_case("OF_drop_folder_not_added", "drop=dq_folder", "harness: outside drop=dq_folder: .* recent=ok_444\\.jpg ")
+# Not taken: a drag that offers only to move the file, text, a web address; a
+# drop anywhere but the report (the image window, the histograms), as on
+# Windows; while a dialog is open
+outside_case("OF_drop_move_only", "drop-move=ok_420.jpg", rx("harness: outside drop-move=ok_420.jpg: drag=refused") + "$")
+outside_case("OF_drop_move_only_kept", "drop-move=ok_420.jpg",
+             of_state("drop-move=ok_420.jpg", "ok_444.jpg", "ok_444.jpg"))
+outside_case("OF_drop_text", "drop-text=photo.jpg", rx("harness: outside drop-text=photo.jpg: drag=refused") + "$")
+outside_case("OF_drop_web", "drop-web=https%3A//example.com/a.jpg",
+             rx("harness: outside drop-web=https%3A//example.com/a.jpg: drag=refused") + "$")
+outside_case("OF_drop_image_window", "drop-image=ok_420.jpg",
+             rx("harness: outside drop-image=ok_420.jpg: drag=refused") + "$")
+outside_case("OF_drop_histogram", "drop-histogram=ok_420.jpg",
+             rx("harness: outside drop-histogram=ok_420.jpg: drag=refused") + "$")
+outside_case("OF_drop_in_dialog", "in-dialog=drop=ok_420.jpg", rx("harness: outside drop=ok_420.jpg: drag=refused") + "$")
+outside_case("OF_drop_in_dialog_kept", "in-dialog=drop=ok_420.jpg",
+             of_state("in-dialog=drop=ok_420.jpg", "ok_444.jpg", "ok_444.jpg"))
+# A drop doesn't bring the window forward (the image window stays active)
+outside_case("OF_drop_not_front", "activate-image,drop=ok_420.jpg",
+             of_state("drop=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="image"))
+
+# Sent by Finder (Open With, a drop on the Dock icon): opened the same way;
+# the first of several, as for a drop; before any file; the name; not a web
+# address
+outside_case("OF_finder", "finder=ok_420.jpg", of_state("finder=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg"))
+outside_case("OF_finder_first", "finder=ok_gray.jpg+ok_420.jpg",
+             of_state("finder=ok_gray.jpg+ok_420.jpg", "ok_gray.jpg", "ok_gray.jpg|ok_444.jpg"))
+outside_case("OF_finder_before_file", "finder=ok_420.jpg", of_state("finder=ok_420.jpg", "ok_420.jpg", "ok_420.jpg"),
+             extra="--outside-at 0")
+outside_case("OF_finder_name", "finder=" + OF_NAME,
+             of_state("finder=" + OF_NAME, "of photo \u00e9 & 1.jpg", "of photo \u00e9 & 1.jpg|ok_444.jpg"))
+outside_case("OF_finder_web", "finder-url=https%3A//example.com/a.jpg",
+             of_state("finder-url=https%3A//example.com/a.jpg", "ok_444.jpg", "ok_444.jpg"))
+# It brings the main window forward, out of the Dock if minimized there
+outside_case("OF_image_active", "activate-image", of_state("activate-image", "ok_444.jpg", "ok_444.jpg", active="image"))
+outside_case("OF_finder_front", "activate-image,finder=ok_420.jpg",
+             of_state("finder=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="main"))
+outside_case("OF_minimized", "minimize", of_state("minimize", "ok_444.jpg", "ok_444.jpg", window="minimized"))
+outside_case("OF_finder_minimized", "minimize,finder=ok_420.jpg",
+             of_state("finder=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="main"))
+# While a dialog is open it waits, and is opened once the dialog closes; a
+# later file replaces one waiting
+outside_case("OF_finder_in_dialog", "in-dialog=finder=ok_420.jpg",
+             of_state("in-dialog=finder=ok_420.jpg", "ok_444.jpg", "ok_444.jpg", when="during the dialog: "))
+outside_case("OF_finder_after_dialog", "in-dialog=finder=ok_420.jpg",
+             of_state("in-dialog=finder=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="main"))
+outside_case("OF_finder_later_in_dialog", "in-dialog=finder=ok_gray.jpg;finder=ok_420.jpg",
+             of_state("in-dialog=finder=ok_gray.jpg;finder=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg"))
+
+# While a file is being decoded (the decoder lets the window repaint), a file
+# from Finder or dropped waits until it is done, and is opened then
+OF_DECODE = "in-decode=of_big.jpg:"
+for kind, step in (("finder", "finder=ok_420.jpg"), ("drop", "drop=ok_420.jpg")):
+    outside_case(f"OF_{kind}_in_decode", OF_DECODE + step,
+                 rx(f"harness: outside {OF_DECODE}{step}: during the decode=1 just after: same report=1 "
+                    "report=of_big.jpg ") + ".*" + rx(" recent=of_big.jpg|ok_444.jpg "))
+    outside_case(f"OF_{kind}_after_decode", OF_DECODE + step,
+                 of_state(OF_DECODE + step, "ok_420.jpg", "ok_420.jpg|of_big.jpg|ok_444.jpg"))
+
+# Named when the app is started (as on Windows: JPEGsnoop.exe <file>): opened
+# once the window shows; the last of several; a name relative to the current
+# folder; nothing with an option (Windows' command-line mode, not ported), or
+# for an empty argument; a file that can't be opened says so
+OF_START = "--outside-at 0"
+outside_case("OF_args", "args=ok_420.jpg", of_state("args=ok_420.jpg", "ok_420.jpg", "ok_420.jpg"), extra=OF_START)
+# (Not brought forward: shown with the image window active)
+outside_case("OF_args_not_front", "activate-image,args=ok_420.jpg",
+             of_state("args=ok_420.jpg", "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="image"))
+outside_case("OF_args_last", "args=ok_gray.jpg+ok_420.jpg",
+             of_state("args=ok_gray.jpg+ok_420.jpg", "ok_420.jpg", "ok_420.jpg"), extra=OF_START)
+outside_case("OF_args_here", "args-here=ok_420.jpg", of_state("args-here=ok_420.jpg", "ok_420.jpg", "ok_420.jpg"),
+             extra=OF_START)
+outside_case("OF_args_name", "args=" + OF_NAME,
+             of_state("args=" + OF_NAME, "of photo \u00e9 & 1.jpg", "of photo \u00e9 & 1.jpg"), extra=OF_START)
+outside_case("OF_args_option", "args=-i+ok_420.jpg", of_state("args=-i+ok_420.jpg", "empty", "none"), extra=OF_START)
+outside_case("OF_args_option_after", "args=ok_420.jpg+-o+log.txt",
+             of_state("args=ok_420.jpg+-o+log.txt", "empty", "none"), extra=OF_START)
+outside_case("OF_args_empty", "args=", of_state("args=", "empty", "none"), extra=OF_START)
+outside_case("OF_args_empty_last", "args=ok_420.jpg+", of_state("args=ok_420.jpg+", "ok_420.jpg", "ok_420.jpg"),
+             extra=OF_START)
+outside_case("OF_args_missing", "args=nosuch.jpg",
+             "harness: message box: ERROR: Couldn't open file: \\[/.*/nosuch\\.jpg\\]$", extra=OF_START)
+outside_case("OF_args_missing_not_added", "args=nosuch.jpg", "harness: outside args=nosuch\\.jpg: .* recent=none ",
+             extra=OF_START)
+# ".." after a symbolic link to another folder: macOS goes up from where the
+# link leads (Windows took ".." from the name alone, as its system does), so
+# the file opened, shown and listed is the one there, not the one beside the
+# link; "." is dropped; a name whose folder before ".." doesn't exist can't be
+# opened (macOS can't open it either)
+tree("of_link", {"real/of_target.jpg": c420, "real/sub/keep": b"", "of_target.jpg": c444})
+try:
+    os.symlink("real/sub", files_dir / "of_link/alias")
+except FileExistsError:
+    pass
+OF_LINKED = "of_link/alias/../of_target.jpg"
+OF_REAL = f"report=of_link/real/of_target.jpg size={len(c420)} recent=of_link/real/of_target.jpg"
+outside_case("OF_args_link", f"args={OF_LINKED},paths", rx(f"harness: outside paths: {OF_REAL}") + "$", extra=OF_START)
+outside_case("OF_args_here_link", "args-here=of_link/alias/.././of_target.jpg,paths",
+             rx(f"harness: outside paths: {OF_REAL}") + "$", extra=OF_START)
+outside_case("OF_args_link_twice", "args=of_link/real/../alias/../of_target.jpg,paths",
+             rx(f"harness: outside paths: {OF_REAL}") + "$", extra=OF_START)
+outside_case("OF_args_dot", "args-here=./of_link/./real//of_target.jpg,paths",
+             rx(f"harness: outside paths: {OF_REAL}") + "$", extra=OF_START)
+outside_case("OF_args_up_missing", "args=nosuch/../ok_420.jpg",
+             "harness: message box: ERROR: Couldn't open file: \\[/.*/nosuch/\\.\\./ok_420\\.jpg\\]$", extra=OF_START)
+# (File > Recent File lists a name opened with ".." in it the same way)
+outside_case("OF_open_link", f"open={OF_LINKED},paths",
+             rx(f"harness: outside paths: report=of_link/alias/../of_target.jpg size={len(c420)} "
+                "recent=of_link/real/of_target.jpg") + "$", extra=OF_START)
+
+# In File > Print or Print Setup, a file from Finder waits until it is done.
+# Qt shows macOS's panels for them with no modal Qt window, and handles
+# events just before Print's panel: opened then, the new file's report would
+# be printed.
+for kind in ("print", "setup"):
+    step = f"in-{kind}=finder=ok_420.jpg"
+    outside_case(f"OF_finder_in_{kind}", step,
+                 rx(f"harness: outside {step}: during the panel: modal=0 report=ok_444.jpg lines=") + "[0-9]+" +
+                 rx(" recent=ok_444.jpg "))
+    outside_case(f"OF_finder_in_{kind}_kept", step,
+                 rx(f"harness: outside {step}: the panel closed: same report=1") + "$")
+    outside_case(f"OF_finder_after_{kind}", step,
+                 of_state(step, "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="main"))
+outside_case("OF_finder_in_print_printed", "in-print=finder=ok_420.jpg",
+             rx("harness: outside in-print=finder=ok_420.jpg: printed: pdf pages=") + "[1-9]")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

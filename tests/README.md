@@ -256,6 +256,33 @@ when it is installed, so Pillow needn't be installed separately).
       the same: `button` (click it), `key` (press its shortcut in the main
       window), `key-image` (in the image window), `hide-toolbar`,
       `reprocess`, `open=NAME`.
+    - `--outside STEP[,STEP...]` (`--outside-at N`; `0` is before any file)
+      hands files to the app from outside it and prints, after each step, the
+      file the report is of and its lines, File > Recent File's files,
+      whether the main window is minimized, and which window is active. NAMEs
+      are in the folder of the files given, percent-encoded, several joined by
+      `+`. Steps: `drop=NAMES` (dragged over the report and dropped, through
+      the same Qt entry points as a drag from Finder; it prints what the drag
+      and the drop were answered), `drop-move=NAMES` (a drag that only offers
+      to move them), `drop-text=TEXT`, `drop-web=URL`, `drop-image=NAME` (on
+      the image window), `drop-histogram=NAME`, `finder=NAMES` (as Finder
+      sends them for Open With or a drop on the Dock icon: one event each,
+      one after another), `finder-url=URL`, `args=ARGS` (as `main()` passes
+      the app's arguments: a NAME as its whole path, one starting with `-` as
+      it is, an empty part as an empty argument), `args-here=ARGS` (each as
+      it is, the current folder being the files' folder), `open=NAME`,
+      `paths` (the whole paths, from the files' folder, of the report's file
+      and File > Recent File's files, and the file's size), `minimize`,
+      `activate-image` and `wait`. `in-dialog=STEP[;STEP...]` does the steps
+      while a dialog is open and prints what is shown then too;
+      `in-decode=NAME:STEP` opens NAME, then opens it again and does STEP
+      while it is decoded, and prints whether STEP came during the decode and
+      whether the report just after is the same as the first one;
+      `in-print=STEP` and `in-setup=STEP` choose File > Print or Print Setup
+      and do STEP while its panel is up, as Qt runs macOS's panels. No panel
+      is shown: Print prints to a PDF in a temporary folder, and Print
+      Setup's panel is cancelled. They print what is shown then, whether the
+      report is the same when the panel closes, and Print's PDF.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -348,8 +375,9 @@ Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
 Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
 `VB` in its "View > Toolbar and Status Bar" section, `PS` in its "File > Print
 Setup" section, `RF` in its "File > Recent File" section, `NB` in its "The
-toolbar's New button" section, and `IE` in its "The red line where the image
-ends inside its MCUs" section);
+toolbar's New button" section, `IE` in its "The red line where the image
+ends inside its MCUs" section, and `OF` in its "Opening a file from outside the
+app: a drop, Finder, the command line" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

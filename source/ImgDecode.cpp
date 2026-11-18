@@ -598,7 +598,7 @@ void CimgDecode::SetStatusText(QString str)
 
   if(!s_tmRepaint.isValid() || (s_tmRepaint.elapsed() >= 100))
   {
-    QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    ProcessWorkEvents();
     s_tmRepaint.start();
   }
 }

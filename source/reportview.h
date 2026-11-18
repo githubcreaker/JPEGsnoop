@@ -20,6 +20,7 @@
 // CLASS DESCRIPTION:
 // - The report in the main window: read-only text that can be selected and
 //   copied (Edit > Select All and Copy), as on Windows
+// - A file dropped on it is opened, as on Windows
 //
 // ==========================================================================
 
@@ -47,10 +48,20 @@ public:
   // change to the report
   void startNewSearch() { m_bFirstSearch = true; }
 
+signals:
+  // A file was dropped on the report: the first of the files dropped, as on
+  // Windows (which opened it)
+  void fileDropped(const QString &strPath);
+
 protected:
   // The selection as plain text and HTML, the HTML with the coloured lines in
   // their colours for a light background
   QMimeData *createMimeDataFromSelection() const override;
+
+  // Files dragged here are taken; anything else, such as text, isn't
+  void dragEnterEvent(QDragEnterEvent *pEvent) override;
+  void dragMoveEvent(QDragMoveEvent *pEvent) override;
+  void dropEvent(QDropEvent *pEvent) override;
 
 private:
   bool m_bFirstSearch = true;     // the next search starts a new one

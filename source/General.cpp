@@ -19,6 +19,7 @@
 // ---------------------------------------
 // Global functions
 // ---------------------------------------
+#include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
 #include <QString>
@@ -369,4 +370,24 @@ bool SameFile(const QString &strPath1, const QString &strPath2)
 
   return fi1.canonicalFilePath().compare(fi2.canonicalFilePath(), Qt::CaseInsensitive) == 0;
 #endif
+}
+
+//-----------------------------------------------------------------------------
+// See General.h
+
+namespace
+{
+int s_nWorkEvents = 0;          // ProcessWorkEvents() calls running
+} // namespace
+
+void ProcessWorkEvents()
+{
+  s_nWorkEvents++;
+  QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+  s_nWorkEvents--;
+}
+
+bool WorkEventsRunning()
+{
+  return s_nWorkEvents > 0;
 }

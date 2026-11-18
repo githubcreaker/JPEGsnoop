@@ -309,6 +309,36 @@
 //     reprocess, open=NAME (as File > Open opens NAME, in the folder of the
 //     files given).
 //
+// gui ... --outside STEP[,STEP...] [--outside-at N]
+//     After the first file (or file N; 0 is before any file), hand files to
+//     the app from outside it as a user does, and print what it shows after
+//     each STEP: the file the report is of and its lines, File > Recent
+//     File's files, whether the main window is minimized, and which window is
+//     active. NAMEs are in the folder of the files given, percent-encoded,
+//     several joined by "+". Steps: drop=NAMES (dragged over the report and
+//     dropped, as Qt gets a drag from Finder), drop-move=NAMES (a drag that
+//     offers only to move them), drop-text=TEXT, drop-web=URL, drop-image=NAME
+//     (on the image window), drop-histogram=NAME (on the main window's RGB
+//     histogram), finder=NAMES (as Finder sends them: Open With, a drop on
+//     the Dock icon), finder-url=URL, args=ARGS (as main() passes the
+//     arguments the app was started with: a NAME as its whole path, an
+//     argument starting with "-" as it is, and an empty part as an empty
+//     argument), args-here=ARGS (each as it is, with the current folder the
+//     folder of the files given), open=NAME (as File > Open), paths (prints
+//     the report's file and size and File > Recent File's files, each from
+//     the folder of the files given), minimize, activate-image (make the
+//     image window active) and wait. Some steps do others at a given moment:
+//     in-dialog=STEP[;STEP...] does them while a dialog is open and prints
+//     what is shown then too, before closing it; in-decode=NAME:STEP opens
+//     NAME, then opens it again and does STEP while it is being decoded, and
+//     prints whether STEP was done during the decode and whether the report,
+//     just after, is the same as the first time; in-print=STEP and
+//     in-setup=STEP choose File > Print or Print Setup and do STEP while its
+//     panel is up, as Qt runs macOS's panels (none is shown: Print prints to
+//     a PDF, and Print Setup's panel is cancelled), and print what is shown
+//     then, whether the report is the same when the panel closes, and Print's
+//     PDF.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -323,6 +353,7 @@
 #include <QFileDialog>
 #include <QCoreApplication>
 #include <QDate>
+#include <QDialog>
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QFileInfo>
@@ -372,6 +403,9 @@
 #include <QToolButton>
 #include <QTreeWidget>
 #include <QWindow>
+#include <QtGui/private/qhighdpiscaling_p.h>
+#include <qpa/qplatformdrag.h>
+#include <qpa/qwindowsysteminterface.h>
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
@@ -427,6 +461,7 @@ static void usage()
           "                         [--print STEP[,STEP...] [--print-at N]]\n"
           "                         [--recent STEP[,STEP...] [--recent-at N]] [--recent-stored NAME[+NAME...]]\n"
           "                         [--new STEP[,STEP...] [--new-at N]]\n"
+          "                         [--outside STEP[,STEP...] [--outside-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1184,6 +1219,8 @@ struct GuiOptions
   QString strRecentStored;        // --recent-stored NAME[+NAME...]
   QString strNew;                 // --new STEP[,STEP...]
   int nNewAt = 1;                 // --new-at N
+  QString strOutside;             // --outside STEP[,STEP...]
+  int nOutsideAt = 1;             // --outside-at N
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -3784,6 +3821,313 @@ static void newButton(MainWindow &window, const GuiOptions &opts, QTextStream &o
   out.flush();
 }
 
+// What a file handed to the app from outside it leaves (see --outside above):
+// the file the report is of (its "Filename:" line; or else its first line, or
+// "empty"), the report's lines, the files File > Recent File keeps (newest
+// first), whether the main window is minimized, and the active window
+static QString outsideState(MainWindow &window)
+{
+  const QString strLog = window.textEdit->toPlainText();
+  QString strReport = QStringLiteral("empty");
+  static const QRegularExpression reFile(QStringLiteral("^  Filename: \\[(.*)\\]$"),
+                                         QRegularExpression::MultilineOption);
+  const QRegularExpressionMatch match = reFile.match(strLog);
+  if(match.hasMatch())
+    strReport = QFileInfo(match.captured(1)).fileName();
+  else
+  {
+    const QStringList astrLines = strLog.split('\n');
+    const auto itLine = std::find_if(astrLines.cbegin(), astrLines.cend(),
+                                     [](const QString &strLine) { return !strLine.trimmed().isEmpty(); });
+    if(itLine != astrLines.cend())
+      strReport = "\"" + itLine->trimmed() + "\"";
+  }
+  QStringList astrRecent;
+  QSettings settings;
+  for(int nInd = 1; nInd <= 9; nInd++)
+  {
+    const QString strFile = settings.value(QString("Recent File List\\File%1").arg(nInd)).toString();
+    if(!strFile.isEmpty())
+      astrRecent << QFileInfo(strFile).fileName();
+  }
+  const QWidget *pActive = QApplication::activeWindow();
+  const Q_Viewer *pViewer = findViewer();
+  return QString("report=%1 lines=%2 recent=%3 window=%4 active=%5")
+           .arg(strReport)
+           .arg(window.textEdit->document()->isEmpty() ? 0 : window.textEdit->document()->blockCount())
+           .arg(astrRecent.isEmpty() ? QStringLiteral("none") : astrRecent.join('|'))
+           .arg(window.isMinimized() ? "minimized" : "normal")
+           .arg((pActive == &window) ? "main" : (pActive && (pActive == pViewer)) ? "image" : "none");
+}
+
+static QString dropActionName(Qt::DropAction eAction)
+{
+  return (eAction == Qt::CopyAction)   ? QStringLiteral("copy")
+         : (eAction == Qt::MoveAction) ? QStringLiteral("move")
+         : (eAction == Qt::LinkAction) ? QStringLiteral("link")
+                                       : QStringLiteral("none");
+}
+
+// A drag over the middle of pTarget and, if it is taken, a drop there, as Qt
+// gets them from the system for a drag from another app: what each was
+// answered
+static QString dragAndDrop(QWidget *pTarget, const QMimeData &data, Qt::DropActions actions)
+{
+  QWidget *pTop = pTarget ? pTarget->window() : nullptr;
+  QWindow *pWin = pTop ? pTop->windowHandle() : nullptr;
+  if(!pWin || !pTarget->isVisible())
+    return QStringLiteral("target hidden");
+  const QPoint ptNative =
+    QHighDpi::toNativeLocalPosition(pTarget->mapTo(pTop, pTarget->rect().center()), pWin);
+  const QPlatformDragQtResponse drag =
+    QWindowSystemInterface::handleDrag(pWin, &data, ptNative, actions, Qt::LeftButton, Qt::NoModifier);
+  if(!drag.isAccepted())
+  {
+    // It leaves again
+    QWindowSystemInterface::handleDrag(pWin, nullptr, QPoint(), Qt::IgnoreAction, Qt::NoButton, Qt::NoModifier);
+    return QStringLiteral("drag=refused");
+  }
+  const QPlatformDropQtResponse drop =
+    QWindowSystemInterface::handleDrop(pWin, &data, ptNative, actions, Qt::LeftButton, Qt::NoModifier);
+  return QString("drag=%1 drop=%2")
+           .arg(dropActionName(drag.acceptedAction()),
+                drop.isAccepted() ? dropActionName(drop.acceptedAction()) : QStringLiteral("refused"));
+}
+
+// Files handed to the app from outside it as a user hands them over (see
+// --outside above)
+static void outsideSteps(MainWindow &window, const GuiOptions &opts, QTextStream &out)
+{
+  const QDir dirFiles(opts.strFilesDir);
+  out << "harness: outside at first: " << outsideState(window) << "\n";
+
+  // One step; false if it is unknown
+  const auto fnStep = [&](const QString &strStep) -> bool {
+    const qsizetype nEq = strStep.indexOf('=');
+    const QString strName = (nEq < 0) ? strStep : strStep.left(nEq);
+    QStringList astrParts;
+    for(const QString &strPart : strStep.mid(nEq + 1).split('+'))
+      astrParts << QUrl::fromPercentEncoding(strPart.toUtf8());
+
+    if(strName.startsWith("drop"))
+    {
+      QMimeData data;
+      Qt::DropActions actions = Qt::CopyAction | Qt::MoveAction | Qt::LinkAction; // as Finder offers
+      QWidget *pTarget = window.textEdit;
+      if(strName == "drop-text")
+        data.setText(astrParts.join('+'));
+      else if(strName == "drop-web")
+        data.setUrls({ QUrl(astrParts.first()) });
+      else
+      {
+        QList<QUrl> aUrls;
+        for(const QString &strFile : astrParts)
+          aUrls << QUrl::fromLocalFile(dirFiles.filePath(strFile));
+        data.setUrls(aUrls);
+        if(strName == "drop-move")
+          actions = Qt::MoveAction;
+        else if(strName == "drop-image")
+        {
+          Q_Viewer *pViewer = findViewer();
+          pTarget = pViewer ? pViewer->findChild<QScrollArea *>() : nullptr;
+        }
+        else if(strName == "drop-histogram")
+          pTarget = window.findChild<QLabel *>("rgbHistogram");
+        else if(strName != "drop")
+          return false;
+      }
+      out << "harness: outside " << strStep << ": " << dragAndDrop(pTarget, data, actions) << "\n";
+    }
+    else if(strName == "finder")
+    {
+      // One event each, one after another, as Qt gets them from Finder
+      for(const QString &strFile : astrParts)
+        QWindowSystemInterface::handleFileOpenEvent(dirFiles.filePath(strFile));
+    }
+    else if(strName == "finder-url")
+      QWindowSystemInterface::handleFileOpenEvent(QUrl(astrParts.first()));
+    else if((strName == "args") || (strName == "args-here"))
+    {
+      QStringList astrArgs;
+      for(const QString &strPart : astrParts)
+      {
+        const bool bAsIs = (strName == "args-here") || strPart.isEmpty() || strPart.startsWith('-');
+        astrArgs << (bAsIs ? strPart : dirFiles.filePath(strPart));
+      }
+      const QString strCwd = QDir::currentPath();
+      if(strName == "args-here")
+        QDir::setCurrent(opts.strFilesDir);
+      window.openArguments(astrArgs);
+      QDir::setCurrent(strCwd);
+    }
+    else if(strName == "open")
+      window.openFile(dirFiles.filePath(astrParts.first()));
+    else if(strName == "paths")
+    {
+      // The report's file and its size (its "Filename:" and "Filesize:"
+      // lines), and File > Recent File's files, each from the folder of the
+      // files given when it is in it (by its real path or as given)
+      const auto fnRel = [&dirFiles](const QString &strPath) {
+        for(const QString &strDir : { QFileInfo(dirFiles.path()).canonicalFilePath(), dirFiles.absolutePath() })
+        {
+          if(!strDir.isEmpty() && strPath.startsWith(strDir + '/'))
+            return strPath.mid(strDir.size() + 1);
+        }
+        return strPath;
+      };
+      const QString strLog = window.textEdit->toPlainText();
+      static const QRegularExpression reName(QStringLiteral("^  Filename: \\[(.*)\\]$"),
+                                             QRegularExpression::MultilineOption);
+      static const QRegularExpression reSize(QStringLiteral("^  Filesize: \\[([0-9]+)\\] bytes$"),
+                                             QRegularExpression::MultilineOption);
+      const QRegularExpressionMatch matchName = reName.match(strLog);
+      const QRegularExpressionMatch matchSize = reSize.match(strLog);
+      QStringList astrRecent;
+      QSettings settings;
+      for(int nInd = 1; nInd <= 9; nInd++)
+      {
+        const QString strFile = settings.value(QString("Recent File List\\File%1").arg(nInd)).toString();
+        if(!strFile.isEmpty())
+          astrRecent << fnRel(strFile);
+      }
+      out << "harness: outside paths: report=" << (matchName.hasMatch() ? fnRel(matchName.captured(1)) : "none")
+          << " size=" << (matchSize.hasMatch() ? matchSize.captured(1) : "none")
+          << " recent=" << (astrRecent.isEmpty() ? QStringLiteral("none") : astrRecent.join('|')) << "\n";
+    }
+    else if(strName == "minimize")
+      window.showMinimized();
+    else if(strName == "activate-image")
+    {
+      Q_Viewer *pViewer = findViewer();
+      if(pViewer && pViewer->isVisible())
+      {
+        pViewer->activateWindow();
+        static_cast<void>(QTest::qWaitFor([pViewer]() { return QApplication::activeWindow() == pViewer; }, 1000));
+      }
+    }
+    else if(strName != "wait")
+      return false;
+    return true;
+  };
+
+  for(const QString &strStep : opts.strOutside.split(',', Qt::SkipEmptyParts))
+  {
+    if(strStep.startsWith("in-dialog="))
+    {
+      // The steps while a dialog is open (any: they all block the windows
+      // behind them), with time for the app to try again
+      const QStringList astrSubs = strStep.mid(10).split(';', Qt::SkipEmptyParts);
+      QDialog dlg(&window);
+      dlg.setWindowModality(Qt::ApplicationModal);
+      QTimer::singleShot(0, &dlg, [&]() {
+        for(const QString &strSub : astrSubs)
+        {
+          if(!fnStep(strSub))
+            out << "harness: unknown outside step " << strSub << "\n";
+          QTest::qWait(50);
+        }
+        QTest::qWait(300);
+        out << "harness: outside " << strStep << ": during the dialog: " << outsideState(window) << "\n";
+        dlg.accept();
+      });
+      dlg.exec();
+    }
+    else if(strStep.startsWith("in-decode="))
+    {
+      // NAME opened, then again with STEP done at the first moment the app
+      // handles events (only while it decodes, letting the window repaint)
+      const QString strSpec = strStep.mid(10);
+      const qsizetype nColon = strSpec.indexOf(':');
+      const QString strFile = dirFiles.filePath(QUrl::fromPercentEncoding(strSpec.left(nColon).toUtf8()));
+      const QString strSub = strSpec.mid(nColon + 1);
+      window.openFile(strFile);
+      const QString strFirst = window.textEdit->toPlainText();
+      // The decoder lets the window repaint at most every 100 ms: after this
+      // wait it does so at its first row
+      QTest::qWait(150);
+      bool bDone = false;
+      bool bDuringDecode = false;
+      QTimer timer;
+      QObject::connect(&timer, &QTimer::timeout, [&]() {
+        if(bDone)
+          return;
+        bDone = true;
+        bDuringDecode = WorkEventsRunning();
+        if(!fnStep(strSub))
+          out << "harness: unknown outside step " << strSub << "\n";
+      });
+      timer.start(0);
+      window.openFile(strFile);
+      timer.stop();
+      out << "harness: outside " << strStep << ": during the decode=" << (bDuringDecode ? 1 : 0)
+          << " just after: same report=" << ((window.textEdit->toPlainText() == strFirst) ? 1 : 0) << " "
+          << outsideState(window) << "\n";
+      if(!bDone)
+        continue;
+    }
+    else if(strStep.startsWith("in-print=") || strStep.startsWith("in-setup="))
+    {
+      // File > Print (answered, printing to a PDF) or Print Setup (its panel
+      // cancelled), with STEP done while the system's panel is up, as Qt's
+      // macOS dialogs run it (qprintdialog_mac.mm, qpagesetupdialog_mac.mm):
+      // the Qt dialog shown, but never on the screen and not modal; for
+      // Print, the app's events handled just before the panel; then the
+      // panel's own wait. No panel is shown, and nothing is sent to a printer.
+      const bool bPrint = strStep.startsWith("in-print=");
+      const QString strSub = strStep.mid(9);
+      QAction *pAction = findAction(window, bPrint ? QStringLiteral("&Print...") : QStringLiteral("Print Setup..."));
+      QTemporaryDir dirPdf;
+      if(!pAction || !dirPdf.isValid())
+      {
+        out << "harness: outside " << strStep << ": menu unavailable\n";
+        continue;
+      }
+      QPrinter &rPrinter = window.printer();
+      const QString strPdf = dirPdf.filePath(QStringLiteral("print.pdf"));
+      if(bPrint)
+      {
+        rPrinter.setOutputFormat(QPrinter::PdfFormat);
+        rPrinter.setOutputFileName(strPdf);
+      }
+      else
+        rPrinter.setOutputFormat(QPrinter::NativeFormat); // Print Setup's own dialog is for a PDF printer
+      const QString strFirst = window.textEdit->toPlainText();
+      bool bShown = false;
+      window.setPrintDialogRunner([&](QDialog &dlg) -> int {
+        bShown = true;
+        dlg.QDialog::setVisible(true);
+        if(!fnStep(strSub))
+          out << "harness: unknown outside step " << strSub << "\n";
+        if(bPrint)
+          QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents | QEventLoop::ExcludeSocketNotifiers);
+        QTest::qWait(300);
+        out << "harness: outside " << strStep << ": during the panel: modal=" << (QApplication::activeModalWidget() ? 1 : 0)
+            << " " << outsideState(window) << "\n";
+        dlg.QDialog::setVisible(false);
+        out << "harness: outside " << strStep << ": the panel closed: same report="
+            << ((window.textEdit->toPlainText() == strFirst) ? 1 : 0) << "\n";
+        return bPrint ? QDialog::Accepted : QDialog::Rejected;
+      });
+      pAction->trigger();
+      window.setPrintDialogRunner(nullptr);
+      rPrinter.setOutputFormat(QPrinter::PdfFormat);
+      if(!bShown)
+        out << "harness: outside " << strStep << ": no panel\n";
+      else if(bPrint)
+        out << "harness: outside " << strStep << ": printed: " << pdfSummary(strPdf) << "\n";
+    }
+    else if(!fnStep(strStep))
+    {
+      out << "harness: unknown outside step " << strStep << "\n";
+      continue;
+    }
+    // Time for the app to open a file waiting, also once it tries again
+    QTest::qWait(150);
+    out << "harness: outside " << strStep << ": " << outsideState(window) << "\n";
+  }
+  out.flush();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -4324,6 +4668,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     newButton(window, opts, out);
   }
 
+  // Files handed to the app from outside it before any file has been opened
+  if(!opts.strOutside.isEmpty() && (opts.nOutsideAt == 0))
+  {
+    out << "harness: outside before any file\n";
+    outsideSteps(window, opts, out);
+  }
+
   // File > Recent File before any file has been opened
   if(!opts.strRecent.isEmpty() && (opts.nRecentAt == 0))
   {
@@ -4449,6 +4800,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           recentMenu(window, opts, strSettingsDir, out);
         if(!opts.strNew.isEmpty() && (nFileInd == opts.nNewAt))
           newButton(window, opts, out);
+        if(!opts.strOutside.isEmpty() && (nFileInd == opts.nOutsideAt))
+          outsideSteps(window, opts, out);
         if(!opts.strBars.isEmpty())
         {
           if(nFileInd == opts.nBarsAt)
@@ -5367,7 +5720,7 @@ int main(int argc, char **argv)
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
                              "--db-dir-mode", "--mcu-grid", "--bars", "--print", "--recent", "--recent-stored",
-                             "--new" })
+                             "--new", "--outside" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -5427,6 +5780,8 @@ int main(int argc, char **argv)
       guiOpts.strRecentStored = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--new"))
       guiOpts.strNew = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--outside"))
+      guiOpts.strOutside = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -5435,7 +5790,7 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
                              "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at", "--print-at",
-                             "--recent-at", "--new-at" })
+                             "--recent-at", "--new-at", "--outside-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -5478,6 +5833,8 @@ int main(int argc, char **argv)
       guiOpts.nRecentAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--new-at"))
       guiOpts.nNewAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--outside-at"))
+      guiOpts.nOutsideAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

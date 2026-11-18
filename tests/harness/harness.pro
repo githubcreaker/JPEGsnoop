@@ -11,5 +11,8 @@ include(../../JPEGsnoopQt.pri)
 # QTest's key and mouse clicks go through Qt's shortcut handling, as a
 # user's do (gui --edit)
 QT += testlib
+# Qt's own entry points for a drag from another app and a file sent by Finder
+# (--outside)
+QT += gui-private
 
 SOURCES += main.cpp
