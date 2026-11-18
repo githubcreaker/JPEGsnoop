@@ -231,6 +231,22 @@
 //     instead of the settings folder itself. --db-dir-mode makes it and sets
 //     its permissions, until the window closes.
 //
+// gui ... --mcu-grid STEP[,STEP...] [--mcu-grid-at N]
+//     After the first file (or file N; 0 is before any file), print the
+//     place of View > Overlays > MCU Grid in the menu, its shortcut and
+//     whether it is checked, then do each STEP: toggle (choose the menu
+//     item), key (press its shortcut), cmd-g (press Cmd+G, Edit > Find
+//     Next's key on macOS), zoom=PCT (View > Image Zoom), channel=NAME (View
+//     > Image Chan, as the menu names it), scroll=X;Y (scroll the image
+//     window there, in points), size=W;H (make it that size), grid (print
+//     where the grid is drawn) and buffer (print how many of the image
+//     window's pixels painting it all again changes, and how many have the
+//     grid's colour). After each other step print whether it is checked and
+//     how often Find Next ran. After every file, print where the grid is
+//     drawn as "harness: mcu-grid file N:": the screen columns and rows its
+//     dots are on, their spacing and colours, and other pixels that differ
+//     from the image.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -272,6 +288,9 @@
 #include <QSettings>
 #include <QStyle>
 #include <QScopeGuard>
+#include <QScreen>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
@@ -280,7 +299,9 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QTreeWidget>
+#include <QWindow>
 #include <QtMath>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -329,6 +350,7 @@ static void usage()
           "                         [--add-db OPENING[+OPENING...] [--add-db-at N]]\n"
           "                         [--user-db [FOLDER:]NAME]... [--user-db-mode OCTAL]\n"
           "                         [--db-dir NAME [--db-dir-mode OCTAL]]\n"
+          "                         [--mcu-grid STEP[,STEP...] [--mcu-grid-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1047,6 +1069,8 @@ struct GuiOptions
   QString strUserDbMode;          // --user-db-mode OCTAL
   QString strDbDir;               // --db-dir NAME
   QString strDbDirMode;           // --db-dir-mode OCTAL
+  QString strMcuGrid;             // --mcu-grid STEP[,STEP...]
+  int nMcuGridAt = 1;             // --mcu-grid-at N
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -2696,6 +2720,257 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
   out.flush();
 }
 
+// The MCU grid as the image window draws it: the preview drawn now, in screen
+// (device) pixels, against the decoded image drawn as checkPreview() expects.
+// The screen columns and rows that the grid's dots are on, their colours, and
+// the pixels changed elsewhere (stray). A line's dots are on every third
+// pixel; a column the other way's lines cross gets at most one for every four
+// pixels (lines at least 4 pixels apart), so a column is the grid's when at
+// least 2/7 of its pixels changed. Also the dots' spacing (gap).
+static void mcuGridReport(QAction *pGrid, const QString &strWhen, QTextStream &out)
+{
+  out << "harness: mcu-grid " << strWhen << ": checked=" << (pGrid->isChecked() ? 1 : 0);
+  Q_Viewer *pViewer = findViewer();
+  PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+  if(!pCanvas || pCanvas->image().isNull() || !pViewer->isVisible())
+  {
+    out << " preview=none\n";
+    return;
+  }
+
+  const QImage &img = pCanvas->image();
+  const double dZoom = pCanvas->zoom();
+  const QImage imgGrab = pCanvas->grab().toImage();
+  QImage imgRef;
+  if(dZoom < 1.0)
+  {
+    imgRef = img.scaled(qMax(1, qRound(img.width() * dZoom)), qMax(1, qRound(img.height() * dZoom)),
+                        Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+  }
+
+  const int nW = imgGrab.width();
+  const int nH = imgGrab.height();
+  QList<int> anCol(nW, 0);
+  QList<int> anRow(nH, 0);
+  QSet<QString> setColours;
+  QList<QPoint> aChanged;
+  for(int y = 0; y < nH; y++)
+  {
+    for(int x = 0; x < nW; x++)
+    {
+      QRgb nWant;
+      if(dZoom < 1.0)
+      {
+        if((x >= imgRef.width()) || (y >= imgRef.height()))
+          continue;
+        nWant = imgRef.pixel(x, y);
+      }
+      else
+      {
+        const int nPixX = qFloor((x + 0.5) / dZoom);
+        const int nPixY = qFloor((y + 0.5) / dZoom);
+        if((nPixX >= img.width()) || (nPixY >= img.height()))
+          continue;
+        nWant = img.pixel(nPixX, nPixY);
+      }
+      const QRgb nGot = imgGrab.pixel(x, y);
+      if((nGot & 0xFFFFFF) != (nWant & 0xFFFFFF))
+      {
+        anCol[x]++;
+        anRow[y]++;
+        setColours.insert(QString::number(nGot & 0xFFFFFF, 16).rightJustified(6, '0'));
+        aChanged.append(QPoint(x, y));
+      }
+    }
+  }
+
+  out << QString(" zoom=%1 scale=%2 screen=%3x%4").arg(dZoom).arg(pCanvas->devicePixelRatioF()).arg(nW).arg(nH);
+  if(aChanged.isEmpty())
+  {
+    out << " grid=none\n";
+    return;
+  }
+  QStringList astrCols;
+  QStringList astrRows;
+  QSet<int> setCols;
+  QSet<int> setRows;
+  for(int x = 0; x < nW; x++)
+  {
+    if(anCol[x] * 7 >= nH * 2)
+    {
+      astrCols << QString::number(x);
+      setCols.insert(x);
+    }
+  }
+  for(int y = 0; y < nH; y++)
+  {
+    if(anRow[y] * 7 >= nW * 2)
+    {
+      astrRows << QString::number(y);
+      setRows.insert(y);
+    }
+  }
+  const auto nStray = std::count_if(aChanged.cbegin(), aChanged.cend(), [&](const QPoint &pt) {
+    return !setCols.contains(pt.x()) && !setRows.contains(pt.y());
+  });
+  // The dots' spacing down the first column (1 for a solid line), away from
+  // the rows the other lines cross it at
+  int nGap = 0;
+  if(!astrCols.isEmpty())
+  {
+    const int nCol = astrCols.first().toInt();
+    int nLast = -1;
+    for(int y = 0; y < nH; y++)
+    {
+      if(setRows.contains(y) || !aChanged.contains(QPoint(nCol, y)))
+        continue;
+      if((nLast >= 0) && ((nGap == 0) || (y - nLast < nGap)))
+        nGap = y - nLast;
+      nLast = y;
+    }
+  }
+  QStringList astrColours(setColours.begin(), setColours.end());
+  astrColours.sort();
+  out << " cols=" << (astrCols.isEmpty() ? QStringLiteral("none") : astrCols.join(','))
+      << " rows=" << (astrRows.isEmpty() ? QStringLiteral("none") : astrRows.join(','))
+      << " gap=" << nGap << " colours=" << astrColours.join(',') << " stray=" << nStray << "\n";
+}
+
+// View > Overlays > MCU Grid as a user chooses it (see --mcu-grid above)
+static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream &out)
+{
+  QAction *pGrid = findAction(window, QStringLiteral("MCU Grid"));
+  const QAction *pFindNext = findAction(window, QStringLiteral("Find Next"));
+  if(!pGrid || !pFindNext)
+  {
+    out << "harness: menu MCU Grid unavailable\n";
+    return;
+  }
+  out << "harness: mcu-grid " << menuPlace(pGrid)
+      << " shortcut=" << pGrid->shortcut().toString(QKeySequence::PortableText)
+      << " checkable=" << (pGrid->isCheckable() ? 1 : 0) << " checked=" << (pGrid->isChecked() ? 1 : 0) << "\n";
+
+  int nFindNext = 0;
+  const QMetaObject::Connection conn = QObject::connect(pFindNext, &QAction::triggered, [&nFindNext]() { nFindNext++; });
+  for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
+  {
+    if(strStep == "toggle")
+    {
+      pGrid->trigger();
+    }
+    else if((strStep == "key") || (strStep == "cmd-g"))
+    {
+      // Window shortcuts reach only the active window (the image window,
+      // shown by the first decode, takes the focus)
+      if(QApplication::activeWindow() != &window)
+      {
+        window.activateWindow();
+        static_cast<void>(QTest::qWaitFor([&window]() { return QApplication::activeWindow() == &window; }, 1000));
+      }
+      const QKeyCombination key =
+        (strStep == "key") ? pGrid->shortcut()[0] : QKeyCombination(Qt::ControlModifier, Qt::Key_G);
+      QTest::keyClick(&window, key.key(), key.keyboardModifiers());
+    }
+    else if(strStep.startsWith("zoom="))
+    {
+      zoomPreview(window, strStep.mid(5), -1, out);
+    }
+    else if(strStep.startsWith("channel="))
+    {
+      QAction *pChannel = findAction(window, strStep.mid(8));
+      if(!pChannel)
+      {
+        out << "harness: mcu-grid no channel " << strStep.mid(8) << "\n";
+        continue;
+      }
+      pChannel->trigger();
+    }
+    else if(strStep == "grid")
+    {
+      mcuGridReport(pGrid, QStringLiteral("grid"), out);
+      continue;
+    }
+    else if(strStep.startsWith("scroll=") || strStep.startsWith("size="))
+    {
+      // Scroll the image window to X;Y (points), or make it W;H
+      Q_Viewer *pViewer = findViewer();
+      QScrollArea *pScroll = pViewer ? pViewer->findChild<QScrollArea *>() : nullptr;
+      const QStringList astrXy = strStep.mid(strStep.indexOf('=') + 1).split(';');
+      if(!pScroll || (astrXy.size() != 2))
+      {
+        out << "harness: mcu-grid can't " << strStep << "\n";
+        continue;
+      }
+      if(strStep.startsWith("scroll="))
+      {
+        pScroll->horizontalScrollBar()->setValue(astrXy.at(0).toInt());
+        pScroll->verticalScrollBar()->setValue(astrXy.at(1).toInt());
+      }
+      else
+        pViewer->resize(astrXy.at(0).toInt(), astrXy.at(1).toInt());
+    }
+    else if(strStep == "buffer")
+    {
+      // What the image window shows now, as painted bit by bit (scrolled
+      // pixels are copied, and only what comes into view is painted), against
+      // what painting it all again gives: they must be the same. (On a
+      // Retina screen the grab has one pixel per point, every other one.)
+      Q_Viewer *pViewer = findViewer();
+      QScrollArea *pScroll = pViewer ? pViewer->findChild<QScrollArea *>() : nullptr;
+      PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+      if(!pScroll || !pCanvas || !pViewer->windowHandle())
+      {
+        out << "harness: mcu-grid buffer: no image window\n";
+        continue;
+      }
+      QCoreApplication::processEvents();
+      QScreen *pScreen = pViewer->windowHandle()->screen();
+      const QImage imgShown = pScreen->grabWindow(pViewer->winId()).toImage();
+      pCanvas->repaint();
+      QCoreApplication::processEvents();
+      const QImage imgAgain = pScreen->grabWindow(pViewer->winId()).toImage();
+      int nDiff = 0;
+      int nDots = 0;            // the grid's colour
+      if(imgShown.size() != imgAgain.size())
+        nDiff = -1;
+      else
+      {
+        for(int y = 0; y < imgShown.height(); y++)
+        {
+          for(int x = 0; x < imgShown.width(); x++)
+          {
+            if((imgShown.pixel(x, y) & 0xFFFFFF) != (imgAgain.pixel(x, y) & 0xFFFFFF))
+              nDiff++;
+            if((imgShown.pixel(x, y) & 0xFFFFFF) == 0x202020)
+              nDots++;
+          }
+        }
+      }
+      out << QString("harness: mcu-grid buffer: scroll=%1,%2 window=%3x%4 buffer=%5x%6 grid pixels=%7 changed by "
+                     "painting it all=%8\n")
+               .arg(pScroll->horizontalScrollBar()->value())
+               .arg(pScroll->verticalScrollBar()->value())
+               .arg(pViewer->width())
+               .arg(pViewer->height())
+               .arg(imgShown.width())
+               .arg(imgShown.height())
+               .arg(nDots)
+               .arg(nDiff);
+      continue;
+    }
+    else
+    {
+      out << "harness: unknown mcu-grid step " << strStep << "\n";
+      continue;
+    }
+    QCoreApplication::processEvents();
+    out << "harness: mcu-grid " << strStep << ": checked=" << (pGrid->isChecked() ? 1 : 0)
+        << " find-next=" << nFindNext << "\n";
+  }
+  QObject::disconnect(conn);
+  out.flush();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -3220,6 +3495,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     dqtMenu(window, opts, out);
   }
 
+  // View > Overlays > MCU Grid before any file has been opened
+  if(!opts.strMcuGrid.isEmpty() && (opts.nMcuGridAt == 0))
+  {
+    out << "harness: mcu-grid before any file\n";
+    mcuGridMenu(window, opts.strMcuGrid, out);
+  }
+
   // Tools > Add Camera/SW to DB before any file has been opened
   if(!opts.strAddDb.isEmpty() && (opts.nAddDbAt == 0))
   {
@@ -3311,6 +3593,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           aboutMenu(window, out);
         if(!opts.strEdit.isEmpty())
           editSteps(window, opts.strEdit, out);
+        if(!opts.strMcuGrid.isEmpty())
+        {
+          if(nFileInd == opts.nMcuGridAt)
+            mcuGridMenu(window, opts.strMcuGrid, out);
+          if(QAction *pGrid = findAction(window, QStringLiteral("MCU Grid")))
+            mcuGridReport(pGrid, QString("file %1").arg(nFileInd), out);
+        }
         if(!opts.strDetailDlg.isEmpty())
         {
           if(!opts.strMarks.isEmpty())
@@ -4214,7 +4503,7 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
-                             "--db-dir-mode" })
+                             "--db-dir-mode", "--mcu-grid" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4262,6 +4551,8 @@ int main(int argc, char **argv)
       guiOpts.strDbDir = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--db-dir-mode"))
       guiOpts.strDbDirMode = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--mcu-grid"))
+      guiOpts.strMcuGrid = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -4269,7 +4560,7 @@ int main(int argc, char **argv)
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
-                             "--batch-close-after", "--add-db-at" })
+                             "--batch-close-after", "--add-db-at", "--mcu-grid-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4302,6 +4593,8 @@ int main(int argc, char **argv)
       guiOpts.nDqtAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--add-db-at"))
       guiOpts.nAddDbAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--mcu-grid-at"))
+      guiOpts.nMcuGridAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

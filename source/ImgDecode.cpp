@@ -7164,39 +7164,8 @@ void CimgDecode::ViewOnDraw(QPainter *, QRect, QPoint, QFont *, QSize &)
 //  szNewScrollSize = sizeTotal;
 }
 
-// Draw an overlay that shows the MCU grid
-//
-// INPUT:
-// - pDC                        = The device context pointer
-//
-void CimgDecode::ViewMcuOverlay(QPainter * pDC)
-{
-  // Now create overlays
-  uint32_t nXZoomed, nYZoomed;
-
-  QPen penDot(QColor(32, 32, 32), 1, Qt::DotLine);
-
-  Qt::BGMode nBkModeOld = pDC->backgroundMode();
-  QPen pPenOld = pDC->pen();
-
-  pDC->setBackgroundMode(Qt::TransparentMode);
-
-  // Draw vertical lines
-  for(uint32_t nMcuX = 0; nMcuX < m_nMcuXMax; nMcuX++)
-  {
-    nXZoomed = static_cast<int32_t>(nMcuX * m_nMcuWidth * m_nZoom);
-    pDC->drawLine(m_rectImgReal.left() + nXZoomed, m_rectImgReal.top(), m_rectImgReal.left() + nXZoomed, m_rectImgReal.bottom());
-  }
-
-  for(uint32_t nMcuY = 0; nMcuY < m_nMcuYMax; nMcuY++)
-  {
-    nYZoomed = static_cast<int32_t>(nMcuY * m_nMcuHeight * m_nZoom);
-    pDC->drawLine(m_rectImgReal.left(), m_rectImgReal.top() + nYZoomed, m_rectImgReal.right(), m_rectImgReal.top() + nYZoomed);
-  }
-
-  pDC->setPen(pPenOld);
-  pDC->setBackgroundMode(nBkModeOld);
-}
+// (Windows' ViewMcuOverlay(), which drew the MCU grid here, is now
+// PreviewCanvas::paintMcuGrid() in Viewer.cpp)
 
 // Draw an overlay that highlights the marked MCUs
 //
@@ -7268,21 +7237,20 @@ bool CimgDecode::GetPreviewOverlayMcuGrid()
   return m_bViewOverlaysMcuGrid;
 }
 
-// Toggle the preview MCU grid setting
+// Set the preview MCU grid setting (Windows toggled it)
 //
 // POST:
 // - m_bViewOverlaysMcuGrid
 //
-void CimgDecode::SetPreviewOverlayMcuGridToggle()
+void CimgDecode::SetPreviewOverlayMcuGrid(bool bOn)
 {
-  if(m_bViewOverlaysMcuGrid)
-  {
-    m_bViewOverlaysMcuGrid = false;
-  }
-  else
-  {
-    m_bViewOverlaysMcuGrid = true;
-  }
+  m_bViewOverlaysMcuGrid = bOn;
+}
+
+// The MCU's size in image pixels, for the last scan decoded (1x1 before any)
+QSize CimgDecode::GetMcuSize()
+{
+  return QSize(m_nMcuWidth, m_nMcuHeight);
 }
 
 // Report the DC levels

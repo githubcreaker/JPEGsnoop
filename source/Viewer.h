@@ -47,6 +47,7 @@ public:
 
   void setImage(const QImage &img, double dZoom);   // image is shared, not copied
   void setZoom(double dZoom);
+  void setMcuGrid(const QSize &sizeMcu);            // empty: no grid
   bool widgetToImage(const QPointF &ptWidget, QPoint &ptImg) const;
 
   const QImage &image() const { return m_img; }
@@ -66,10 +67,12 @@ protected:
 private:
   double logicalPerImagePixel() const;
   void rebuild();             // reduced copy and widget size for zoom and screen
+  void paintMcuGrid(QPainter &painter, const QRect &rectDirty);
 
   QImage m_img;
   QImage m_imgReduced;        // only below 100%
   double m_dZoom;
+  QSize m_sizeMcu;            // MCU grid, in image pixels (empty: none)
 };
 
 class Q_Viewer : public QWidget
@@ -79,6 +82,7 @@ public:
   explicit Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *parent = nullptr, Qt::WindowFlags f = Qt::WindowFlags());
   void drawImage();
   void clearImage();
+  void updateMcuGrid();       // after View > Overlays > MCU Grid
 
 public slots:
   void zoom(QAction *action);

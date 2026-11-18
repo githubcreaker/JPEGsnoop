@@ -363,8 +363,10 @@ public:
   void SetPreviewZoom(bool bInc, bool bDec, bool bSet, uint32_t nVal);
   uint32_t GetPreviewZoomMode();
   double GetPreviewZoom();
+  // View > Overlays > MCU Grid (drawn by the image window's PreviewCanvas)
   bool GetPreviewOverlayMcuGrid();
-  void SetPreviewOverlayMcuGridToggle();
+  void SetPreviewOverlayMcuGrid(bool bOn);
+  QSize GetMcuSize();           // in image pixels; for the last scan decoded
 
   // Utilities
   // Where an MCU's scan data starts in the file: false (and 0) if the point
@@ -388,7 +390,6 @@ public:
 
   // View helper routines
   void ViewOnDraw(QPainter * pDC, QRect rectClient, QPoint ptScrolledPos, QFont * pFont, QSize & szNewScrollSize);
-  void ViewMcuOverlay(QPainter * pDC);
   void ViewMcuMarkedOverlay(QPainter * pDC);
   void ViewMarkerOverlay(QPainter * pDC, uint32_t nBlkX, uint32_t nBlkY);       // UNUSED?
 

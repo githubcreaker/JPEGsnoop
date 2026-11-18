@@ -439,8 +439,22 @@ void MainWindow::createActions(void)
   zoomGroup->addAction(zoom500Act);
   connect(zoomGroup, SIGNAL(triggered(QAction*)), imgWindow, SLOT(zoom(QAction*)));
 
+  // View > Overlays > MCU Grid (master's CJPEGsnoopDoc::OnOverlaysMcugrid):
+  // checked while the image window draws the grid, which stays on from file
+  // to file. It needs no file open.
   mcuGridAct = new QAction(tr("MCU Grid"), this);
-  mcuGridAct->setShortcut(tr("Ctrl+G"));
+  mcuGridAct->setStatusTip(tr("Display MCU Boundary grid"));
+  mcuGridAct->setCheckable(true);
+  mcuGridAct->setChecked(m_pImgDec->GetPreviewOverlayMcuGrid());
+  // Windows' Ctrl+G. On macOS Qt's Ctrl is Command, and Command-G is Find
+  // Next there (Edit > Find Next's standard key), so neither worked: here it
+  // is the Control key itself.
+#ifdef Q_OS_MACOS
+  mcuGridAct->setShortcut(QKeySequence(Qt::MetaModifier | Qt::Key_G));
+#else
+  mcuGridAct->setShortcut(QKeySequence(Qt::ControlModifier | Qt::Key_G));
+#endif
+  connect(mcuGridAct, &QAction::toggled, this, &MainWindow::onMcuGrid);
 
   toolbarAct = new QAction(tr("&Toolbar"), this);
   toolbarAct->setCheckable(true);
@@ -2236,6 +2250,14 @@ void MainWindow::onAddToDb()
   {
     QMessageBox::warning(this, "JPEGsnoop", tr("ERROR: The signature wasn't added: %1").arg(strDetail));
   }
+}
+
+//-----------------------------------------------------------------------------
+// View > Overlays > MCU Grid
+void MainWindow::onMcuGrid(bool bOn)
+{
+  m_pImgDec->SetPreviewOverlayMcuGrid(bOn);
+  imgWindow->updateMcuGrid();
 }
 
 //-----------------------------------------------------------------------------

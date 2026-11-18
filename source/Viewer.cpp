@@ -49,6 +49,15 @@ void PreviewCanvas::setZoom(double dZoom)
   }
 }
 
+void PreviewCanvas::setMcuGrid(const QSize &sizeMcu)
+{
+  if(sizeMcu != m_sizeMcu)
+  {
+    m_sizeMcu = sizeMcu;
+    update();
+  }
+}
+
 // Widget (logical) pixels per image pixel. On a Retina screen there are two
 // device pixels per logical pixel, so 100% is half an image pixel per point.
 double PreviewCanvas::logicalPerImagePixel() const
@@ -106,20 +115,79 @@ void PreviewCanvas::paintEvent(QPaintEvent *pEvent)
   if(!m_imgReduced.isNull())
   {
     painter.drawImage(QPointF(0, 0), m_imgReduced);
+  }
+  else
+  {
+    // 100% and above: enlarge only the image area under the region being
+    // painted, without smoothing, so each image pixel stays a sharp block
+    const double dScale = logicalPerImagePixel();
+    const QRect rectDirty = pEvent->rect();
+    const QRect rectSrc = QRectF(rectDirty.x() / dScale, rectDirty.y() / dScale,
+                                 rectDirty.width() / dScale, rectDirty.height() / dScale)
+                            .toAlignedRect().adjusted(-1, -1, 1, 1) & m_img.rect();
+    const QRectF rectDst(rectSrc.x() * dScale, rectSrc.y() * dScale, rectSrc.width() * dScale,
+                         rectSrc.height() * dScale);
+
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    painter.drawImage(rectDst, m_img, rectSrc);
+  }
+
+  paintMcuGrid(painter, pEvent->rect());
+}
+
+// View > Overlays > MCU Grid, as on Windows (CimgDecode::ViewMcuOverlay): a
+// dotted dark grey line along the top and the left of each MCU, with the
+// image showing between the dots. Not at 12.5%, where an MCU of 8 pixels is
+// one screen pixel and the lines would hide the image.
+//
+// Each dot is one screen pixel, on every third pixel counted from the
+// canvas's top or left edge, so a dot is in the same place however much of
+// the canvas is painted. (With a dotted pen, the dots started where the area
+// being painted started: scrolling copies what is shown and paints only what
+// comes into view, and the new dots fell between the copied ones.)
+void PreviewCanvas::paintMcuGrid(QPainter &painter, const QRect &rectDirty)
+{
+  if(m_sizeMcu.isEmpty() || (m_dZoom < 0.25))
+  {
     return;
   }
 
-  // 100% and above: enlarge only the image area under the region being
-  // painted, without smoothing, so each image pixel stays a sharp block
-  const double dScale = logicalPerImagePixel();
-  const QRect rectDirty = pEvent->rect();
-  const QRect rectSrc = QRectF(rectDirty.x() / dScale, rectDirty.y() / dScale,
-                               rectDirty.width() / dScale, rectDirty.height() / dScale)
-                          .toAlignedRect().adjusted(-1, -1, 1, 1) & m_img.rect();
-  const QRectF rectDst(rectSrc.x() * dScale, rectSrc.y() * dScale, rectSrc.width() * dScale, rectSrc.height() * dScale);
+  // In screen pixels from here: an image pixel is m_dZoom of them
+  const double dDpr = devicePixelRatioF();
+  const QRect rectPaint = QRectF(rectDirty.x() * dDpr, rectDirty.y() * dDpr, rectDirty.width() * dDpr,
+                                 rectDirty.height() * dDpr).toAlignedRect() &
+                          QRect(0, 0, qCeil(m_img.width() * m_dZoom), qCeil(m_img.height() * m_dZoom));
+  if(rectPaint.isEmpty())
+  {
+    return;
+  }
+  auto firstDot = [](int nFrom) { return nFrom + ((3 - (nFrom % 3)) % 3); };
 
-  painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-  painter.drawImage(rectDst, m_img, rectSrc);
+  QList<QRect> aDots;
+  for(int nX = 0; nX < m_img.width(); nX += m_sizeMcu.width())
+  {
+    const int nDevX = qRound(nX * m_dZoom);
+    if((nDevX < rectPaint.left()) || (nDevX > rectPaint.right()))
+      continue;
+    for(int nDevY = firstDot(rectPaint.top()); nDevY <= rectPaint.bottom(); nDevY += 3)
+      aDots.append(QRect(nDevX, nDevY, 1, 1));
+  }
+  for(int nY = 0; nY < m_img.height(); nY += m_sizeMcu.height())
+  {
+    const int nDevY = qRound(nY * m_dZoom);
+    if((nDevY < rectPaint.top()) || (nDevY > rectPaint.bottom()))
+      continue;
+    for(int nDevX = firstDot(rectPaint.left()); nDevX <= rectPaint.right(); nDevX += 3)
+      aDots.append(QRect(nDevX, nDevY, 1, 1));
+  }
+
+  painter.save();
+  painter.scale(1.0 / dDpr, 1.0 / dDpr);
+  painter.setRenderHint(QPainter::Antialiasing, false);
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(QColor(32, 32, 32));
+  painter.drawRects(aDots);
+  painter.restore();
 }
 
 bool PreviewCanvas::widgetToImage(const QPointF &ptWidget, QPoint &ptImg) const
@@ -314,8 +382,17 @@ void Q_Viewer::drawImage()
   else
     setWindowTitle("Image " + m_strZoom);
   canvas->setImage(*m_pImgDecoder->m_pDibTemp, scaleFactor);
+  updateMcuGrid();
   scrollArea->setVisible(true);
   setVisible(true);
+}
+
+// The MCU grid is drawn over a JPEG's image only: a Photoshop file's has no
+// MCUs. A JPEG's image is a whole number of MCUs.
+void Q_Viewer::updateMcuGrid()
+{
+  const bool bGrid = m_pImgDecoder->GetPreviewOverlayMcuGrid() && imageReady() && m_pImgDecoder->IsPreviewReady();
+  canvas->setMcuGrid(bGrid ? m_pImgDecoder->GetMcuSize() : QSize());
 }
 
 void Q_Viewer::zoom(QAction* action)

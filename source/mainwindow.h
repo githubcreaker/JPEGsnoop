@@ -97,6 +97,7 @@ private slots:
   void onSearchDqt();
   void onAddToDb();
   void onManageLocalDb();
+  void onMcuGrid(bool bOn);
   void onAbout();
 
 private:

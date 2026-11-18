@@ -3207,6 +3207,117 @@ manage_db_case("MD_readonly_file", "manage,select=1,remove,ok", "harness: messag
                "removed: \\[/.*/JPEGsnoop_db\\.dat\\] couldn't be written: .*not writable", extra=AD_RO_FILE)
 manage_db_case("MD_readonly_file_count", "manage,select=1,remove,ok", ad_count(3), extra=AD_RO_FILE)
 
+# --- View > Overlays > MCU Grid -------------------------------------------------
+# White images, so that the grid's dots are the only dark pixels: MCUs of 8x8
+# (4:4:4 and grayscale), 16x16 (4:2:0) and 16x8 (4:2:2), and one of 40x20,
+# which the decoder rounds up to whole MCUs (48x32)
+WHITE = Image.new("RGB", (64, 48), (255, 255, 255))
+write("mg_white_444.jpg", jpeg(WHITE, quality=95, subsampling=0))
+write("mg_white_420.jpg", jpeg(WHITE, quality=95, subsampling=2))
+write("mg_white_422.jpg", jpeg(WHITE, quality=95, subsampling=1))
+write("mg_white_gray.jpg", jpeg(WHITE.convert("L"), quality=95))
+write("mg_white_odd.jpg", jpeg(Image.new("RGB", (40, 20), (255, 255, 255)), quality=95, subsampling=2))
+# Larger than the image window at 100%, to scroll
+write("mg_white_big.jpg", jpeg(Image.new("RGB", (1024, 1024), (255, 255, 255)), quality=95, subsampling=2))
+
+
+def mcu_grid_case(cid, names, steps, expect, extra="", forbid="-"):
+    case(cid, "MG", "gui", list(names), ("--mcu-grid " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+def mg_drawn(when, zoom, screen, cols, rows, scale=1):
+    return rx(f"harness: mcu-grid {when}: checked=1 zoom={zoom} scale={scale} screen={screen} cols={cols} "
+              f"rows={rows} gap=3 colours=202020 stray=0") + "$"
+
+
+def mg_none(when, checked, zoom, screen, scale=1):
+    return rx(f"harness: mcu-grid {when}: checked={checked} zoom={zoom} scale={scale} screen={screen} grid=none") + "$"
+
+
+MG_420 = ("mg_white_420.jpg",)
+MG_ON = "zoom=100,toggle"
+MG_COLS_8 = "0,8,16,24,32,40,48,56"
+MG_ROWS_8 = "0,8,16,24,32,40"
+# The menu item: in View > Overlays, with Windows' tip; Control-G on macOS,
+# where Command-G is Edit > Find Next's key. Checkable, off at first, and
+# needs no file open.
+mcu_grid_case("MG_menu", MG_420, "grid", rx('harness: mcu-grid menu=Overlays after="-" separator=0 enabled=1 '
+              'tip="Display MCU Boundary grid" shortcut=Meta+G checkable=1 checked=0') + "$")
+mcu_grid_case("MG_off", MG_420, "zoom=100,grid", mg_none("grid", 0, 1, "64x48"))
+mcu_grid_case("MG_toggle", MG_420, MG_ON, "harness: mcu-grid toggle: checked=1 find-next=0$")
+mcu_grid_case("MG_toggle_off", MG_420, MG_ON + ",toggle", mg_none("file 1", 0, 1, "64x48"))
+mcu_grid_case("MG_key", MG_420, "zoom=100,key", "harness: mcu-grid key: checked=1 find-next=0$")
+mcu_grid_case("MG_key_drawn", MG_420, "zoom=100,key", mg_drawn("file 1", 1, "64x48", "0,16,32,48", "0,16,32"))
+# Command-G is Find Next's (it was both, so neither ran)
+MG_FIND = "--edit key:find,what:Precision,return,escape,activate"
+mcu_grid_case("MG_cmd_g", MG_420, "cmd-g", "harness: mcu-grid cmd-g: checked=0 find-next=1$", extra=MG_FIND)
+mcu_grid_case("MG_cmd_g_grid_on", MG_420, "cmd-g,key,cmd-g", "harness: mcu-grid cmd-g: checked=1 find-next=2$",
+              extra=MG_FIND)
+mcu_grid_case("MG_before_file", MG_420, "toggle,zoom=100", mg_drawn("file 1", 1, "64x48", "0,16,32,48", "0,16,32"),
+              extra="--mcu-grid-at 0")
+mcu_grid_case("MG_before_file_enabled", MG_420, "toggle", "harness: mcu-grid menu=.* enabled=1 ",
+              extra="--mcu-grid-at 0")
+
+# A dotted line, one screen pixel wide, along the top and left of each MCU;
+# the image unchanged elsewhere. MCUs of 16x16, 8x8, 16x8, and a grayscale
+# image's 8x8; an image rounded up to whole MCUs.
+mcu_grid_case("MG_420", MG_420, MG_ON + ",grid", mg_drawn("grid", 1, "64x48", "0,16,32,48", "0,16,32"))
+mcu_grid_case("MG_444", ("mg_white_444.jpg",), MG_ON, mg_drawn("file 1", 1, "64x48", MG_COLS_8, MG_ROWS_8))
+mcu_grid_case("MG_422", ("mg_white_422.jpg",), MG_ON, mg_drawn("file 1", 1, "64x48", "0,16,32,48", MG_ROWS_8))
+mcu_grid_case("MG_gray", ("mg_white_gray.jpg",), MG_ON, mg_drawn("file 1", 1, "64x48", MG_COLS_8, MG_ROWS_8))
+mcu_grid_case("MG_odd", ("mg_white_odd.jpg",), MG_ON, mg_drawn("file 1", 1, "48x32", "0,16,32", "0,16"))
+# Each zoom; none at 12.5%, as on Windows
+mcu_grid_case("MG_zoom_12", MG_420, MG_ON + ",zoom=12.5", mg_none("file 1", 1, 0.125, "8x6"))
+mcu_grid_case("MG_zoom_25", MG_420, MG_ON + ",zoom=25", mg_drawn("file 1", 0.25, "16x12", "0,4,8,12", "0,4,8"))
+mcu_grid_case("MG_zoom_50", MG_420, MG_ON + ",zoom=50", mg_drawn("file 1", 0.5, "32x24", "0,8,16,24", "0,8,16"))
+mcu_grid_case("MG_zoom_150", MG_420, MG_ON + ",zoom=150", mg_drawn("file 1", 1.5, "96x72", "0,24,48,72", "0,24,48"))
+mcu_grid_case("MG_zoom_200", MG_420, MG_ON + ",zoom=200", mg_drawn("file 1", 2, "128x96", "0,32,64,96", "0,32,64"))
+mcu_grid_case("MG_zoom_800", ("mg_white_444.jpg",), MG_ON + ",zoom=800",
+              mg_drawn("file 1", 8, "512x384", "0,64,128,192,256,320,384,448", "0,64,128,192,256,320"))
+# A Retina screen: still one screen pixel wide
+mcu_grid_case("MG_retina_100", MG_420, MG_ON, mg_drawn("file 1", 1, "64x48", "0,16,32,48", "0,16,32", scale=2),
+              extra="--scale 2")
+mcu_grid_case("MG_retina_200", MG_420, MG_ON + ",zoom=200",
+              mg_drawn("file 1", 2, "128x96", "0,32,64,96", "0,32,64", scale=2), extra="--scale 2")
+mcu_grid_case("MG_retina_50", MG_420, MG_ON + ",zoom=50",
+              mg_drawn("file 1", 0.5, "32x24", "0,8,16,24", "0,8,16", scale=2), extra="--scale 2")
+# Another channel, and back
+mcu_grid_case("MG_channel", MG_420, MG_ON + ",channel=Cb,grid", mg_drawn("grid", 1, "64x48", "0,16,32,48", "0,16,32"))
+mcu_grid_case("MG_channel_back", MG_420, MG_ON + ",channel=Cb,channel=RGB",
+              mg_drawn("file 1", 1, "64x48", "0,16,32,48", "0,16,32"))
+# Later files: the grid stays on, with each file's MCUs; no image (a
+# progressive JPEG), and a Photoshop file's image, which has no MCUs
+MG_FILES = ("mg_white_444.jpg", "mg_white_420.jpg", "ok_progressive.jpg", "psd_rgb_rle.psd", "mg_white_422.jpg")
+mcu_grid_case("MG_next_file", MG_FILES, MG_ON, mg_drawn("file 2", 1, "64x48", "0,16,32,48", "0,16,32"))
+mcu_grid_case("MG_no_image", MG_FILES, MG_ON, "harness: mcu-grid file 3: checked=1 preview=none$")
+mcu_grid_case("MG_psd", MG_FILES, MG_ON, mg_none("file 4", 1, 1, "37x23"))
+mcu_grid_case("MG_after_psd", MG_FILES, MG_ON, mg_drawn("file 5", 1, "64x48", "0,16,32,48", MG_ROWS_8))
+# Scrolling copies what the image window shows and paints only what comes into
+# view, and making it larger paints only what it adds: the dots painted then
+# must fall where painting it all again puts them. (On a Retina screen the
+# window grab has one pixel per point.)
+MG_BIG = ("mg_white_big.jpg",)
+
+
+def mg_buffer(scroll, window, dots="[1-9][0-9]*"):
+    return (rx(f"harness: mcu-grid buffer: scroll={scroll} window={window} buffer={window} grid pixels=") + dots +
+            " changed by painting it all=0$")
+
+
+mcu_grid_case("MG_scroll", MG_BIG, MG_ON + ",scroll=7;5,buffer", mg_buffer("7,5", "400x400"))
+mcu_grid_case("MG_scroll_again", MG_BIG, MG_ON + ",scroll=7;5,scroll=40;33,buffer", mg_buffer("40,33", "400x400"))
+mcu_grid_case("MG_scroll_back", MG_BIG, MG_ON + ",scroll=40;33,scroll=12;30,buffer", mg_buffer("12,30", "400x400"))
+mcu_grid_case("MG_scroll_150", MG_BIG, MG_ON + ",zoom=150,scroll=101;77,buffer", mg_buffer("101,77", "400x400"))
+mcu_grid_case("MG_scroll_50", MG_BIG, MG_ON + ",zoom=50,scroll=13;9,buffer", mg_buffer("13,9", "400x400"))
+mcu_grid_case("MG_scroll_retina", MG_BIG, MG_ON + ",scroll=1;1,scroll=2;2,buffer", mg_buffer("2,2", "400x400"),
+              extra="--scale 2")
+mcu_grid_case("MG_scroll_retina_more", MG_BIG, MG_ON + ",scroll=2;2,scroll=7;5,buffer", mg_buffer("7,5", "400x400"),
+              extra="--scale 2")
+mcu_grid_case("MG_resize", MG_BIG, MG_ON + ",scroll=40;33,size=600;600,buffer", mg_buffer("40,33", "600x600"))
+mcu_grid_case("MG_scroll_grid_off", MG_BIG, "zoom=100,scroll=7;5,buffer", mg_buffer("7,5", "400x400", dots="0"))
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

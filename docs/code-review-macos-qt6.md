@@ -2056,6 +2056,124 @@ new cases, and none of them passes a case it failed before.
 Developer ID signing and notarization (M5). Latent code. Fill bytes before an RST marker
 in the report's marker list (see Tools > Lookup MCU Offset).
 
+### View > Overlays > MCU Grid
+
+View > Overlays > MCU Grid did nothing: the menu item had no handler. The code that drew
+the grid was in the decoder's drawing routine, which the Qt port had commented out, and
+that copy never set its dotted pen. Now, as on Windows:
+- **The menu item** has a check mark and Windows' status tip "Display MCU Boundary grid".
+  It is off at the start and isn't saved, and it needs no file open.
+- **The grid** is a dotted dark grey line (RGB 32,32,32) along the top and the left of
+  each MCU, drawn over the image window's image, with the image showing between the dots.
+  Each dot is one screen pixel, also on a Retina screen, on every third pixel counted from
+  the image's top or left edge. There is none at 12.5%, where an MCU of 8 pixels is one
+  screen pixel.
+- **It stays on** from file to file, follows each file's MCU size, and is kept when the
+  zoom or the channel changes.
+
+**Found and fixed** (the Qt port's):
+- **The menu item did nothing.**
+- **Command-G was both Find Next's key and MCU Grid's.** Qt turns Windows' Ctrl+G into
+  Command-G on macOS, which is also Edit > Find Next's standard key there. Once a search
+  had made Find Next available, Qt's own shortcut handling ran neither ("Ambiguous
+  shortcut overload"), as the driver shows. The macOS menu bar handles keys itself, so
+  there one of them may have won, but not both. The Find tests didn't see it: they press
+  Find Next's first key, which on the test platform is F3. MCU Grid now has Control-G on
+  macOS, the same keys as Windows' Ctrl+G, and Command-G is Find Next's alone.
+
+**Changes from Windows:**
+- **Control-G** on macOS, as above.
+- **No grid over a Photoshop file's image,** which has no MCUs.
+- **The grid is drawn by the image window** (`PreviewCanvas`), not the decoder:
+  `CimgDecode::ViewMcuOverlay()` is gone, and the menu item sets the setting rather than
+  toggling it, so the check mark and the grid always agree.
+
+**Unchanged from Windows:** the menu item's place, the grid's look, none at 12.5%, off at
+the start, not saved.
+
+**Not ported:** Windows' drawing routine also drew a red line where the image ends inside
+its last, partial MCUs, whether or not the grid was on. The image window draws no such
+line.
+
+**Tests:** 30 new `MG` cases (860 in all).
+- **The driver:** `gui --mcu-grid STEP[,STEP...]` (`--mcu-grid-at N`, 0 before any file)
+  prints the menu item's place, shortcut and check mark. It then chooses the menu item,
+  presses its key or Cmd+G, picks a zoom or a channel, and reports the grid. The report
+  compares the image window's drawing, in screen pixels, with the decoded image. It gives
+  the screen columns and rows the dots are on, their spacing and colours, and how many
+  other pixels differ. It is printed after every file too.
+- **Test images:** white images, so that the dots are the only dark pixels.
+
+The cases cover:
+- **The menu item:** its place, tip, shortcut and check mark; choosing it, and its key;
+  before any file is open.
+- **Command-G** after a search: Find Next runs, the grid is unchanged.
+- **The grid:** MCUs of 16x16, 8x8 and 16x8, a grayscale image, and an image rounded up
+  to whole MCUs.
+- **Zoom:** 12.5% (none), 25%, 50%, 150%, 200% and 800%; a Retina screen at 50%, 100% and
+  200%.
+- **Channels:** another channel, and back.
+- **Later files:** another MCU size, a progressive JPEG (no image), a Photoshop file (no
+  grid), and a JPEG after it.
+
+On the previous commit 27 of them fail. The other 3 check what was already so: no grid
+while it is off, and the menu item enabled with no file open. Seventeen deliberate breaks
+each fail their own cases:
+- **The menu item:** no handler, 19 fail; not checkable, 26 fail; checked at the start,
+  29 fail; Command-G as its key, 3 fail.
+- **Updating the grid:** not when the menu item is chosen, 7 fail; not when an image is
+  drawn, 4 fail; turned off for each file, 3 fail.
+- **Drawing it:**
+  - not at all, 19 fail;
+  - not below 100%, 3 fail;
+  - at 12.5% too, 1 fails; not at 25%, 1 fails;
+  - a line two screen pixels wide on a Retina screen, 3 fail;
+  - solid, 19 fail; black, 19 fail;
+  - along the right of each MCU, 19 fail;
+  - columns spaced by the MCU's height, 2 fail;
+  - over a Photoshop file's image, 1 fails.
+
+**Second check:** a review before the commit found one problem, reproduced and now fixed.
+Scrolling the image window copies what it shows and paints only what comes into view.
+The grid was drawn with a dotted pen, whose dots start where the area being painted
+starts, so the new dots fell between the copied ones. At 2x and 100%, painting the
+whole window again after a scroll changed thousands of the window's pixels. Each dot is
+now drawn as one screen pixel at a place counted from the image's edge, so a dot is in
+the same place however much is painted.
+
+The driver gains the steps `scroll=X;Y`, `size=W;H` and `buffer`. `buffer` grabs the
+window as it was painted and counts the pixels that painting it all again changes, and
+those with the grid's colour. The full-canvas grab the other cases use paints everything
+again, which is why they didn't see this. 9 new cases (39 `MG`, 869 in all) cover:
+- scrolling down and right, twice, and back up and left;
+- at 50%, 100% and 150%, and on a Retina screen;
+- making the window larger;
+- the grid off.
+
+On the previous commit 8 of them fail; the other checks the grid off. Two new breaks:
+the dotted pen back, 6 fail; the dots counted from the area being painted, 7 fail. The
+17 earlier breaks, those for drawing rewritten for the new code, each still fail the same
+cases among the first 30. Making the window larger didn't show the problem with the
+dotted pen either; its case stays as a check.
+
+**Checks:**
+- **All 869 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** finds nothing new in the changed app files, and two findings fewer
+  (in the removed `ViewMcuOverlay()`). Its two findings in the new driver code are fixed.
+- **Not checked:** on the macOS platform, where the menu bar handles key equivalents
+  itself: Control-G and Command-G there, and the grid's look on screen.
+
+**Still open:**
+- **Windows' red line** at the image's real size, above.
+- **Menu items not yet ported:** View > Toolbar and Status Bar, File > Print Setup and
+  Recent File, and the toolbar's New button.
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

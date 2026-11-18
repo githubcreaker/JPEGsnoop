@@ -187,6 +187,22 @@ when it is installed, so Pillow needn't be installed separately).
       makes NAME in the settings folder (not created) the user database
       folder, instead of the settings folder itself; `--db-dir-mode OCTAL`
       creates it and sets its permissions until the window closes.
+    - `--mcu-grid STEP[,STEP...]` chooses View > Overlays > MCU Grid after the
+      first file (or file N with `--mcu-grid-at N`; `0` is before any file),
+      printing the menu item's place, shortcut and check mark first, and does
+      each STEP: `toggle` (choose the menu item), `key` (press its shortcut),
+      `cmd-g` (press Cmd+G, Edit > Find Next's key on macOS), `zoom=PCT`,
+      `channel=NAME` (View > Image Chan), `scroll=X;Y` (scroll the image
+      window there, in points), `size=W;H` (make it that size), `grid` and
+      `buffer`. After each step it prints the check mark and how often Find
+      Next ran. `grid`, and every file after it is shown, print where the grid
+      is drawn: the screen columns and rows its dots are on, their spacing
+      (`gap`) and colours, and how many other pixels differ from the decoded
+      image (`stray`). `buffer` grabs the image window as it was painted (a
+      scroll copies what was shown and paints only what comes into view) and
+      prints how many of its pixels painting it all again changes, and how
+      many have the grid's colour. On a Retina screen the grab has one pixel
+      per point.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -275,8 +291,8 @@ section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
 `BP` in its "Batch Process" section, `FO` in its "File > Offset" section, `IS`
 in its "Tools > Image Search Fwd and Rev" section, `LM` in its "Tools > Lookup MCU
 Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
-`AD` in its "Tools > Add Camera/SW to DB" section, and `MD` in its "Tools >
-Manage Local DB" section);
+`AD` in its "Tools > Add Camera/SW to DB" section, `MD` in its "Tools >
+Manage Local DB" section, and `MG` in its "View > Overlays > MCU Grid" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case
