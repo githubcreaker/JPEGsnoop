@@ -3539,6 +3539,45 @@ recent_case("RF_amp_item", "open-copy=ok_444.jpg:long folder name one/long folde
             "harness: recent menu: &1 [^|]*/R&&D photo\\.jpg \\(tip R&D photo\\.jpg\\)$")
 
 
+# --- The toolbar's New button ----------------------------------------------------
+def new_case(cid, steps, expect, names=("ok_444.jpg",), extra="", forbid="-"):
+    case(cid, "NB", "gui", list(names), ("--new " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+NB_FILE_ITEMS = ("Save Log|Reprocess File|Offset|Image Search Fwd|Image Search Rev|Lookup MCU Offset|File Overlay|"
+                 "Export JPEG|Export TIFF|Add Camera/SW to DB")
+
+
+def nb_start(step, recent):
+    """What is shown at the start, with no file"""
+    return rx(f"harness: new {step}: report=empty image-window=hidden preview=none histograms=empty file-items=none "
+              f"select-all=0 find=0 dqt=1 recent={recent}") + "$"
+
+
+# The button, first on the toolbar, with Windows' tip and Ctrl+N (Cmd+N on
+# macOS); in no menu, as on Windows
+new_case("NB_button", "button", rx('harness: new button: toolbar=File position=1 tip="Create a new document" '
+         'tooltip="New" shortcut=Ctrl+N menus=none') + "$")
+# No file shown, as at the start (the item that needs no file stays on, and
+# File > Recent File is kept)
+new_case("NB_like_start", "button", nb_start("button", 1))
+new_case("NB_start_state", "button", nb_start("at first", 0), extra="--new-at 0")
+new_case("NB_before_file", "button", nb_start("button", 0), extra="--new-at 0")
+new_case("NB_histograms", "button", "harness: new button: .* histograms=empty ", extra="--histo")
+new_case("NB_histograms_before", "button", "harness: new at first: .* histograms=drawn ", extra="--histo")
+new_case("NB_reprocess", "button,reprocess", nb_start("reprocess", 1))
+new_case("NB_open_after", "button,open=ok_420.jpg", "harness: new open=ok_420.jpg: report=[0-9]+ lines "
+         "image-window=shown preview=64x48 histograms=empty file-items=" + rx(NB_FILE_ITEMS) + " select-all=1 find=1 "
+         "dqt=1 recent=2$")
+# Its key, also while the toolbar is hidden (as Windows' Ctrl+N), and in the
+# image window, which was part of Windows' main window
+new_case("NB_key", "key", nb_start("key", 1))
+new_case("NB_key_hidden_toolbar", "hide-toolbar,key", nb_start("key", 1))
+new_case("NB_key_image", "key-image", nb_start("key-image", 1))
+new_case("NB_key_image_hidden_toolbar", "hide-toolbar,key-image", nb_start("key-image", 1))
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

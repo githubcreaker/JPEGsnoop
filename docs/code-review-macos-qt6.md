@@ -2461,6 +2461,81 @@ Fourteen deliberate breaks each fail their own cases:
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### The toolbar's New button
+
+The toolbar's New button and its key, Cmd+N (Windows' Ctrl+N), did nothing: the handler
+was commented out. Now, as on Windows (MFC's File New, which emptied the document):
+- **No file is shown, as at the start.** The report is emptied, the image window is
+  hidden with its preview, and the histograms are emptied. The items that need a file
+  are off again: Save Log, Reprocess, Offset, Image Search Fwd and Rev, Lookup MCU
+  Offset, File Overlay, Export JPEG and TIFF, and Add Camera/SW to DB. So are Select All
+  and Find, which need text. Search Executable for DQT, which needs no file, stays on.
+- **The settings stay,** with File > Recent File and the zoom. The next file opened is
+  shown as any is, without the last one's start offset or File Overlay.
+- **The button** is first on the toolbar, with Windows' tip "Create a new document". It
+  isn't in the menus, as on Windows.
+- **Its key works while the toolbar is hidden, and in the image window,** as Windows'
+  Ctrl+N did (the image was part of Windows' main window). Qt honours an action's key
+  only in a window it is added to, and only while a button for it can be seen there, so
+  the action is also on the main window and the image window.
+
+**Changes from Windows:**
+- **The image window is hidden again,** as at the start. On Windows the image was part
+  of the main window.
+- **The title:** Windows' said "Untitled". The port's title never names the file, so
+  nothing changes there.
+
+**Tests:** 12 new `NB` cases (958 in all).
+- **The driver:** `gui --new STEP[,STEP...]` (`--new-at N`) prints where the button is
+  (toolbar, position, tips, shortcut, menus) and what is shown: the report, the image
+  window, the preview, the histograms, which items that need a file are on, the Edit
+  items that need text, Search Executable for DQT, and File > Recent File's items. Its
+  steps click the button, press its key in the main window or the image window (made
+  the active window first), hide the toolbar, reprocess, and open a file.
+
+The cases cover:
+- **The button:** its place, tips and key, and that it is in no menu.
+- **After it:** as at the start, also when used before any file; the histograms
+  emptied; Reprocess doing nothing; the next file shown as any is.
+- **The key,** in the main window and in the image window, also with the toolbar hidden.
+
+On the previous commit 8 of them fail. The other 4 check what was already so: the start,
+the histograms before it, and opening a file after it. Eleven deliberate breaks each fail
+their own cases:
+- **The button:** no handler, 7 fail; Windows' tip missing, 1 fails; the key not on the
+  main window, 1 fails; the key not on the image window, 2 fail.
+- **What it empties:** the report kept, 6 fail; the preview and histograms kept, 7 fail;
+  the image window left shown, 6 fail; the items left on, 6 fail; the file kept, so
+  Reprocess shows it again, 1 fails.
+- **What it keeps:** Search Executable for DQT turned off, 8 fail; File > Recent File
+  emptied, 7 fail.
+
+**Second check:** a review before the commit found one problem, reproduced and now fixed.
+Cmd+N did nothing while the image window was the active window, also with the toolbar
+hidden: the action was only on the main window and its toolbar, and Qt honours a key
+added to a window only while that window is active. The key cases didn't see it, as the
+driver made the main window active first. The action is now on the image window too.
+The driver's new `key-image` step makes the image window active, then presses the key;
+it prints no state if the window can't be made active. Its 2 cases (above) fail on the
+previous commit and with the image window's key removed.
+
+**Checks:**
+- **All 958 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** finds nothing new in the changed files (its one finding in the new
+  driver code, a loop that could be `std::count_if`, is fixed).
+- **Not checked:** on the macOS platform, the toolbar button's look and Cmd+N, in either
+  window.
+
+**Still open:**
+- **Windows' red line** where the image ends inside its last MCUs (see View > Overlays >
+  MCU Grid).
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

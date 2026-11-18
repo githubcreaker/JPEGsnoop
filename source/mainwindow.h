@@ -118,6 +118,7 @@ private slots:
   void onAddToDb();
   void onManageLocalDb();
   void onOpenRecent();
+  void onFileNew();
   void onMcuGrid(bool bOn);
   void onStatusBar(bool bOn);
   void onAbout();
@@ -132,7 +133,8 @@ private:
   void createActions(void);
   void createMenus(void);
   void runBatch(const BatchSettings &sBatch, const BatchList &list);
-  void enableMenus();
+  // The items that need a file: on once one is opened, off again after New
+  void enableMenus(bool bEnable = true);
   void updateTextActions();
   bool findInReport();
   void moveFindDialogOffSelection();

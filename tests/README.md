@@ -239,6 +239,14 @@ when it is installed, so Pillow needn't be installed separately).
       item names PATH (`~/` is the home folder; no file is needed). Values are
       percent-encoded. `--recent-stored NAME[+NAME...]` saves a list before
       the window opens, as a previous start would have.
+    - `--new STEP[,STEP...]` (`--new-at N`; `0` is before any file) prints
+      where the toolbar's New button is (toolbar, position, tips, shortcut,
+      menus) and what is shown: the report, the image window, the preview,
+      the histograms, which items that need a file are on, the Edit items
+      that need text, and File > Recent File's items. Steps, each followed by
+      the same: `button` (click it), `key` (press its shortcut in the main
+      window), `key-image` (in the image window), `hide-toolbar`,
+      `reprocess`, `open=NAME`.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -330,7 +338,8 @@ Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
 `AD` in its "Tools > Add Camera/SW to DB" section, `MD` in its "Tools >
 Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
 `VB` in its "View > Toolbar and Status Bar" section, `PS` in its "File > Print
-Setup" section, and `RF` in its "File > Recent File" section);
+Setup" section, `RF` in its "File > Recent File" section, and `NB` in its "The
+toolbar's New button" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

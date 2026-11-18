@@ -293,6 +293,17 @@
 //     list (NAMEs in the folder of the files given, newest first) before the
 //     window opens, as a previous start would have.
 //
+// gui ... --new STEP[,STEP...] [--new-at N]
+//     After the first file (or file N; 0 is before any file), print where
+//     the toolbar's New button is (toolbar, position, tips, shortcut, the
+//     menus it is in) and what is shown: the report, the image window, the
+//     preview, the histograms, which items that need a file are on, the Edit
+//     items that need text, and File > Recent File's items. Then do each
+//     STEP and print the same: button (click it), key (press its shortcut
+//     in the main window), key-image (in the image window), hide-toolbar,
+//     reprocess, open=NAME (as File > Open opens NAME, in the folder of the
+//     files given).
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -353,6 +364,7 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QWindow>
 #include <QtMath>
@@ -409,6 +421,7 @@ static void usage()
           "                         [--bars STEP[,STEP...] [--bars-at N]]\n"
           "                         [--print STEP[,STEP...] [--print-at N]]\n"
           "                         [--recent STEP[,STEP...] [--recent-at N]] [--recent-stored NAME[+NAME...]]\n"
+          "                         [--new STEP[,STEP...] [--new-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1136,6 +1149,8 @@ struct GuiOptions
   QString strRecent;              // --recent STEP[,STEP...]
   int nRecentAt = 1;              // --recent-at N
   QString strRecentStored;        // --recent-stored NAME[+NAME...]
+  QString strNew;                 // --new STEP[,STEP...]
+  int nNewAt = 1;                 // --new-at N
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -3487,6 +3502,117 @@ static void recentMenu(MainWindow &window, const GuiOptions &opts, const QString
   out.flush();
 }
 
+// What the toolbar's New button leaves: the report, the image window, the
+// preview, the histograms, which of the items that need a file are on, the
+// Edit items that need text, and how many files File > Recent File lists
+static QString newState(MainWindow &window)
+{
+  const int nLines = window.textEdit->document()->isEmpty() ? 0 : window.textEdit->document()->blockCount();
+  Q_Viewer *pViewer = findViewer();
+  const PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+  const QLabel *pRgb = window.findChild<QLabel *>("rgbHistogram");
+  const QLabel *pY = window.findChild<QLabel *>("yHistogram");
+  const bool bHisto = (pRgb && !pRgb->pixmap().isNull()) || (pY && !pY->pixmap().isNull());
+  QStringList astrOn;
+  for(const char *pszItem : { "&Save Log...", "Reprocess File", "Offset...", "Image Search Fwd", "Image Search Rev",
+                              "Lookup MCU Offset...", "File Overlay...", "Export JPEG...", "Export TIFF...",
+                              "Add Camera/SW to DB..." })
+  {
+    QAction *pAction = findAction(window, QString::fromLatin1(pszItem));
+    if(pAction && pAction->isEnabled())
+      astrOn << QString(pszItem).remove('&').remove("...");
+  }
+  QAction *pSelectAll = findAction(window, QStringLiteral("Select All"));
+  QAction *pFind = findAction(window, QStringLiteral("Find..."));
+  QAction *pDqt = findAction(window, QStringLiteral("Search Executable for DQT..."));
+  const QList<QAction *> apActions = window.findChildren<QAction *>();
+  static const QRegularExpression reRecent(QStringLiteral("^&[1-9] "));
+  const auto nRecent = std::count_if(apActions.cbegin(), apActions.cend(), [](const QAction *pAction) {
+    return pAction->isVisible() && reRecent.match(pAction->text()).hasMatch();
+  });
+  return QString("report=%1 image-window=%2 preview=%3 histograms=%4 file-items=%5 select-all=%6 find=%7 dqt=%8 "
+                 "recent=%9")
+           .arg(nLines ? QString("%1 lines").arg(nLines) : QStringLiteral("empty"))
+           .arg((pViewer && pViewer->isVisible()) ? "shown" : "hidden")
+           .arg((pCanvas && !pCanvas->image().isNull())
+                  ? QString("%1x%2").arg(pCanvas->image().width()).arg(pCanvas->image().height())
+                  : QStringLiteral("none"))
+           .arg(bHisto ? "drawn" : "empty")
+           .arg(astrOn.isEmpty() ? QStringLiteral("none") : astrOn.join('|'))
+           .arg((pSelectAll && pSelectAll->isEnabled()) ? 1 : 0)
+           .arg((pFind && pFind->isEnabled()) ? 1 : 0)
+           .arg((pDqt && pDqt->isEnabled()) ? 1 : 0)
+           .arg(nRecent);
+}
+
+// The toolbar's New button as a user uses it (see --new above)
+static void newButton(MainWindow &window, const GuiOptions &opts, QTextStream &out)
+{
+  QAction *pNew = findAction(window, QStringLiteral("&New"));
+  QToolBar *pTb = window.findChild<QToolBar *>();
+  QToolButton *pButton = (pNew && pTb) ? qobject_cast<QToolButton *>(pTb->widgetForAction(pNew)) : nullptr;
+  if(!pNew || !pButton)
+  {
+    out << "harness: new button unavailable\n";
+    return;
+  }
+  QStringList astrMenus;
+  for(QObject *pObj : pNew->associatedObjects())
+  {
+    if(const QMenu *pMenu = qobject_cast<QMenu *>(pObj))
+      astrMenus << pMenu->title();
+  }
+  out << "harness: new button: toolbar=" << pTb->windowTitle() << " position=" << (pTb->actions().indexOf(pNew) + 1)
+      << " tip=\"" << pNew->statusTip() << "\" tooltip=\"" << pButton->toolTip()
+      << "\" shortcut=" << pNew->shortcut().toString(QKeySequence::PortableText)
+      << " menus=" << (astrMenus.isEmpty() ? QStringLiteral("none") : astrMenus.join('|')) << "\n";
+  out << "harness: new at first: " << newState(window) << "\n";
+
+  for(const QString &strStep : opts.strNew.split(',', Qt::SkipEmptyParts))
+  {
+    if(strStep == "button")
+      pButton->click();
+    else if((strStep == "key") || (strStep == "key-image"))
+    {
+      // Pressed in the main window or the image window, made the active
+      // window first, as a user's click does (a key reaches only the window
+      // that is active). No state is printed unless it is.
+      QWidget *pWin = (strStep == "key") ? static_cast<QWidget *>(&window) : findViewer();
+      if(!pWin || !pWin->isVisible())
+      {
+        out << "harness: new " << strStep << ": window hidden\n";
+        continue;
+      }
+      if(QApplication::activeWindow() != pWin)
+      {
+        pWin->activateWindow();
+        static_cast<void>(QTest::qWaitFor([pWin]() { return QApplication::activeWindow() == pWin; }, 1000));
+      }
+      if(QApplication::activeWindow() != pWin)
+      {
+        out << "harness: new " << strStep << ": window not active\n";
+        continue;
+      }
+      const QKeyCombination key = pNew->shortcut()[0];
+      QTest::keyClick(pWin, key.key(), key.keyboardModifiers());
+    }
+    else if(strStep == "hide-toolbar")
+      pTb->hide();
+    else if(strStep == "reprocess")
+      window.reprocess();
+    else if(strStep.startsWith("open="))
+      window.openFile(QDir(opts.strFilesDir).filePath(strStep.mid(5)));
+    else
+    {
+      out << "harness: unknown new step " << strStep << "\n";
+      continue;
+    }
+    QCoreApplication::processEvents();
+    out << "harness: new " << strStep << ": " << newState(window) << "\n";
+  }
+  out.flush();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -4020,6 +4146,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     dqtMenu(window, opts, out);
   }
 
+  // The toolbar's New button before any file has been opened
+  if(!opts.strNew.isEmpty() && (opts.nNewAt == 0))
+  {
+    out << "harness: new before any file\n";
+    newButton(window, opts, out);
+  }
+
   // File > Recent File before any file has been opened
   if(!opts.strRecent.isEmpty() && (opts.nRecentAt == 0))
   {
@@ -4143,6 +4276,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           printMenu(window, opts.strPrint, strSettingsDir, out);
         if(!opts.strRecent.isEmpty() && (nFileInd == opts.nRecentAt))
           recentMenu(window, opts, strSettingsDir, out);
+        if(!opts.strNew.isEmpty() && (nFileInd == opts.nNewAt))
+          newButton(window, opts, out);
         if(!opts.strBars.isEmpty())
         {
           if(nFileInd == opts.nBarsAt)
@@ -5059,7 +5194,8 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
-                             "--db-dir-mode", "--mcu-grid", "--bars", "--print", "--recent", "--recent-stored" })
+                             "--db-dir-mode", "--mcu-grid", "--bars", "--print", "--recent", "--recent-stored",
+                             "--new" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -5117,6 +5253,8 @@ int main(int argc, char **argv)
       guiOpts.strRecent = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--recent-stored"))
       guiOpts.strRecentStored = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--new"))
+      guiOpts.strNew = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -5125,7 +5263,7 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
                              "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at", "--print-at",
-                             "--recent-at" })
+                             "--recent-at", "--new-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -5166,6 +5304,8 @@ int main(int argc, char **argv)
       guiOpts.nPrintAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--recent-at"))
       guiOpts.nRecentAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--new-at"))
+      guiOpts.nNewAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

@@ -222,11 +222,18 @@ void MainWindow::createActions(void)
     m_pAppConfig->DebugLogAdd("MainWindow::createActions() Begin");
 
   const QIcon newIcon = QIcon::fromTheme("document-new", QIcon(rsrcPath + "/filenew.png"));
+  // The toolbar's New button and its key (Windows has neither in its menus).
+  // Qt honours a key only in the window it is added to, and only while its
+  // button can be seen there. So it is added to this window, for while the
+  // toolbar is hidden, and to the image window, which was part of Windows'
+  // main window: Windows' Ctrl+N worked in both.
   newAct = new QAction(newIcon, tr("&New"), this);
   newAct->setShortcuts(QKeySequence::New);
-  newAct->setStatusTip(tr("New"));
-//  connect(newAct, &QAction::triggered, this, &MainWindow::newFile);
+  newAct->setStatusTip(tr("Create a new document"));
+  connect(newAct, &QAction::triggered, this, &MainWindow::onFileNew);
   fileToolBar->addAction(newAct);
+  addAction(newAct);
+  imgWindow->addAction(newAct);
 
   const QIcon openIcon = QIcon::fromTheme("document-open", QIcon(rsrcPath + "/fileopen.png"));
   openAct = new QAction(openIcon, tr("&Open Image..."), this);
@@ -1139,19 +1146,41 @@ void MainWindow::saveLog()
 
 //-----------------------------------------------------------------------------
 
-void MainWindow::enableMenus()
+void MainWindow::enableMenus(bool bEnable)
 {
-  saveLogAct->setEnabled(true);
-  reprocessAct->setEnabled(true);
-  OffsetAct->setEnabled(true);
-  imgSearchFwdAct->setEnabled(true);
-  imgSearchRevAct->setEnabled(true);
-  lookupMcuOffAct->setEnabled(true);
-  fileOverlayAct->setEnabled(true);
-  searchDqtAct->setEnabled(true);
-  exportJpegAct->setEnabled(true);
-  exportTiffAct->setEnabled(true);
-  addToDbAct->setEnabled(true);
+  // (Not Search Executable for DQT, which needs no file)
+  saveLogAct->setEnabled(bEnable);
+  reprocessAct->setEnabled(bEnable);
+  OffsetAct->setEnabled(bEnable);
+  imgSearchFwdAct->setEnabled(bEnable);
+  imgSearchRevAct->setEnabled(bEnable);
+  lookupMcuOffAct->setEnabled(bEnable);
+  fileOverlayAct->setEnabled(bEnable);
+  exportJpegAct->setEnabled(bEnable);
+  exportTiffAct->setEnabled(bEnable);
+  addToDbAct->setEnabled(bEnable);
+}
+
+//-----------------------------------------------------------------------------
+// The toolbar's New button (master's CWinApp::OnFileNew, which emptied the
+// document: CJPEGsnoopDoc::OnNewDocument): no file shown, as at the start.
+// The report, the image window (hidden again) and the histograms are
+// emptied, the file is forgotten, and the items that need a file are off.
+// (The next file opened starts without a start offset or File Overlay, as
+// any does.) Settings and File > Recent File stay as they are.
+void MainWindow::onFileNew()
+{
+  m_currentFile.clear();
+  delete m_pFile;
+  m_pFile = nullptr;
+  m_lFileSize = 0;
+  m_bFileAnalyzed = false;
+
+  clearImageViews();
+  imgWindow->hide();
+  m_pDocLog->Clear();
+  m_StatusBar->clearMessage();
+  enableMenus(false);
 }
 
 //-----------------------------------------------------------------------------
