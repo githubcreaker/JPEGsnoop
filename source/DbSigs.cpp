@@ -194,10 +194,10 @@ namespace
 {
 
 // The most of a user database that is read. DBEX_ENTRIES_MAX usual entries
-// come to under 100 KB, and DatabaseExtraAdd() writes no file larger.
+// come to under 100 KB, and no larger file is written.
 constexpr qint64 kDbMaxBytes = 4 * 1024 * 1024;
 
-// How long DatabaseExtraAdd() waits for another copy of JPEGsnoop to finish
+// How long DatabaseExtraLock() waits for another copy of JPEGsnoop to finish
 // writing the user database
 constexpr int kDbLockWaitMs = 5000;
 
@@ -281,6 +281,17 @@ bool sameEntry(const CompSig &sEntry, const T &sOther)
 
   return (sOther.eEditor != ENUM_EDITOR_SW) && (sOther.strXMake == sEntry.strXMake) &&
          (sOther.strXModel == sEntry.strXModel) && (sOther.strXSubsamp == sEntry.strXSubsamp);
+}
+
+// Whether two user database entries have the same fields, as Manage Local DB
+// finds the entries it listed when the file has changed since
+bool sameFields(const CompSig &sOne, const CompSig &sOther)
+{
+  return (sOne.eEditor == sOther.eEditor) && (sOne.strXMake == sOther.strXMake) &&
+         (sOne.strXModel == sOther.strXModel) && (sOne.strUmQual == sOther.strUmQual) &&
+         (sOne.strCSig == sOther.strCSig) && (sOne.strCSigRot == sOther.strCSigRot) &&
+         (sOne.strXSubsamp == sOther.strXSubsamp) && (sOne.strMSwTrim == sOther.strMSwTrim) &&
+         (sOne.strMSwDisp == sOther.strMSwDisp);
 }
 
 } // namespace
@@ -453,15 +464,6 @@ void CDbSigs::DatabaseExtraLoad()
   }
 }
 
-// (Not used yet: Manage Local DB isn't ported. Like DatabaseExtraAdd(), it
-// will need to lock the file and read it again before writing it.)
-void CDbSigs::DatabaseExtraClean()
-{
-  m_nSigListExtraNum = 0;
-  QString strError;
-  DatabaseExtraWrite(DatabaseExtraBytes(), strError);
-}
-
 uint32_t CDbSigs::DatabaseExtraGetNum()
 {
   return static_cast<uint32_t>(m_nSigListExtraNum);
@@ -524,22 +526,73 @@ QByteArray CDbSigs::DatabaseExtraBytes() const
   return abData;
 }
 
-// Write the user database, in full or not at all
-bool CDbSigs::DatabaseExtraWrite(const QByteArray &abData, QString &strError)
+// Take the user database's lock before it is read again and written. Another
+// copy of JPEGsnoop may have changed the file since it was read here (Windows
+// wrote what it had read, and what the other added or took out was lost):
+// this waits while another writes it. A lock left by a copy that stopped is
+// taken over (QLockFile: its process has gone, or it is over 30 s old). Null,
+// with why, if the lock can't be taken.
+std::unique_ptr<QLockFile> CDbSigs::DatabaseExtraLock(QString &strWhy) const
 {
   const QString strPath = DatabaseExtraPath();
   if(strPath.isEmpty())
   {
-    strError = noFolderText();
-    return false;
+    strWhy = noFolderText();
+    return nullptr;
+  }
+  if(!QFileInfo(m_strDbDir).isDir())
+  {
+    strWhy = QString("[%1] couldn't be written: there is no folder [%2]").arg(strPath, QDir::cleanPath(m_strDbDir));
+    return nullptr;
+  }
+
+  const QString strLock = strPath + QStringLiteral(".lock");
+  auto pLock = std::make_unique<QLockFile>(strLock);
+  if(!pLock->tryLock(kDbLockWaitMs))
+  {
+    if(pLock->error() == QLockFile::LockFailedError)
+      strWhy = QString("[%1] is being changed by another copy of JPEGsnoop (it holds [%2]). Try again.")
+                 .arg(strPath, strLock);
+    else
+      strWhy = QString("[%1] couldn't be written: [%2] couldn't be made").arg(strPath, strLock);
+    return nullptr;
+  }
+  return pLock;
+}
+
+// Replace the user database with abData, in full or not at all, keeping a
+// file that couldn't be read in full, or an older version's, as .bak first.
+// strNote: a note about the .bak, if one was kept, or why the file wasn't
+// replaced.
+bool CDbSigs::DatabaseExtraReplace(const QByteArray &abData, QString &strNote)
+{
+  strNote.clear();
+  const QString strPath = DatabaseExtraPath();
+
+  QString strBak;
+  if(m_bKeepOldFile && QFile::exists(strPath))
+  {
+    strBak = strPath + QStringLiteral(".bak");
+    QFile fileOld(strPath);
+    if((QFile::exists(strBak) && !QFile::remove(strBak)) || !fileOld.copy(strBak))
+    {
+      strNote = QString("[%1] couldn't be kept as [%2], so it wasn't replaced: %3")
+                  .arg(strPath, strBak, fileOld.errorString());
+      return false;
+    }
   }
 
   QSaveFile file(strPath);
   if(!file.open(QIODevice::WriteOnly) || (file.write(abData) != abData.size()) || !file.commit())
   {
-    strError = QString("[%1] couldn't be written: %2").arg(strPath, file.errorString());
+    strNote = QString("[%1] couldn't be written: %2").arg(strPath, file.errorString());
     return false;
   }
+
+  if(!strBak.isEmpty())
+    strNote = QString("The file it replaced was kept as [%1].").arg(strBak);
+  m_bKeepOldFile = false;
+  m_strLoadError.clear();
   return true;
 }
 
@@ -596,34 +649,10 @@ CDbSigs::AddResult CDbSigs::DatabaseExtraAdd(QString strExifMake, QString strExi
   if(IsBuiltInEntry(sEntry))
     return AddResult::AlreadyIn;
 
-  const QString strPath = DatabaseExtraPath();
-  if(strPath.isEmpty())
-  {
-    strDetail = noFolderText();
+  // What another copy of JPEGsnoop added since the file was read here is kept
+  const std::unique_ptr<QLockFile> pLock = DatabaseExtraLock(strDetail);
+  if(!pLock)
     return AddResult::SaveFailed;
-  }
-  if(!QFileInfo(m_strDbDir).isDir())
-  {
-    strDetail = QString("[%1] couldn't be written: there is no folder [%2]").arg(strPath, QDir::cleanPath(m_strDbDir));
-    return AddResult::SaveFailed;
-  }
-
-  // Another copy of JPEGsnoop may have added to the file since it was read
-  // here (Windows wrote what it had read, and what the other added was lost):
-  // wait while another writes it, then read it again. A lock left by a copy
-  // that stopped is taken over (QLockFile: its process has gone, or it is
-  // over 30 s old).
-  const QString strLock = strPath + QStringLiteral(".lock");
-  QLockFile lock(strLock);
-  if(!lock.tryLock(kDbLockWaitMs))
-  {
-    if(lock.error() == QLockFile::LockFailedError)
-      strDetail = QString("[%1] is being changed by another copy of JPEGsnoop (it holds [%2]). Try again.")
-                    .arg(strPath, strLock);
-    else
-      strDetail = QString("[%1] couldn't be written: [%2] couldn't be made").arg(strPath, strLock);
-    return AddResult::SaveFailed;
-  }
   DatabaseExtraLoad();
 
   if(IsUserEntry(sEntry))
@@ -645,33 +674,94 @@ CDbSigs::AddResult CDbSigs::DatabaseExtraAdd(QString strExifMake, QString strExi
   if(abData.size() > kDbMaxBytes)
   {
     return fail(QString("[%1] would be %2 bytes with it, more than the %3 that JPEGsnoop reads, so it wasn't changed")
-                  .arg(strPath)
+                  .arg(DatabaseExtraPath())
                   .arg(abData.size())
                   .arg(kDbMaxBytes));
   }
 
-  // Keep a file that couldn't be read in full, or an older version's
-  QString strBak;
-  if(m_bKeepOldFile && QFile::exists(strPath))
+  QString strNote;
+  if(!DatabaseExtraReplace(abData, strNote))
+    return fail(strNote);
+  strDetail = strNote;
+  return AddResult::Added;
+}
+
+CDbSigs::RemoveResult CDbSigs::DatabaseExtraRemove(const QList<CompSig> &aEntries, QString &strDetail)
+{
+  strDetail.clear();
+  if(aEntries.isEmpty())
+    return RemoveResult::NotThere;
+
+  // What another copy of JPEGsnoop added or took out since the entries were
+  // listed is left as it is (Windows wrote the list it read at the start)
+  const std::unique_ptr<QLockFile> pLock = DatabaseExtraLock(strDetail);
+  if(!pLock)
+    return RemoveResult::SaveFailed;
+  DatabaseExtraLoad();
+
+  // Found by their fields, as the list may have changed, and each once: a
+  // file can have the same entry twice (Windows added it again)
+  bool bAny = false;
+  for(const CompSig &sEntry : aEntries)
   {
-    strBak = strPath + QStringLiteral(".bak");
-    QFile fileOld(strPath);
-    if((QFile::exists(strBak) && !QFile::remove(strBak)) || !fileOld.copy(strBak))
+    for(int32_t nInd = 0; nInd < m_nSigListExtraNum; nInd++)
     {
-      return fail(QString("[%1] couldn't be kept as [%2], so it wasn't replaced: %3")
-                    .arg(strPath, strBak, fileOld.errorString()));
+      CompSig &sListed = m_sSigListExtra[nInd];
+      if(sListed.bValid && sameFields(sListed, sEntry))
+      {
+        sListed.bValid = false;
+        bAny = true;
+        break;
+      }
     }
   }
+  if(!bAny)
+  {
+    // None found, but the file couldn't be read in full (since the dialog
+    // listed it), so they may be in the part that wasn't read
+    if(!m_strLoadError.isEmpty())
+    {
+      strDetail = m_strLoadError;
+      return RemoveResult::SaveFailed;
+    }
+    return RemoveResult::NotThere;
+  }
 
-  QString strError;
-  if(!DatabaseExtraWrite(abData, strError))
-    return fail(strError);
+  auto fail = [&](const QString &strWhy) {
+    // The list as the file is
+    for(int32_t nInd = 0; nInd < m_nSigListExtraNum; nInd++)
+      m_sSigListExtra[nInd].bValid = true;
+    strDetail = strWhy;
+    return RemoveResult::SaveFailed;
+  };
 
-  if(!strBak.isEmpty())
-    strDetail = QString("The file it replaced was kept as [%1].").arg(strBak);
-  m_bKeepOldFile = false;
-  m_strLoadError.clear();
-  return AddResult::Added;
+  // Smaller than the file read, unless an older version's file (single
+  // bytes) grows as version 03
+  const QByteArray abData = DatabaseExtraBytes();
+  if(abData.size() > kDbMaxBytes)
+  {
+    return fail(QString("[%1] would be %2 bytes as version %3, more than the %4 that JPEGsnoop reads, so it wasn't "
+                        "changed")
+                  .arg(DatabaseExtraPath(), QString::number(abData.size()), QStringLiteral(DB_VER_STR))
+                  .arg(kDbMaxBytes));
+  }
+
+  QString strNote;
+  if(!DatabaseExtraReplace(abData, strNote))
+    return fail(strNote);
+  strDetail = strNote;
+
+  // The list as written
+  int32_t nKept = 0;
+  for(int32_t nInd = 0; nInd < m_nSigListExtraNum; nInd++)
+  {
+    if(m_sSigListExtra[nInd].bValid)
+      m_sSigListExtra[nKept++] = m_sSigListExtra[nInd];
+  }
+  for(int32_t nInd = nKept; nInd < m_nSigListExtraNum; nInd++)
+    m_sSigListExtra[nInd] = CompSig();
+  m_nSigListExtraNum = nKept;
+  return RemoveResult::Removed;
 }
 
 // Whether the built-in database has this entry (see sameEntry()). Windows

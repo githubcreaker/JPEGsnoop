@@ -1885,6 +1885,177 @@ again before it writes. Options > Configuration's "Submit signature to Online DB
 nothing. Developer ID signing and notarization (M5). Latent code. Fill
 bytes before an RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### Tools > Manage Local DB
+
+Tools > Manage Local DB did nothing: the menu item had no handler. Now, as on Windows:
+- **The menu item** comes after Add Camera/SW to DB, with Windows' status tip "Manage
+  the local User signatures". It needs no file open.
+- **Its dialog,** "Manage User Database", lists the user database's entries in the
+  file's order. The signatures built into JPEGsnoop aren't listed.
+- **Remove and Remove All** take entries out of the list. **OK** takes them out of the
+  file; **Cancel** leaves it as it was.
+- **Nothing is said when it works,** as on Windows. The report shows the change after
+  File > Reprocess, as after Add Camera/SW to DB.
+
+**Found and fixed** (all as on Windows 1.8.0, unless marked as the Qt port's):
+- **The menu item did nothing** (the Qt port).
+- **What another copy of JPEGsnoop did to the file was undone.** Windows listed the
+  entries it had read at its start, and OK wrote that list back without the ones
+  removed. So an entry another copy had added since was lost, and one it had removed came
+  back. Windows wrote the file this way even when none was removed. Now:
+  - the dialog reads the file when it opens;
+  - OK takes the lock that Add Camera/SW to DB takes, reads the file again, and takes
+    out the entries removed. Each is found by all its fields, and an entry another copy
+    has already taken out is skipped;
+  - what another copy added or took out, before the dialog opened or while it was open,
+    stays as it did.
+- **The list didn't say what an entry was.** Each row read "Make: [...] Model: [...]
+  Qual: [...]", with a software name in place of the make. It didn't show whether an
+  entry was for a camera or for software, an unsure entry's software name, the
+  subsampling or the signature. So the same camera at two subsamplings, which the
+  database keeps apart, made two rows that looked the same.
+
+**Changes from Windows:**
+- **The list has columns:** Source (Camera, Software, Unknown, or "Not set" for an editor
+  number other than 1 to 3), Make, Model, Software, Quality, Subsampling and Signature
+  (the lower of the two). A field over 200 characters is shown cut short.
+- **Several entries can be removed at once** (Command-click and Shift-click), and Delete
+  or Backspace in the list is Remove. The row after those removed is chosen next
+  (Windows chose none), so Remove can be pressed again. Remove is off with nothing
+  chosen, and Remove All with nothing left.
+- **A line beside the buttons** counts the entries and those removed, for example "2
+  entries, 1 removed: OK takes it out of the file." With none, it says why: none added
+  yet, no folder, or a file that couldn't be read.
+- **The dialog's note** says what Remove and OK do and where the database is. For a
+  file that couldn't be read in full, it gives the report's note and says that the file
+  is kept as `JPEGsnoop_db.dat.bak` before it is changed.
+- **OK with none removed doesn't write the file.**
+- **A file of the same entry twice** (Windows could add one again): each row removed
+  takes out one.
+- **Older and damaged files** are kept as `JPEGsnoop_db.dat.bak` before they are
+  replaced, as when an entry is added, and a message says so.
+- **No file larger than the start reads** (4 MiB) is written. Only an older version's
+  file can grow: it used single bytes, and version 03 uses two for each character. The
+  removal is then refused, with the file left as it was: "[...] would be N bytes as
+  version 03, more than the 4194304 that JPEGsnoop reads, so it wasn't changed".
+- **A save that fails says why,** for example "ERROR: The entry wasn't removed: [...] is
+  being changed by another copy of JPEGsnoop (it holds [...lock]). Try again."
+
+**Unchanged from Windows:** the title, the four buttons, Cancel, the menu item's place
+and status tip, that it needs no file open, and that built-in signatures can't be removed.
+
+`DatabaseExtraClean()`, which emptied the database without the lock, is gone; nothing
+used it. Add Camera/SW to DB now takes the lock and keeps old files through the same two
+functions as Manage Local DB, with the same messages as before.
+
+**Tests:** 76 new `MD` cases (823 in all).
+- **The driver:** `--add-db` takes an opening `manage[,STEP...]`, which chooses the menu
+  item and answers its dialog:
+  - `select=N[;N...]` clicks row N and Command-clicks the others;
+  - `remove`, `remove-all`, `delete` and `backspace` (the keys, in the list), `list`;
+  - `ok`, `return`, `cancel`, `escape`;
+  - the other copy's openings, while the dialog is open.
+
+  The new opening `other-remove=NAME` has the other copy take out an entry. The
+  driver prints the dialog's rows and note, and after each step the rows chosen, the
+  buttons and the count.
+
+The cases cover:
+- **The menu item:** its place and tip, and the dialog before any file is open.
+- **The dialog:**
+  - the columns and each kind of row;
+  - a long field;
+  - the note and count for an empty database, no folder, and a file that can't be read.
+- **Choosing and removing:**
+  - one row, two rows, the last row;
+  - Delete and Backspace, also with nothing chosen;
+  - Remove All;
+  - the row chosen next.
+- **OK, Return, Cancel and Escape:**
+  - the file, read as Windows wrote it and as the next start reads it;
+  - no message;
+  - the report's count after File > Reprocess;
+  - the dialog opened again, and the same entry added again after it was removed;
+  - OK with none removed (a version 02 file isn't rewritten).
+- **Older and damaged files:** versions 02 and 01, a damaged file and one of 301
+  entries (the `.bak` checked for all but version 01); the same entry twice.
+- **The size:** a version 02 file that would be 2 bytes over the limit as version 03,
+  one that would be exactly at it, and removing the large entry instead.
+- **Another copy:**
+  - an entry it added before the dialog opened is listed;
+  - one it added while the dialog was open is kept;
+  - one it removed isn't written back;
+  - one both removed: nothing is written.
+- **The lock:** held, left by a copy that stopped, and a read-only folder; also a
+  read-only file.
+
+On the previous commit 64 of the new cases fail. The other 12 pass because the menu item
+did nothing there: they check what should stay as it was, such as the file after Cancel
+or a failed save. Twenty new deliberate breaks each fail their own cases:
+- **The menu item:** no handler, 63 fail; off until a file is open, 65 fail.
+- **The list not read again when the dialog opens:** 1 fails.
+- **OK:**
+  - the file not read again before it is written: 3 fail;
+  - no lock: 5 fail;
+  - the file written with none removed, as on Windows: 2 fail;
+  - every copy of a duplicate taken out: 1 fails;
+  - the list in memory not updated after the file is written: 2 fail;
+  - the entries left in the list taken out instead: 33 fail.
+- **The size:** no check, 3 fail; refusing a file of exactly 4 MiB, 1 fails.
+- **Messages:** none for a failed save, 5 fail; one when it simply worked, 2 fail.
+- **The dialog:**
+  - a software name listed as the make, as on Windows: 3 fail;
+  - long fields not cut short: 1 fails;
+  - one row at a time, as on Windows: 6 fail;
+  - Delete and Backspace ignored: 2 fail;
+  - no row chosen after a removal, as on Windows: 5 fail;
+  - Remove on with nothing chosen: 10 fail;
+  - the note without the report's note: 1 fails.
+
+The 37 breaks from Tools > Add Camera/SW to DB were moved onto the new code, where the
+lock and the copying of old files are now in shared functions. Each still fails the same
+`AD` cases, and many fail new ones too. The exception is the break that keeps an entry
+when the old file can't be copied. Before, it also changed the message, so the message
+check caught it. Now it only keeps the entry, and the report's count catches it (2
+fail): after a failed copy, and after a failed write, which goes through the same
+function now.
+
+**Second check:** a review before the commit found one problem, reproduced and now fixed.
+Another program could make the file unreadable, or damage it, while the dialog was open.
+If none of the entries removed was then in the part that could be read, OK closed the
+dialog without a word, and nothing was removed. They may be in the part that wasn't read,
+so nothing is written, and the message gives the reason, as the report's note would: for
+example "ERROR: The entry wasn't removed: [...] couldn't be opened: Permission denied".
+An entry found in the part that was read is still taken out, with the file kept as
+`.bak` first, as for a file damaged before the dialog opened.
+
+The driver gains the openings `file-mode=OCTAL` and `db-file=NAME`, which change the file
+from outside, also while the dialog is open. 7 new cases (83 `MD`, 830 in all) cover:
+- the file made unreadable, with one entry removed and with two;
+- the file damaged, with the entry removed in the part not read, and in the part read.
+
+On the previous commit 5 of them fail; the other 2 check that the file is left as it was.
+A new break that ignores the error fails 3. The 57 earlier breaks were run again with the
+new cases, and none of them passes a case it failed before.
+
+**Checks:**
+- **All 830 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** (`--enable=warning,style,performance,portability --library=qt`) finds
+  nothing new in the changed files, compared with the previous commit. In the driver its
+  one new finding, "Condition '!bShown' is always true", is wrong: the dialog's timer sets
+  `bShown` while the menu item runs. It reports the same line in the Add code too. (The
+  driver needs `-D'__has_feature(x)=0'`, or cppcheck skips it.)
+- **Not checked:**
+  - on the macOS platform: the dialog's layout and Shift-click;
+  - two copies of the app at once (the driver's other copy is a second `CDbSigs` in the
+    same process);
+  - a database folder on a network volume, where the lock may not work.
+
+**Still open:** Options > Configuration's "Submit signature to Online DB" does nothing.
+Developer ID signing and notarization (M5). Latent code. Fill bytes before an RST marker
+in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

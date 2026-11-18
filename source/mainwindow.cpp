@@ -32,6 +32,7 @@
 #include "aboutdialog.h"
 #include "batchdialog.h"
 #include "batchprocess.h"
+#include "dbmanagedialog.h"
 #include "dbsubmitdialog.h"
 #include "finddialog.h"
 #include "lookupdialog.h"
@@ -488,7 +489,10 @@ void MainWindow::createActions(void)
   addToDbAct->setEnabled(false);
   connect(addToDbAct, &QAction::triggered, this, &MainWindow::onAddToDb);
 
+  // (Needs no file open)
   manageLocalDbAct = new QAction(tr("Manage Local DB..."), this);
+  manageLocalDbAct->setStatusTip(tr("Manage the local User signatures"));
+  connect(manageLocalDbAct, &QAction::triggered, this, &MainWindow::onManageLocalDb);
 
   // Options
   dhtExpandAct = new QAction(tr("DHT Expand"), this);
@@ -985,7 +989,6 @@ void MainWindow::enableMenus()
   exportJpegAct->setEnabled(true);
   exportTiffAct->setEnabled(true);
   addToDbAct->setEnabled(true);
-  manageLocalDbAct->setEnabled(true);
 }
 
 //-----------------------------------------------------------------------------
@@ -2232,6 +2235,50 @@ void MainWindow::onAddToDb()
   else
   {
     QMessageBox::warning(this, "JPEGsnoop", tr("ERROR: The signature wasn't added: %1").arg(strDetail));
+  }
+}
+
+//-----------------------------------------------------------------------------
+// Tools > Manage Local DB: list the user database's entries, and take out of
+// it the ones the user removes (master's CJPEGsnoopApp::OnToolsManagelocaldb).
+// It needs no file open. The report shows the change after File > Reprocess,
+// as with Add Camera/SW to DB.
+void MainWindow::onManageLocalDb()
+{
+  // As the file is now: another copy of JPEGsnoop may have changed it
+  // (Windows listed what it read at the start)
+  m_pDbSigs->DatabaseExtraLoad();
+  QList<CompSig> aEntries;
+  for(uint32_t nInd = 0; nInd < m_pDbSigs->DatabaseExtraGetNum(); nInd++)
+    aEntries.append(m_pDbSigs->DatabaseExtraGet(nInd));
+
+  CDbManageDialog dlg(aEntries, m_pDbSigs->DatabaseExtraPath(), m_pDbSigs->DatabaseExtraLoadError(), this);
+  if(dlg.exec() != QDialog::Accepted)
+  {
+    return;
+  }
+
+  // (Windows wrote the file again with none removed)
+  const QList<CompSig> aRemoved = dlg.removed();
+  if(aRemoved.isEmpty())
+  {
+    return;
+  }
+
+  // Nothing is said when it simply worked, as on Windows, or when another
+  // copy has already taken them out
+  QString strDetail;
+  const CDbSigs::RemoveResult eResult = m_pDbSigs->DatabaseExtraRemove(aRemoved, strDetail);
+  if(eResult == CDbSigs::RemoveResult::SaveFailed)
+  {
+    QMessageBox::warning(this, "JPEGsnoop",
+                         ((aRemoved.size() == 1) ? tr("ERROR: The entry wasn't removed: %1")
+                                                 : tr("ERROR: The entries weren't removed: %1"))
+                           .arg(strDetail));
+  }
+  else if((eResult == CDbSigs::RemoveResult::Removed) && !strDetail.isEmpty())
+  {
+    QMessageBox::information(this, "JPEGsnoop", tr("Removed from the user database. %1").arg(strDetail));
   }
 }
 

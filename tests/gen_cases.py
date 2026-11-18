@@ -2998,6 +2998,215 @@ add_db_case("AD_readonly_file", AD_NEW_SW, "harness: message box: ERROR: The sig
             "\\[/.*/JPEGsnoop_db\\.dat\\] couldn't be written: .*not writable", extra=AD_RO_FILE)
 add_db_case("AD_readonly_file_count", AD_NEW_SW, ad_count(3), extra=AD_RO_FILE)
 
+
+# --- Tools > Manage Local DB ----------------------------------------------------
+# Driven through --add-db's manage openings; ad_db_win03.dat unless said
+def manage_db_case(cid, openings, expect, extra="--user-db ad_db_win03.dat", forbid="-"):
+    case(cid, "MD", "gui", ["ad_cam.jpg"], ("--add-db " + openings + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+def md_dialog(state):
+    return rx(f"harness: manage-db dialog: Manage User Database ({state})") + "$"
+
+
+def md_step(step, state):
+    return rx(f"harness: manage-db {step} ({state})") + "$"
+
+
+def md_row(n, *cols):
+    return rx(f"harness: manage-db row {n}: " + "|".join(cols)) + "$"
+
+
+def md_file(count, version="03"):
+    return f"harness: add-db file: header=JPEGsnoop version={version} utf16={int(version == '03')} count={count}$"
+
+
+def md_next(n):
+    return f'harness: add-db next start: user={n} note=""$'
+
+
+MD_KEPT_BAK = "harness: message box: Removed from the user database\\. The file it replaced was kept as " \
+              "\\[/.*/JPEGsnoop_db\\.dat\\.bak\\]\\.$"
+MD_STATE3 = 'rows=3 selected=none current=1 remove=0 remove-all=1 count="3 entries"'
+# The same entry twice (Windows added it again); a version 02 file (single
+# bytes) that as version 03 would be 2 bytes over the size the start reads
+# without its camera entry, and one that would be exactly that size
+write("ad_db_dup.dat", user_db([AD_CAM_ENTRY, AD_CAM_ENTRY]))
+
+
+def md_big(name):
+    return ("", "", 2, "", "05" + "0" * 30, "06" + "0" * 30, "1x1", "", name)
+
+
+MD_BIG_NAME = (AD_LIMIT + 2 - len(user_db([md_big("")]))) // 2
+assert len(user_db([md_big("B" * MD_BIG_NAME)])) == AD_LIMIT + 2
+write("ad_db_v02_big.dat", user_db([AD_CAM_ENTRY, md_big("B" * MD_BIG_NAME)], version="02"))
+write("ad_db_v02_limit.dat", user_db([AD_CAM_ENTRY, md_big("B" * (MD_BIG_NAME - 1))], version="02"))
+
+# The menu item, after Add Camera/SW to DB as on Windows, needs no file
+manage_db_case("MD_menu", "manage,cancel", 'harness: manage-db menu=&Tools after="Add Camera/SW to DB\\.\\.\\." '
+               'separator=0 enabled=1 tip="Manage the local User signatures"$')
+manage_db_case("MD_no_file", "manage,cancel", md_dialog(MD_STATE3), extra="--add-db-at 0 --user-db ad_db_win03.dat")
+manage_db_case("MD_no_file_enabled", "manage,cancel", "harness: manage-db menu=.* enabled=1 ",
+               extra="--add-db-at 0 --user-db ad_db_win03.dat")
+
+# Every field but the rotated signature, in the file's order, by source.
+# (Windows listed make, model and quality, with a software name as the make.)
+manage_db_case("MD_dialog", "manage,cancel", md_dialog(MD_STATE3))
+manage_db_case("MD_columns", "manage,cancel",
+               "harness: manage-db columns: Source\\|Make\\|Model\\|Software\\|Quality\\|Subsampling\\|Signature$")
+manage_db_case("MD_row_cam", "manage,cancel", md_row(1, "Camera", "TestCam", "Model 1", "", "fine", "1x1", AD_SIG))
+manage_db_case("MD_row_sw", "manage,cancel", md_row(2, "Software", "", "", "Łódź", "high", "1x1", AD_SIG))
+manage_db_case("MD_row_not_set", "manage,cancel", md_row(3, "Not set", "Odd", "Thing", "", "", "1x1", AD_SIG))
+manage_db_case("MD_row_unknown", "source=unsure,software=Paint,quality=q,ok+manage,cancel",
+               md_row(1, "Unknown", "TestCam", "Model 1", "Paint", "q", "1x1", AD_SIG), extra="")
+manage_db_case("MD_row_long", "manage,cancel", md_row(1, "Software", "", "", "P" * 200 + "\u2026", "", "1x1",
+                                                      "03" + "0" * 30), extra="--user-db ad_db_limit.dat")
+manage_db_case("MD_note", "manage,cancel", "harness: manage-db note: Remove takes the entries chosen out of this list, "
+               "and OK takes them out of the file\\. The signatures built into JPEGsnoop aren't listed\\. /  / User "
+               "database: /.*/JPEGsnoop_db\\.dat$")
+manage_db_case("MD_empty", "manage,cancel", md_dialog('rows=0 selected=none current=0 remove=0 remove-all=0 '
+                                                      'count="There are no entries. Tools > Add Camera/SW to DB adds '
+                                                      'them."'), extra="")
+manage_db_case("MD_empty_ok", "manage,ok", AD_NONE, extra="")
+manage_db_case("MD_no_folder", "folder=+manage,cancel", "harness: manage-db note: No folder is set for the user "
+               "database \\(Options > Configuration\\), so it has no entries\\.$")
+manage_db_case("MD_no_folder_count", "folder=+manage,cancel",
+               md_dialog('rows=0 selected=none current=0 remove=0 remove-all=0 count="There are no entries."'))
+manage_db_case("MD_unreadable", "manage,cancel",
+               md_dialog('rows=0 selected=none current=0 remove=0 remove-all=0 count="No entries could be read."'),
+               extra="--user-db ad_db_win03.dat --user-db-mode 000")
+manage_db_case("MD_folder", "folder=other+manage,cancel", md_dialog('rows=1 selected=none current=1 remove=0 '
+                                                                    'remove-all=1 count="1 entry"'), extra=AD_FOLDERS)
+
+# Choosing and removing: several at once, the row after them chosen next
+manage_db_case("MD_select", "manage,select=2,cancel",
+               md_step("select=2", 'rows=3 selected=2 current=2 remove=1 remove-all=1 count="3 entries"'))
+manage_db_case("MD_select_two", "manage,select=1;3,cancel",
+               md_step("select=1;3", 'rows=3 selected=1;3 current=3 remove=1 remove-all=1 count="3 entries"'))
+MD_LEFT2 = 'count="2 entries, 1 removed: OK takes it out of the file."'
+manage_db_case("MD_remove_next", "manage,select=2,remove,cancel",
+               md_step("remove", "rows=2 selected=2 current=2 remove=1 remove-all=1 " + MD_LEFT2))
+manage_db_case("MD_remove_last", "manage,select=3,remove,cancel",
+               md_step("remove", "rows=2 selected=2 current=2 remove=1 remove-all=1 " + MD_LEFT2))
+manage_db_case("MD_remove_two", "manage,select=1;2,remove,cancel",
+               md_step("remove", 'rows=1 selected=1 current=1 remove=1 remove-all=1 count="1 entry, 2 removed: OK '
+                                 'takes them out of the file."'))
+manage_db_case("MD_remove_rows", "manage,select=2,remove,list,cancel",
+               md_row(2, "Not set", "Odd", "Thing", "", "", "1x1", AD_SIG))
+manage_db_case("MD_delete_key", "manage,select=1,delete,cancel",
+               md_step("delete", "rows=2 selected=1 current=1 remove=1 remove-all=1 " + MD_LEFT2))
+manage_db_case("MD_backspace_key", "manage,select=1,backspace,cancel",
+               md_step("backspace", "rows=2 selected=1 current=1 remove=1 remove-all=1 " + MD_LEFT2))
+manage_db_case("MD_remove_none_chosen", "manage,remove,delete,cancel", md_step("delete", MD_STATE3))
+manage_db_case("MD_remove_all", "manage,remove-all,cancel",
+               md_step("remove-all", 'rows=0 selected=none current=0 remove=0 remove-all=0 count="0 entries, 3 '
+                                     'removed: OK takes them out of the file."'))
+
+# Cancel leaves the file as it was; OK takes out what was removed, quietly
+manage_db_case("MD_cancel", "manage,select=1,remove,cancel", md_file(3), forbid="message box")
+manage_db_case("MD_escape", "manage,select=1,remove,escape", md_file(3), forbid="message box")
+manage_db_case("MD_ok", "manage,select=2,remove,ok", md_file(2), forbid="message box")
+manage_db_case("MD_ok_entry", "manage,select=2,remove,ok", ad_entry(2, 0, "Odd", "Thing", "", AD_SIG, AD_ROT, "1x1", ""))
+manage_db_case("MD_ok_end", "manage,select=2,remove,ok", "harness: add-db file end=\\*Z\\* rest=0$")
+manage_db_case("MD_ok_next_start", "manage,select=2,remove,ok", md_next(2))
+manage_db_case("MD_ok_report", "manage,select=1,remove,ok", ad_count(2),
+               forbid="harness: add-db report after: \\*CAM:\\[TestCam")
+manage_db_case("MD_return", "manage,select=2,remove,return", md_file(2))
+manage_db_case("MD_ok_two", "manage,select=1;3,remove,ok", ad_entry(1, 2, "", "", "high", AD_SIG, AD_ROT, "1x1", "Łódź"))
+manage_db_case("MD_ok_two_count", "manage,select=1;3,remove,ok", md_file(1))
+manage_db_case("MD_ok_all", "manage,remove-all,ok", md_file(0))
+manage_db_case("MD_ok_all_count", "manage,remove-all,ok", ad_count(0))
+manage_db_case("MD_twice", "manage,select=1,remove,ok+manage,cancel",
+               md_dialog('rows=2 selected=none current=1 remove=0 remove-all=1 count="2 entries"'))
+manage_db_case("MD_add_after", "manage,select=1,remove,ok+" + AD_CAM, AD_ADDED)
+manage_db_case("MD_add_after_entry", "manage,select=1,remove,ok+" + AD_CAM,
+               ad_entry(3, 1, "TestCam", "Model 1", "fine", AD_SIG, AD_ROT, "1x1", ""))
+# OK with none removed doesn't write the file (Windows wrote it again)
+manage_db_case("MD_none_ok", "manage,ok", md_file(1, "02"), extra="--user-db ad_db_win02.dat", forbid="bak")
+
+# An older version's file, or one that couldn't be read in full, is kept first
+manage_db_case("MD_v02", "manage,select=1,remove,ok", MD_KEPT_BAK, extra="--user-db ad_db_win02.dat")
+manage_db_case("MD_v02_file", "manage,select=1,remove,ok", md_file(0), extra="--user-db ad_db_win02.dat")
+manage_db_case("MD_v02_bak", "manage,select=1,remove,ok",
+               "harness: add-db bak md5=" + md5(user_db([AD_CAM_ENTRY], version="02")) + "$",
+               extra="--user-db ad_db_win02.dat")
+manage_db_case("MD_v01", "manage,select=1,remove,ok", md_file(0), extra="--user-db ad_db_win01.dat")
+manage_db_case("MD_trunc_note", "manage,cancel", "harness: manage-db note: .* / NOTE: User database "
+               "\\[/.*/JPEGsnoop_db\\.dat\\] is damaged: 2 of its 3 entries could be read\\. Only the entries read are "
+               "listed, and if any are removed, the file is kept as /.*/JPEGsnoop_db\\.dat\\.bak first\\.$",
+               extra="--user-db ad_db_trunc.dat")
+manage_db_case("MD_trunc_rows", "manage,cancel", md_dialog('rows=2 selected=none current=1 remove=0 remove-all=1 '
+                                                           'count="2 entries"'), extra="--user-db ad_db_trunc.dat")
+manage_db_case("MD_trunc_kept", "manage,select=1,remove,ok", MD_KEPT_BAK, extra="--user-db ad_db_trunc.dat")
+manage_db_case("MD_trunc_bak", "manage,select=1,remove,ok",
+               "harness: add-db bak md5=" + md5(user_db(AD_WIN03[:2], count=3, end=False)) + "$",
+               extra="--user-db ad_db_trunc.dat")
+manage_db_case("MD_trunc_file", "manage,select=1,remove,ok", md_file(1), extra="--user-db ad_db_trunc.dat")
+manage_db_case("MD_301_rows", "manage,cancel", "harness: manage-db dialog: Manage User Database \\(rows=300 ",
+               extra="--user-db ad_db_301.dat")
+manage_db_case("MD_301_file", "manage,select=1,remove,ok", md_file(299), extra="--user-db ad_db_301.dat")
+manage_db_case("MD_301_bak", "manage,select=1,remove,ok", "harness: add-db bak md5=" + md5(user_db(ad_fake(301))) + "$",
+               extra="--user-db ad_db_301.dat")
+# The same entry twice: each row removed takes out one
+manage_db_case("MD_dup_one", "manage,select=1,remove,ok", md_file(1), extra="--user-db ad_db_dup.dat")
+manage_db_case("MD_dup_both", "manage,select=1;2,remove,ok", md_file(0), extra="--user-db ad_db_dup.dat")
+
+# No larger than the start reads: a version 02 file grows as version 03
+manage_db_case("MD_size", "manage,select=1,remove,ok", "harness: message box: ERROR: The entry wasn't removed: "
+               f"\\[/.*/JPEGsnoop_db\\.dat\\] would be {AD_LIMIT + 2} bytes as version 03, more than the {AD_LIMIT} "
+               "that JPEGsnoop reads, so it wasn't changed$", extra="--user-db ad_db_v02_big.dat")
+manage_db_case("MD_size_unchanged", "manage,select=1,remove,ok", md_file(2, "02"), extra="--user-db ad_db_v02_big.dat",
+               forbid="bak")
+manage_db_case("MD_size_count", "manage,select=1,remove,ok", ad_count(2), extra="--user-db ad_db_v02_big.dat")
+manage_db_case("MD_size_limit", "manage,select=1,remove,ok", md_next(1), extra="--user-db ad_db_v02_limit.dat")
+manage_db_case("MD_size_big_removed", "manage,select=2,remove,ok", md_file(1), extra="--user-db ad_db_v02_big.dat")
+
+# Another copy of JPEGsnoop: the dialog lists the file as it is, and what the
+# other adds or takes out while it is open stays so (Windows listed and wrote
+# what it read at the start)
+manage_db_case("MD_other_listed", "other=Extra+manage,cancel", md_row(4, "Software", "", "", "Extra", "", "1x1", AD_SIG))
+manage_db_case("MD_other_added", "manage,select=1,remove,other=Fresh,ok", md_file(3))
+manage_db_case("MD_other_added_entry", "manage,select=1,remove,other=Fresh,ok",
+               ad_entry(3, 2, "", "", "", AD_SIG, AD_ROT, "1x1", "Fresh"))
+manage_db_case("MD_other_removed", "other=Extra+manage,other-remove=Extra,select=1,remove,ok", md_file(2))
+manage_db_case("MD_other_removed_same", "other=Extra+manage,other-remove=Extra,select=4,remove,ok", md_file(3),
+               forbid="message box")
+manage_db_case("MD_other_removed_count", "other=Extra+manage,other-remove=Extra,select=4,remove,ok", ad_count(3))
+# The file made unreadable or damaged by another program while the dialog is
+# open: an entry removed that isn't in what can be read may be in the rest, so
+# nothing is written and the message says why. One that is found is taken out,
+# and the file kept, as for a file damaged before.
+MD_UNREADABLE_LATER = "manage,file-mode=000,select=1,remove,ok+file-mode=644"
+MD_NOT_REMOVED = "harness: message box: ERROR: The entry wasn't removed: \\[/.*/JPEGsnoop_db\\.dat\\] "
+manage_db_case("MD_unreadable_later", MD_UNREADABLE_LATER, MD_NOT_REMOVED + "couldn't be opened: .*$")
+manage_db_case("MD_unreadable_later_two", "manage,file-mode=000,select=1;2,remove,ok+file-mode=644",
+               "harness: message box: ERROR: The entries weren't removed: \\[/.*/JPEGsnoop_db\\.dat\\] couldn't be "
+               "opened: .*$")
+manage_db_case("MD_unreadable_later_file", MD_UNREADABLE_LATER, md_file(3))
+MD_DAMAGED_LATER = "manage,db-file=ad_db_trunc.dat,select=3,remove,ok"
+manage_db_case("MD_damaged_later", MD_DAMAGED_LATER, MD_NOT_REMOVED + "is damaged: 2 of its 3 entries could be read$")
+manage_db_case("MD_damaged_later_kept", MD_DAMAGED_LATER, "harness: add-db files: JPEGsnoop_db\\.dat$")
+manage_db_case("MD_damaged_later_found", "manage,db-file=ad_db_trunc.dat,select=1,remove,ok", MD_KEPT_BAK)
+manage_db_case("MD_damaged_later_found_file", "manage,db-file=ad_db_trunc.dat,select=1,remove,ok", md_file(1))
+# The lock: held by another copy, left by one that stopped, can't be made
+MD_LOCKED = ("\\[/.*/JPEGsnoop_db\\.dat\\] is being changed by another copy of JPEGsnoop \\(it holds "
+             "\\[/.*/JPEGsnoop_db\\.dat\\.lock\\]\\)\\. Try again\\.$")
+manage_db_case("MD_locked", "lock+manage,select=1,remove,ok",
+               "harness: message box: ERROR: The entry wasn't removed: " + MD_LOCKED)
+manage_db_case("MD_locked_two", "lock+manage,select=1;2,remove,ok",
+               "harness: message box: ERROR: The entries weren't removed: " + MD_LOCKED)
+manage_db_case("MD_locked_unchanged", "lock+manage,select=1,remove,ok", md_file(3))
+manage_db_case("MD_stale_lock", "stale-lock+manage,select=1,remove,ok", md_file(2))
+manage_db_case("MD_stale_lock_gone", "stale-lock+manage,select=1,remove,ok", "harness: add-db files: JPEGsnoop_db\\.dat$")
+manage_db_case("MD_readonly", "manage,select=1,remove,ok", "harness: message box: ERROR: The entry wasn't removed: "
+               "\\[/.*/ro/JPEGsnoop_db\\.dat\\] couldn't be written: \\[/.*/ro/JPEGsnoop_db\\.dat\\.lock\\] couldn't "
+               "be made$", extra="--db-dir ro --db-dir-mode 555 --user-db ad_db_win03.dat")
+manage_db_case("MD_readonly_file", "manage,select=1,remove,ok", "harness: message box: ERROR: The entry wasn't "
+               "removed: \\[/.*/JPEGsnoop_db\\.dat\\] couldn't be written: .*not writable", extra=AD_RO_FILE)
+manage_db_case("MD_readonly_file_count", "manage,select=1,remove,ok", ad_count(3), extra=AD_RO_FILE)
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

@@ -25,7 +25,10 @@
 
 #pragma once
 
+#include <QList>
 #include <QString>
+
+#include <memory>
 
 #define DBEX_ENTRIES_MAX 300
 #define DB_VER_STR "03"
@@ -34,6 +37,7 @@
 
 class CDocLog;
 class CSnoopConfig;
+class QLockFile;
 
 // Signature exception structure with metadata fields
 struct CompExcMm
@@ -91,8 +95,9 @@ public:
   // if none was)
   QString DatabaseExtraPath() const;
 
-  // Read the user database again (at startup, when its folder changes, and
-  // before an entry is added). A missing file is an empty database.
+  // Read the user database again (at startup, when its folder changes, when
+  // Manage Local DB opens, and before the file is changed). A missing file is
+  // an empty database.
   void DatabaseExtraLoad();
 
   // Why the user database file couldn't be read in full, or empty if it
@@ -114,6 +119,21 @@ public:
                              QString strQual, QString strSig, QString strSigRot, QString strCss,
                              teSource eUserSource, QString strUserSoftware, QString &strDetail);
 
+  enum class RemoveResult
+  {
+    Removed,                    // strDetail: a note about the old file, if any
+    NotThere,                   // none of them is in the file, read in full: it isn't written
+    SaveFailed                  // strDetail: why, also when none was found in a file
+                                // that couldn't be read in full; the list is as the
+                                // file is
+  };
+
+  // Take entries out of the user database and save it (Tools > Manage Local
+  // DB). The file is read again first, so what another copy of JPEGsnoop
+  // added or took out since is left as it is. Each entry given is taken out
+  // once, if the file still has one with the same fields.
+  RemoveResult DatabaseExtraRemove(const QList<CompSig> &aEntries, QString &strDetail);
+
   bool SearchCom(QString strCom);
 
   uint32_t GetIjgNum();
@@ -130,9 +150,9 @@ private:
 
   void SetEntryValid(uint32_t nInd, bool bValid);
 
-  void DatabaseExtraClean();
+  std::unique_ptr<QLockFile> DatabaseExtraLock(QString &strWhy) const;
   QByteArray DatabaseExtraBytes() const;
-  bool DatabaseExtraWrite(const QByteArray &abData, QString &strError);
+  bool DatabaseExtraReplace(const QByteArray &abData, QString &strNote);
 
   bool IsBuiltInEntry(const CompSig &sEntry) const;
   bool IsUserEntry(const CompSig &sEntry) const;

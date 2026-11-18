@@ -200,14 +200,25 @@
 //     the user database folder to NAME in the settings folder (empty for
 //     none) and saves. An opening other=NAME has another copy of JPEGsnoop,
 //     which read the user database when this one started, add software NAME
-//     with the file shown's signatures (a CDbSigs of its own); lock holds the
-//     user database's lock until the openings end, as another copy would
-//     while it writes; stale-lock leaves a lock file an hour old, as a copy
-//     that stopped while it wrote would. Print the dialog's fields and note
-//     when it shows, and after each step. Then print the user database file,
-//     read here as Windows wrote it (each entry's fields), the folder's
-//     files, whether a file was written beside the folder, and the signature
-//     search again after File > Reprocess.
+//     with the file shown's signatures (a CDbSigs of its own);
+//     other-remove=NAME has it take out the entry for software NAME; lock
+//     holds the user database's lock until the openings end, as another copy
+//     would while it writes; stale-lock leaves a lock file an hour old, as a
+//     copy that stopped while it wrote would. file-mode=OCTAL sets the user
+//     database file's permissions, and db-file=NAME replaces it with NAME (in
+//     the folder of the files given), as another program might. Print the
+//     dialog's fields and note when it shows, and after each step.
+//     An opening manage[,STEP...] chooses Tools > Manage Local DB instead
+//     (its place in the menu is printed the first time) and answers its
+//     dialog with the steps: select=N[;N...] (click row N, then Command-click
+//     the others), remove, remove-all, delete and backspace (the keys, in the
+//     list), list, ok, return, cancel, escape, and the openings from outside
+//     this copy above (other= to db-file=, while the dialog is open). Print
+//     the dialog's rows and note when it shows, and its state after each
+//     step.
+//     Then print the user database file, read here as Windows wrote it (each
+//     entry's fields), the folder's files, whether a file was written beside
+//     the folder, and the signature search again after File > Reprocess.
 //
 // gui ... --user-db [FOLDER:]NAME (any number) [--user-db-mode OCTAL]
 //     Before the window opens, copy NAME (in the folder of the files given)
@@ -268,6 +279,7 @@
 #include <QTextDocumentFragment>
 #include <QTextStream>
 #include <QTimer>
+#include <QTreeWidget>
 #include <QtMath>
 #include <cmath>
 #include <functional>
@@ -2202,14 +2214,158 @@ static void addDbReport(MainWindow &window, const QString &strWhen, QTextStream 
     out << "harness: add-db report " << strWhen << ": no signature search\n";
 }
 
-// Tools > Add Camera/SW to DB as a user chooses it (see --add-db above). A
-// message box it shows is printed and closed as it opens.
+// Tools > Manage Local DB's dialog, answered with astrSteps (see --add-db
+// above). outside runs the openings from outside this copy, and says whether
+// the step was one.
+static void manageDbSteps(QDialog *pDlg, QStringList &astrSteps,
+                          const std::function<bool(const QString &)> &outside, QTextStream &out)
+{
+  QTreeWidget *pList = pDlg->findChild<QTreeWidget *>("entries");
+  const QLabel *pNote = pDlg->findChild<QLabel *>("dbNote");
+  const QLabel *pCount = pDlg->findChild<QLabel *>("count");
+  QPushButton *pRemove = pDlg->findChild<QPushButton *>("remove");
+  QPushButton *pRemoveAll = pDlg->findChild<QPushButton *>("removeAll");
+  QDialogButtonBox *pButtons = pDlg->findChild<QDialogButtonBox *>("buttonBox");
+  if(!pList || !pNote || !pCount || !pRemove || !pRemoveAll || !pButtons || !pButtons->button(QDialogButtonBox::Ok) ||
+     !pButtons->button(QDialogButtonBox::Cancel))
+  {
+    out << "harness: manage-db dialog widgets not found\n";
+    astrSteps.clear();
+    pDlg->reject();
+    return;
+  }
+
+  auto state = [&]() {
+    QStringList astrChosen;
+    for(int nRow = 0; nRow < pList->topLevelItemCount(); nRow++)
+    {
+      if(pList->topLevelItem(nRow)->isSelected())
+        astrChosen << QString::number(nRow + 1);
+    }
+    const int nCurrent = pList->currentItem() ? (pList->indexOfTopLevelItem(pList->currentItem()) + 1) : 0;
+    return QString("rows=%1 selected=%2 current=%3 remove=%4 remove-all=%5 count=\"%6\"")
+             .arg(pList->topLevelItemCount())
+             .arg(astrChosen.isEmpty() ? QStringLiteral("none") : astrChosen.join(';'))
+             .arg(nCurrent)
+             .arg(pRemove->isEnabled() ? 1 : 0)
+             .arg(pRemoveAll->isEnabled() ? 1 : 0)
+             .arg(pCount->text());
+  };
+  auto rows = [&]() {
+    QStringList astrHeader;
+    for(int nCol = 0; nCol < pList->columnCount(); nCol++)
+      astrHeader << pList->headerItem()->text(nCol);
+    out << "harness: manage-db columns: " << astrHeader.join('|') << "\n";
+    for(int nRow = 0; nRow < pList->topLevelItemCount(); nRow++)
+    {
+      QStringList astrCol;
+      for(int nCol = 0; nCol < pList->columnCount(); nCol++)
+        astrCol << pList->topLevelItem(nRow)->text(nCol);
+      out << "harness: manage-db row " << (nRow + 1) << ": " << astrCol.join('|') << "\n";
+    }
+  };
+
+  out << "harness: manage-db dialog: " << pDlg->windowTitle() << " (" << state() << ")\n";
+  out << "harness: manage-db note: " << QString(pNote->text()).replace('\n', QStringLiteral(" / ")) << "\n";
+  rows();
+
+  while(!astrSteps.isEmpty())
+  {
+    const QString strStep = astrSteps.takeFirst();
+    if(strStep.startsWith("select="))
+    {
+      bool bFirst = true;
+      for(const QString &strRow : strStep.mid(7).split(';'))
+      {
+        QTreeWidgetItem *pItem = pList->topLevelItem(strRow.toInt() - 1);
+        if(!pItem)
+        {
+          out << "harness: manage-db no row " << strRow << "\n";
+          continue;
+        }
+        // (Near its left end: a long field makes the row wider than the list)
+        pList->scrollToItem(pItem);
+        QTest::mouseClick(pList->viewport(), Qt::LeftButton, bFirst ? Qt::NoModifier : Qt::ControlModifier,
+                          QPoint(5, pList->visualItemRect(pItem).center().y()));
+        bFirst = false;
+      }
+    }
+    else if(strStep == "remove")
+      pRemove->click();
+    else if(strStep == "remove-all")
+      pRemoveAll->click();
+    else if((strStep == "delete") || (strStep == "backspace"))
+    {
+      pList->setFocus();
+      QTest::keyClick(pList, (strStep == "delete") ? Qt::Key_Delete : Qt::Key_Backspace);
+    }
+    else if(strStep == "list")
+    {
+      rows();
+      continue;
+    }
+    else if((strStep == "ok") || (strStep == "return"))
+    {
+      // A message box after it is printed and closed
+      if(strStep == "ok")
+        pButtons->button(QDialogButtonBox::Ok)->click();
+      else
+      {
+        QWidget *pTarget = QApplication::focusWidget();
+        QTest::keyClick((pTarget && (pTarget->window() == pDlg)) ? pTarget : pList, Qt::Key_Return);
+      }
+      QCoreApplication::processEvents();
+      if(!pDlg->isVisible())
+      {
+        out << "harness: manage-db " << strStep << " closed the dialog\n";
+        out.flush();
+        astrSteps.clear();
+        return;
+      }
+      out << "harness: manage-db " << strStep << " left the dialog open (" << state() << ")\n";
+      continue;
+    }
+    else if((strStep == "cancel") || (strStep == "escape"))
+    {
+      if(strStep == "escape")
+      {
+        QWidget *pTarget = QApplication::focusWidget();
+        QTest::keyClick((pTarget && (pTarget->window() == pDlg)) ? pTarget : pList, Qt::Key_Escape);
+      }
+      else
+        pButtons->button(QDialogButtonBox::Cancel)->click();
+      out << "harness: manage-db " << strStep
+          << (pDlg->isVisible() ? " didn't close the dialog\n" : " closed the dialog\n");
+      if(pDlg->isVisible())
+        pDlg->reject();
+      out.flush();
+      astrSteps.clear();
+      return;
+    }
+    else if(outside(strStep))
+      continue;
+    else
+    {
+      out << "harness: unknown manage-db step " << strStep << "\n";
+      continue;
+    }
+    out << "harness: manage-db " << strStep << " (" << state() << ")\n";
+  }
+
+  out << "harness: manage-db dialog still open: cancelled\n";
+  pDlg->reject();
+}
+
+// Tools > Add Camera/SW to DB and Manage Local DB as a user chooses them (see
+// --add-db above). A message box either shows is printed and closed as it
+// opens.
 static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDbDir, const QString &strSettingsDir,
                       QTextStream &out)
 {
   QAction *pAction = findAction(window, QStringLiteral("Add Camera/SW to DB..."));
+  QAction *pManage = findAction(window, QStringLiteral("Manage Local DB..."));
   QAction *pConfig = findAction(window, QStringLiteral("Configuration..."));
-  if(!pAction || !pConfig)
+  if(!pAction || !pManage || !pConfig)
   {
     out << "harness: menu Add Camera/SW to DB unavailable\n";
     return;
@@ -2217,8 +2373,8 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
   out << "harness: add-db " << menuPlace(pAction) << "\n";
   addDbReport(window, "before", out);
 
-  // Another copy of JPEGsnoop, started with this one (other=), and a lock it
-  // holds (lock)
+  // Another copy of JPEGsnoop, started with this one (other=, other-remove=),
+  // and a lock it holds (lock)
   CSnoopConfig otherCfg;
   CDbSigs otherDb(nullptr, &otherCfg);
   otherDb.SetDbDir(strDbDir);
@@ -2226,11 +2382,107 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
   std::unique_ptr<QLockFile> pHeldLock;
   const QString strLockName = QStringLiteral("JPEGsnoop_db.dat.lock");
 
+  // Openings from outside this copy: another copy (other=, other-remove=,
+  // lock, stale-lock) or another program (file-mode=, db-file=). False if
+  // strOpening isn't one.
+  auto outside = [&](const QString &strOpening) {
+    if(strOpening.startsWith("other="))
+    {
+      // Another copy adds software, with the signatures the report shows
+      const QString strName = QUrl::fromPercentEncoding(strOpening.mid(6).toUtf8());
+      QString strSig;
+      QString strRot;
+      QString strCss;
+      for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
+      {
+        if(strLine.startsWith("  Signature:"))
+          strSig = strLine.mid(12).trimmed();
+        else if(strLine.startsWith("  Signature (Rotated):"))
+          strRot = strLine.mid(22).trimmed();
+        else if(strLine.startsWith("  Chroma subsampling:"))
+          strCss = strLine.mid(21).trimmed();
+      }
+      QString strDetail;
+      const CDbSigs::AddResult eResult =
+        otherDb.DatabaseExtraAdd(QString(), QString(), QString(), strSig, strRot, strCss, ENUM_SOURCE_SW, strName,
+                                 strDetail);
+      out << "harness: add-db other copy added " << strName << ": "
+          << ((eResult == CDbSigs::AddResult::Added)       ? "added"
+              : (eResult == CDbSigs::AddResult::AlreadyIn) ? "already in"
+              : (eResult == CDbSigs::AddResult::Full)      ? "full"
+                                                           : "save failed")
+          << (strDetail.isEmpty() ? QString() : " " + strDetail) << "\n";
+      return true;
+    }
+    if(strOpening.startsWith("other-remove="))
+    {
+      // Another copy takes out the entry for software NAME, as the file has it
+      const QString strName = QUrl::fromPercentEncoding(strOpening.mid(13).toUtf8());
+      CSnoopConfig fileCfg;
+      CDbSigs fileDb(nullptr, &fileCfg);
+      fileDb.SetDbDir(strDbDir);
+      fileDb.DatabaseExtraLoad();
+      QList<CompSig> aEntries;
+      for(uint32_t nInd = 0; nInd < fileDb.DatabaseExtraGetNum(); nInd++)
+      {
+        if(fileDb.DatabaseExtraGet(nInd).strMSwDisp == strName)
+          aEntries.append(fileDb.DatabaseExtraGet(nInd));
+      }
+      QString strDetail;
+      const CDbSigs::RemoveResult eResult = otherDb.DatabaseExtraRemove(aEntries.mid(0, 1), strDetail);
+      out << "harness: add-db other copy removed " << strName << ": "
+          << ((eResult == CDbSigs::RemoveResult::Removed)    ? "removed"
+              : (eResult == CDbSigs::RemoveResult::NotThere) ? "not there"
+                                                             : "save failed")
+          << (strDetail.isEmpty() ? QString() : " " + strDetail) << "\n";
+      return true;
+    }
+    if(strOpening == QLatin1String("lock"))
+    {
+      pHeldLock = std::make_unique<QLockFile>(QDir(strDbDir).filePath(strLockName));
+      out << "harness: add-db lock held: " << (pHeldLock->tryLock(0) ? 1 : 0) << "\n";
+      return true;
+    }
+    if(strOpening.startsWith("file-mode="))
+    {
+      // The database file's permissions changed from outside
+      const QString strMode = strOpening.mid(10);
+      const bool bOk = chmod(QFile::encodeName(QDir(strDbDir).filePath("JPEGsnoop_db.dat")).constData(),
+                             static_cast<mode_t>(strMode.toUInt(nullptr, 8))) == 0;
+      out << "harness: add-db file mode " << strMode << ": " << (bOk ? 1 : 0) << "\n";
+      return true;
+    }
+    if(strOpening.startsWith("db-file="))
+    {
+      // The database file replaced from outside by NAME (in the folder of the
+      // files given)
+      const QString strName = strOpening.mid(8);
+      const QString strFile = QDir(strDbDir).filePath("JPEGsnoop_db.dat");
+      const bool bOk = (!QFile::exists(strFile) || QFile::remove(strFile)) &&
+                       QFile::copy(QDir(opts.strFilesDir).filePath(strName), strFile);
+      out << "harness: add-db file replaced by " << strName << ": " << (bOk ? 1 : 0) << "\n";
+      return true;
+    }
+    if(strOpening == QLatin1String("stale-lock"))
+    {
+      QFile fileLock(QDir(strDbDir).filePath(strLockName));
+      // (Written out before its time is set, which writing would change)
+      const bool bOk = fileLock.open(QIODevice::WriteOnly) && (fileLock.write("left by a copy that stopped\n") > 0) &&
+                       fileLock.flush() &&
+                       fileLock.setFileTime(QDateTime::currentDateTime().addSecs(-3600),
+                                            QFileDevice::FileModificationTime);
+      out << "harness: add-db stale lock left: " << (bOk ? 1 : 0) << "\n";
+      return true;
+    }
+    return false;
+  };
+
   QStringList astrSteps;
   QString strFolder;            // for a folder= opening: the folder to choose
   bool bFolder = false;
   bool bBusy = false;
   bool bShown = false;
+  bool bManagePlace = false;    // Manage Local DB's place printed
 
   QTimer timer;
   QObject::connect(&timer, &QTimer::timeout, [&]() {
@@ -2255,6 +2507,15 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
         pPath->setText(strFolder);
         pButtons->button(QDialogButtonBox::Save)->click();
       }
+      bBusy = false;
+      return;
+    }
+
+    if(!bFolder && (pDlg->objectName() == QLatin1String("manageDbDialog")))
+    {
+      bBusy = true;
+      bShown = true;
+      manageDbSteps(pDlg, astrSteps, outside, out);
       bBusy = false;
       return;
     }
@@ -2401,49 +2662,18 @@ static void addDbMenu(MainWindow &window, const GuiOptions &opts, QString &strDb
       bFolder = false;
       continue;
     }
-    if(strOpening.startsWith("other="))
-    {
-      // Another copy adds software, with the signatures the report shows
-      const QString strName = QUrl::fromPercentEncoding(strOpening.mid(6).toUtf8());
-      QString strSig;
-      QString strRot;
-      QString strCss;
-      for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
-      {
-        if(strLine.startsWith("  Signature:"))
-          strSig = strLine.mid(12).trimmed();
-        else if(strLine.startsWith("  Signature (Rotated):"))
-          strRot = strLine.mid(22).trimmed();
-        else if(strLine.startsWith("  Chroma subsampling:"))
-          strCss = strLine.mid(21).trimmed();
-      }
-      QString strDetail;
-      const CDbSigs::AddResult eResult =
-        otherDb.DatabaseExtraAdd(QString(), QString(), QString(), strSig, strRot, strCss, ENUM_SOURCE_SW, strName,
-                                 strDetail);
-      out << "harness: add-db other copy added " << strName << ": "
-          << ((eResult == CDbSigs::AddResult::Added)       ? "added"
-              : (eResult == CDbSigs::AddResult::AlreadyIn) ? "already in"
-              : (eResult == CDbSigs::AddResult::Full)      ? "full"
-                                                           : "save failed")
-          << (strDetail.isEmpty() ? QString() : " " + strDetail) << "\n";
+    if(outside(strOpening))
       continue;
-    }
-    if(strOpening == QLatin1String("lock"))
+    if((strOpening == QLatin1String("manage")) || strOpening.startsWith("manage,"))
     {
-      pHeldLock = std::make_unique<QLockFile>(QDir(strDbDir).filePath(strLockName));
-      out << "harness: add-db lock held: " << (pHeldLock->tryLock(0) ? 1 : 0) << "\n";
-      continue;
-    }
-    if(strOpening == QLatin1String("stale-lock"))
-    {
-      QFile fileLock(QDir(strDbDir).filePath(strLockName));
-      // (Written out before its time is set, which writing would change)
-      const bool bOk = fileLock.open(QIODevice::WriteOnly) && (fileLock.write("left by a copy that stopped\n") > 0) &&
-                       fileLock.flush() &&
-                       fileLock.setFileTime(QDateTime::currentDateTime().addSecs(-3600),
-                                            QFileDevice::FileModificationTime);
-      out << "harness: add-db stale lock left: " << (bOk ? 1 : 0) << "\n";
+      if(!bManagePlace)
+        out << "harness: manage-db " << menuPlace(pManage) << "\n";
+      bManagePlace = true;
+      astrSteps = strOpening.split(',', Qt::SkipEmptyParts).mid(1);
+      pManage->trigger();
+      QCoreApplication::processEvents();
+      if(!bShown)
+        out << "harness: manage-db dialog not shown\n";
       continue;
     }
     astrSteps = strOpening.split(',', Qt::SkipEmptyParts);

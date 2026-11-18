@@ -160,14 +160,26 @@ when it is installed, so Pillow needn't be installed separately).
       Configuration's user database folder to NAME in the settings folder
       (empty for none) and saves. `other=NAME` has another copy of JPEGsnoop,
       which read the user database when this one started, add software NAME
-      with the file shown's signatures; `lock` holds the database's lock
+      with the file shown's signatures, and `other-remove=NAME` has it take
+      out the entry for software NAME; `lock` holds the database's lock
       until the openings end, as another copy does while it writes; and
       `stale-lock` leaves a lock file an hour old, as a copy that stopped
-      while writing would. It prints the dialog's fields and note when it
-      shows and after each step; then the user database file read as
-      Windows wrote it (each entry's fields), the folder's files, whether a
-      file was written beside the folder, the database as the next start
-      reads it, and the signature search again after File > Reprocess.
+      while writing would. `file-mode=OCTAL` sets the database file's
+      permissions, and `db-file=NAME` replaces it with NAME (in the folder of
+      the files given), as another program might. It prints the dialog's
+      fields and note when it shows and after each step. An OPENING
+      `manage[,STEP...]` chooses Tools > Manage Local DB instead (printing
+      its place in the menu the first time) and answers its dialog with the
+      steps `select=N[;N...]` (click row N, then Command-click the others),
+      `remove`, `remove-all`, `delete` and `backspace` (the keys, in the
+      list), `list`, `ok`, `return`, `cancel`, `escape`, and the openings
+      from `other=` to `db-file=` above (while the dialog is open); it prints
+      the dialog's rows and note when it shows, and its state after each
+      step. Then it prints the user
+      database file read as Windows wrote it (each entry's fields), the
+      folder's files, whether a file was written beside the folder, the
+      database as the next start reads it, and the signature search again
+      after File > Reprocess.
       `--user-db [FOLDER:]NAME` (any number) copies NAME, in the folder of the
       files given, into the user database folder as `JPEGsnoop_db.dat` before
       the window opens (or into FOLDER in the settings folder), and
@@ -262,8 +274,9 @@ section, `A` in its "About" section, `T` in its "Select All and Copy"
 section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
 `BP` in its "Batch Process" section, `FO` in its "File > Offset" section, `IS`
 in its "Tools > Image Search Fwd and Rev" section, `LM` in its "Tools > Lookup MCU
-Offset" section, `DQ` in its "Tools > Search Executable for DQT" section, and
-`AD` in its "Tools > Add Camera/SW to DB" section);
+Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
+`AD` in its "Tools > Add Camera/SW to DB" section, and `MD` in its "Tools >
+Manage Local DB" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

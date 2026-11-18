@@ -80,6 +80,7 @@ SOURCES += \
     $$PWD/source/aboutdialog.cpp \
     $$PWD/source/batchdialog.cpp \
     $$PWD/source/batchprocess.cpp \
+    $$PWD/source/dbmanagedialog.cpp \
     $$PWD/source/dbsubmitdialog.cpp \
     $$PWD/source/finddialog.cpp \
     $$PWD/source/lookupdialog.cpp \
@@ -109,6 +110,7 @@ HEADERS += \
     $$PWD/source/aboutdialog.h \
     $$PWD/source/batchdialog.h \
     $$PWD/source/batchprocess.h \
+    $$PWD/source/dbmanagedialog.h \
     $$PWD/source/dbsubmitdialog.h \
     $$PWD/source/finddialog.h \
     $$PWD/source/lookupdialog.h \

@@ -96,6 +96,7 @@ private slots:
   void onLookupMcuOffset();
   void onSearchDqt();
   void onAddToDb();
+  void onManageLocalDb();
   void onAbout();
 
 private:
