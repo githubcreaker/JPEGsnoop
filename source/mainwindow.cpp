@@ -275,8 +275,18 @@ void MainWindow::createActions(void)
   printSetupAct->setStatusTip(tr("Change the printer and printing options"));
   connect(printSetupAct, &QAction::triggered, this, &MainWindow::filePrintSetup);
 
+  // File > Recent File (MFC's list of the files opened last): this greyed
+  // placeholder while there are none, as on Windows, then an item for each
   recentFileAct = new QAction(tr("Recent File"), this);
   recentFileAct->setEnabled(false);
+  for(int nInd = 0; nInd < CSnoopConfig::RECENT_FILES_MAX; nInd++)
+  {
+    QAction *pAct = new QAction(this);
+    pAct->setVisible(false);
+    connect(pAct, &QAction::triggered, this, &MainWindow::onOpenRecent);
+    m_apRecentActs.append(pAct);
+  }
+  m_astrRecentFiles = m_pAppConfig->recentFiles();
 
   exitAct = new QAction(tr("E&xit"), this);
   exitAct->setShortcuts(QKeySequence::Quit);
@@ -626,6 +636,11 @@ void MainWindow::createMenus(void)
   fileMenu->addAction(printSetupAct);
   fileMenu->addSeparator();
   fileMenu->addAction(recentFileAct);
+  for(QAction *pAct : m_apRecentActs)
+  {
+    fileMenu->addAction(pAct);
+  }
+  updateRecentMenu();
   fileMenu->addSeparator();
   fileMenu->addAction(exitAct);
 
@@ -742,9 +757,9 @@ void MainWindow::open()
 }
 
 //-----------------------------------------------------------------------------
-// Open and analyze a file (File > Open, and the test driver)
+// Open and analyze a file (see mainwindow.h)
 
-void MainWindow::openFile(const QString &strPath)
+bool MainWindow::openFile(const QString &strPath)
 {
   m_currentFile = strPath;
 
@@ -763,6 +778,130 @@ void MainWindow::openFile(const QString &strPath)
   emit ImgSrcChanged();
 
   AnalyzeFile();
+
+  // As MFC did, also for an empty file (it could be opened)
+  if(m_bOpenFailed)
+  {
+    return false;
+  }
+  addRecentFile(strPath);
+  return true;
+}
+
+//-----------------------------------------------------------------------------
+// File > Recent File
+
+namespace
+{
+
+// Whether two paths are the same file: by their real paths while both exist
+bool sameFile(const QString &strOne, const QString &strOther)
+{
+  const QFileInfo infoOne(strOne);
+  const QFileInfo infoOther(strOther);
+  const QString strRealOne = infoOne.canonicalFilePath();
+  const QString strRealOther = infoOther.canonicalFilePath();
+  if(!strRealOne.isEmpty() && !strRealOther.isEmpty())
+  {
+    return strRealOne == strRealOther;
+  }
+  return infoOne.absoluteFilePath() == infoOther.absoluteFilePath();
+}
+
+} // namespace
+
+// A file as its item names it: the home folder as "~", and a path over 50
+// characters shortened as MFC's AbbreviateName() did (at 30), keeping its
+// first part and as many of its last folders as fit around "…", or
+// else the file's name alone. A "&" is doubled, or it would mark a shortcut.
+QString MainWindow::recentFileName(const QString &strPath)
+{
+  constexpr int kMaxChars = 50;
+  const QChar chSep = QDir::separator();
+  QString str = QDir::toNativeSeparators(strPath);
+  const QString strHome = QDir::toNativeSeparators(QDir::homePath());
+  if(!strHome.isEmpty() && ((str == strHome) || str.startsWith(strHome + chSep)))
+  {
+    str = QStringLiteral("~") + str.mid(strHome.size());
+  }
+
+  if(str.size() > kMaxChars)
+  {
+    const QStringList astrParts = str.split(chSep);
+    const QString strStart = astrParts.first() + chSep + QChar(0x2026) + chSep;
+    QString strEnd = astrParts.last();
+    for(qsizetype nInd = astrParts.size() - 2; nInd >= 1; nInd--)
+    {
+      const QString strLonger = astrParts.at(nInd) + chSep + strEnd;
+      if(strStart.size() + strLonger.size() > kMaxChars)
+      {
+        break;
+      }
+      strEnd = strLonger;
+    }
+    str = (strStart.size() + strEnd.size() <= kMaxChars) ? (strStart + strEnd) : astrParts.last();
+  }
+  return str.replace(QChar(u'&'), QStringLiteral("&&"));
+}
+
+// First in the list, once (Windows: CWinApp::AddToRecentFileList())
+void MainWindow::addRecentFile(const QString &strPath)
+{
+  const QString strFile = QDir::cleanPath(QFileInfo(strPath).absoluteFilePath());
+  m_astrRecentFiles.removeIf([&strFile](const QString &strListed) { return sameFile(strListed, strFile); });
+  m_astrRecentFiles.prepend(strFile);
+  while(m_astrRecentFiles.size() > CSnoopConfig::RECENT_FILES_MAX)
+  {
+    m_astrRecentFiles.removeLast();
+  }
+  m_pAppConfig->setRecentFiles(m_astrRecentFiles);
+  updateRecentMenu();
+}
+
+void MainWindow::removeRecentFile(const QString &strPath)
+{
+  m_astrRecentFiles.removeIf([&strPath](const QString &strListed) { return sameFile(strListed, strPath); });
+  m_pAppConfig->setRecentFiles(m_astrRecentFiles);
+  updateRecentMenu();
+}
+
+// The placeholder, greyed, while the list is empty (as on Windows); then
+// "1 <path>" and on, newest first, each with its whole path as its tip
+void MainWindow::updateRecentMenu()
+{
+  recentFileAct->setVisible(m_astrRecentFiles.isEmpty());
+  for(qsizetype nInd = 0; nInd < m_apRecentActs.size(); nInd++)
+  {
+    QAction *pAct = m_apRecentActs.at(nInd);
+    if(nInd < m_astrRecentFiles.size())
+    {
+      const QString &strPath = m_astrRecentFiles.at(nInd);
+      pAct->setText(QString("&%1 %2").arg(nInd + 1).arg(recentFileName(strPath)));
+      pAct->setStatusTip(QDir::toNativeSeparators(strPath));
+      pAct->setData(strPath);
+      pAct->setVisible(true);
+    }
+    else
+    {
+      pAct->setVisible(false);
+    }
+  }
+}
+
+// Open a file again. One that can't be opened any more (it says why) is
+// taken off the list, as MFC did.
+void MainWindow::onOpenRecent()
+{
+  const QAction *pAct = qobject_cast<QAction *>(sender());
+  if(!pAct)
+  {
+    return;
+  }
+  const QString strPath = pAct->data().toString();
+  if(!openFile(strPath))
+  {
+    removeRecentFile(strPath);
+  }
 }
 
 //-----------------------------------------------------------------------------
@@ -812,9 +951,11 @@ bool MainWindow::AnalyzeOpen()
   // One QFile per analysis; free the previous one (this used to leak per open)
   delete m_pFile;
   m_pFile = new QFile(m_currentFile);
+  m_bOpenFailed = false;
 
   if(m_pFile->open(QIODevice::ReadOnly) == false)
   {
+    m_bOpenFailed = true;
     QString strError;
 
     // Note: msg includes m_strPathName. Clear the previous file's report

@@ -2368,6 +2368,99 @@ printer of its own now fails 4, as only the system's dialog is given the printer
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### File > Recent File
+
+File > Recent File was only a greyed placeholder: the port kept no list of the files
+opened. Now, as on Windows (MFC's list):
+- **The four files opened last** are listed where the placeholder is, newest first, as
+  "1 <path>" to "4 <path>". While there are none, the greyed "Recent File" placeholder
+  shows. Each item's status tip is the whole path.
+- **Choosing one** opens that file again and puts it first. One that can't be opened any
+  more (moved, deleted, or on a volume that isn't mounted) gets the usual "Couldn't open
+  file" message and is taken off the list, as MFC did.
+- **A file joins the list,** first, when it is opened by File > Open or by one of the
+  items, also an empty file, as on Windows. One that can't be opened isn't added.
+  Reprocess and Batch Process don't change the list.
+- **No file is listed twice:** opened again, by the same path, a path with "..", or a
+  symbolic link, it moves first.
+- **The names:** the home folder as "~". A path over 50 characters is shortened in the
+  middle, as MFC's `AbbreviateName()` did at 30: its first part and as many of its last
+  folders as fit, for example "~/…/Holiday in the mountains/Day 3/IMG_1234.jpg". If not
+  even that fits, the file's name alone. A "&" in a name is doubled, or it would mark a
+  shortcut and not show.
+- **The list is saved** under MFC's names ("Recent File List\File1" to "File4") and read
+  at the next start. A file gone since stays listed until it is chosen, as on Windows.
+
+**Changes from Windows:**
+- **Saved as it changes.** Windows saved the list at exit, so a crash lost the files
+  opened since the start.
+- **50 characters before a path is shortened** (MFC: 30), as macOS paths are longer, and
+  "~" for the home folder.
+- **The same file through a symbolic link** is one item. MFC compared the paths only.
+
+**Unchanged from Windows:** four files, the place, the placeholder, the numbers, the
+message and removal for a file that can't be opened, a file gone since kept until chosen.
+As on Windows, two copies of JPEGsnoop each keep their own list, and the last to save it
+wins (not tested).
+
+**Tests:** 32 new `RF` cases (946 in all).
+- **The driver:** `gui --recent STEP[,STEP...]` (`--recent-at N`) prints the
+  placeholder's place, the items (each item's text and the file named in its tip), and
+  the list as saved, after each step. Its steps open a file as File > Open does, open a
+  copy of one or a link to one, choose an item, move a copy away and back, and reprocess.
+  `name=PATH` prints how an item names a path, with no file needed. `--recent-stored`
+  saves a list before the window opens, as a previous start would have.
+
+The cases cover:
+- **The placeholder:** its place, and that it is greyed while the list is empty.
+- **The list:** one file, three in order, five (the oldest dropped), the same file again,
+  by a path with "..", and by a link; the files given to the driver; an empty file; a
+  file that can't be opened (not added); Reprocess.
+- **Choosing:** an item opens that file and puts it first; one whose file was moved away
+  gets the message and is taken off, but opens if the file is back before it is chosen;
+  taking one off doesn't bring back one dropped before.
+- **A list saved before:** shown at the start, with a file gone since kept until chosen.
+- **The names:** short, under the home folder, long (also under the home folder), exactly
+  50 and 51 characters, a long file name alone, and "&", in a name and in an item.
+
+On the previous commit 29 of them fail. The other 3 check what was already so: the
+placeholder, its place, and that nothing was saved. Two faults in the new cases were found
+and fixed while checking them:
+- **The case for a file that can't be opened** matched the list printed before its step,
+  so it would have passed with the file added. A break showed it.
+- **Moving a file away** renamed one of the shared test files, which other runs open.
+  Breaks run side by side then failed each other's cases. The step now moves a copy in
+  the run's own settings folder.
+
+Fourteen deliberate breaks each fail their own cases:
+- **The list:**
+  - a file opened not added, 18 fail;
+  - one that couldn't be opened added, 1 fails;
+  - an empty file left out, 1 fails;
+  - no check for the same file, 4 fail; the same file through a link not found, 1 fails;
+  - no limit of four, 1 fails;
+  - not saved, 9 fail; not read at the start, 2 fail.
+- **Choosing:** one that can't be opened kept, 3 fail.
+- **The menu:** the placeholder shown with the items, 7 fail; items not numbered, 13 fail.
+- **The names:** no "~", 2 fail; not shortened, 4 fail; "&" not doubled, 2 fail.
+
+**Checks:**
+- **All 946 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** finds nothing new in the changed files.
+- **Not checked:** on the macOS platform, how the native menu shows the items; two copies
+  at once; a volume that isn't mounted (simulated by moving the file away).
+
+**Still open:**
+- **Windows' red line** where the image ends inside its last MCUs (see View > Overlays >
+  MCU Grid).
+- **Not yet ported:** the toolbar's New button.
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

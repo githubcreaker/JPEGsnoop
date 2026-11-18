@@ -86,7 +86,12 @@ signals:
 public slots:
   void updateImage();
   void reprocess();
-  void openFile(const QString &strPath);
+  // Open and analyze a file (File > Open, File > Recent File, and the test
+  // driver): false if it couldn't be opened. One that could is put first in
+  // File > Recent File.
+  bool openFile(const QString &strPath);
+  // How File > Recent File names a file in its item
+  static QString recentFileName(const QString &strPath);
 
 private slots:
   void open();
@@ -112,6 +117,7 @@ private slots:
   void onSearchDqt();
   void onAddToDb();
   void onManageLocalDb();
+  void onOpenRecent();
   void onMcuGrid(bool bOn);
   void onStatusBar(bool bOn);
   void onAbout();
@@ -136,6 +142,9 @@ private:
   void searchDqt(const QString &strChosen);
   void clearImageViews();
   void AnalyzeFile();
+  void addRecentFile(const QString &strPath);
+  void removeRecentFile(const QString &strPath);
+  void updateRecentMenu();
   bool AnalyzeOpen();
   void AnalyzeFileDo();
   void AnalyzeClose();
@@ -264,6 +273,10 @@ private:
 
   bool m_bFileAnalyzed = false; // Have we opened and analyzed a file? (These three were never initialised)
   bool m_bFileOpened = false;   // Is a file currently opened?
+  bool m_bOpenFailed = false;   // the last AnalyzeOpen() couldn't open the file
+
+  QStringList m_astrRecentFiles;        // File > Recent File, newest first
+  QList<QAction *> m_apRecentActs;      // its items, one for each
 
   QLabel *rgbHisto;
   QLabel *yHisto;

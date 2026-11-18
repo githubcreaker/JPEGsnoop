@@ -64,6 +64,13 @@ public:
   QString batchLastInput() { return strBatchLastInput; }
   QString batchLastOutput() { return strBatchLastOutput; }
 
+  // File > Recent File: the files opened last, newest first, at most
+  // RECENT_FILES_MAX (MFC's four). Saved at once, under the names MFC used
+  // ("Recent File List\File1" and on); Windows saved them at exit.
+  static constexpr int RECENT_FILES_MAX = 4;
+  QStringList recentFiles() const;
+  void setRecentFiles(const QStringList &astrFiles);
+
   bool autoReprocess() { return bReprocessAuto; }
   bool clipStats() { return bStatClipEn; }
   bool coachIdct() { return bCoachDecodeIdct; }

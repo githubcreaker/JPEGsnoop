@@ -249,6 +249,35 @@ void CSnoopConfig::RegistryLoad()
 }
 
 //-----------------------------------------------------------------------------
+// File > Recent File's list (see SnoopConfig.h)
+
+QStringList CSnoopConfig::recentFiles() const
+{
+  QSettings settings;
+  QStringList astrFiles;
+  for(int nInd = 1; nInd <= RECENT_FILES_MAX; nInd++)
+  {
+    const QString strFile = settings.value(QString("Recent File List\\File%1").arg(nInd)).toString();
+    if(!strFile.isEmpty())
+      astrFiles.append(strFile);
+  }
+  return astrFiles;
+}
+
+void CSnoopConfig::setRecentFiles(const QStringList &astrFiles)
+{
+  QSettings settings;
+  for(int nInd = 1; nInd <= RECENT_FILES_MAX; nInd++)
+  {
+    const QString strKey = QString("Recent File List\\File%1").arg(nInd);
+    if(nInd <= astrFiles.size())
+      settings.setValue(strKey, astrFiles.at(nInd - 1));
+    else
+      settings.remove(strKey);
+  }
+}
+
+//-----------------------------------------------------------------------------
 // Write all configuration parameters to the registry
 // - Skip write if no changes were made (!bDirty)
 //

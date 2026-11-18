@@ -3456,6 +3456,89 @@ print_case("PS_before_file", "setup=landscape,print", ps_pdf("print", "landscape
            extra="--print-at 0")
 
 
+# --- File > Recent File --------------------------------------------------------
+# The steps run before the file given is opened (--recent-at 0) unless said.
+# A space in them is percent-encoded (the runner splits the flags at spaces).
+def recent_case(cid, steps, expect, names=("ok_black.jpg",), extra="--recent-at 0", forbid="-"):
+    case(cid, "RF", "gui", list(names), ("--recent " + steps.replace(" ", "%20") + " " + extra).strip(), timeout=30,
+         expect=expect, forbid=forbid)
+
+
+def rf_item(n, name):
+    return f"&{n} [^|]*" + rx(f"{name} (tip {name})")
+
+
+def rf_menu(*names):
+    return "harness: recent menu: " + " \\| ".join(rf_item(n, name) for n, name in enumerate(names, 1)) + "$"
+
+
+def rf_stored(*names):
+    return rx("harness: recent stored: " + (",".join(names) if names else "none")) + "$"
+
+
+def rf_name(shown):
+    return rx(f'harness: recent name: "{shown}" chars={len(shown)}') + "$"
+
+
+# The placeholder, greyed, where Windows has it, while there are none
+recent_case("RF_place", "menu", rx('harness: recent menu=&File after="Print Setup..." separator=1 enabled=0 tip=""') +
+            "$")
+recent_case("RF_empty", "menu", rx("harness: recent menu: Recent File (off)") + "$")
+recent_case("RF_empty_stored", "menu", rf_stored())
+# A file opened goes first, once; four at most (MFC's), the oldest dropped
+recent_case("RF_open", "open=ok_444.jpg", rf_menu("ok_444.jpg"))
+recent_case("RF_open_stored", "open=ok_444.jpg", rf_stored("ok_444.jpg"))
+recent_case("RF_order", "open=ok_444.jpg,open=ok_420.jpg,open=ok_422.jpg",
+            rf_menu("ok_422.jpg", "ok_420.jpg", "ok_444.jpg"))
+RF_FIVE = "open=ok_444.jpg,open=ok_420.jpg,open=ok_422.jpg,open=ok_gray.jpg,open=ok_small.jpg"
+recent_case("RF_max", RF_FIVE, rf_menu("ok_small.jpg", "ok_gray.jpg", "ok_422.jpg", "ok_420.jpg"))
+recent_case("RF_max_stored", RF_FIVE, rf_stored("ok_small.jpg", "ok_gray.jpg", "ok_422.jpg", "ok_420.jpg"))
+# (Taking one off doesn't bring back one dropped before)
+recent_case("RF_max_then_gone", RF_FIVE.replace("open=ok_small.jpg", "open-copy=ok_small.jpg:small.jpg") +
+            ",gone=small.jpg,choose=1", rf_stored("ok_gray.jpg", "ok_422.jpg", "ok_420.jpg"))
+recent_case("RF_again", "open=ok_444.jpg,open=ok_420.jpg,open=ok_444.jpg", rf_stored("ok_444.jpg", "ok_420.jpg"))
+recent_case("RF_same_file", "open=ok_444.jpg,open=../files/ok_444.jpg", rf_stored("ok_444.jpg"))
+recent_case("RF_same_file_link", "open=ok_444.jpg,link=ok_444.jpg:other.jpg", rf_stored("other.jpg"))
+# The files given are opened as File > Open does
+recent_case("RF_given", "menu", rf_menu("ok_444.jpg", "ok_black.jpg"), names=("ok_black.jpg", "ok_444.jpg"),
+            extra="--recent-at 2")
+# Choosing an item opens it again; one that can't be opened any more says so
+# and is taken off, as MFC did
+recent_case("RF_choose", "open=ok_444.jpg,open=ok_420.jpg,choose=2",
+            "harness: recent chose 2: report file=ok_444\\.jpg$")
+recent_case("RF_choose_first", "open=ok_444.jpg,open=ok_420.jpg,choose=2", rf_stored("ok_444.jpg", "ok_420.jpg"))
+RF_GONE = "open-copy=ok_444.jpg:copy.jpg,open=ok_420.jpg,gone=copy.jpg,choose=2"
+recent_case("RF_choose_gone", RF_GONE, "harness: message box: ERROR: Couldn't open file: \\[/.*/copy\\.jpg\\]$")
+recent_case("RF_choose_gone_off", RF_GONE, rf_stored("ok_420.jpg"))
+recent_case("RF_choose_back", RF_GONE.replace(",choose=2", ",back=copy.jpg,choose=2"), rf_stored("copy.jpg", "ok_420.jpg"))
+# Not a file that can't be opened; an empty file, as MFC (it opens); Reprocess
+# changes nothing
+recent_case("RF_not_added", "open=nosuch.jpg", "harness: recent open nosuch.jpg: opened=0$",
+            forbid="harness: recent (stored|menu): .*nosuch")
+recent_case("RF_empty_file", "open=dq_empty.bin", rf_stored("dq_empty.bin"))
+recent_case("RF_reprocess", "open=ok_444.jpg,open=ok_420.jpg,reprocess", rf_stored("ok_420.jpg", "ok_444.jpg"))
+# The list a previous start saved, a file gone from it kept until chosen
+RF_PREV = "--recent-at 0 --recent-stored ok_444.jpg+nosuch.jpg+ok_420.jpg"
+recent_case("RF_start", "menu", rf_menu("ok_444.jpg", "nosuch.jpg", "ok_420.jpg"), extra=RF_PREV)
+recent_case("RF_start_gone", "choose=2", rf_menu("ok_444.jpg", "ok_420.jpg"), extra=RF_PREV)
+# How an item names a file: the home folder as "~"; a long path shortened in
+# the middle, as MFC did; a long name alone; "&" doubled
+recent_case("RF_name_short", "name=/tmp/a.jpg", rf_name("/tmp/a.jpg"))
+recent_case("RF_name_home", "name=~/Pictures/a.jpg", rf_name("~/Pictures/a.jpg"))
+recent_case("RF_name_long", "name=/Volumes/Photos/2026/November/Holiday in the mountains/Day 3/IMG_1234.jpg",
+            rf_name("/\u2026/Holiday in the mountains/Day 3/IMG_1234.jpg"))
+recent_case("RF_name_home_long", "name=~/Pictures/2026/November/Holiday in the mountains/Day 3/IMG_1234.jpg",
+            rf_name("~/\u2026/Holiday in the mountains/Day 3/IMG_1234.jpg"))
+# 50 characters is kept whole; 51 is shortened
+recent_case("RF_name_50", "name=/Volumes/Photos/" + "a" * 30 + ".jpg", rf_name("/Volumes/Photos/" + "a" * 30 + ".jpg"))
+recent_case("RF_name_51", "name=/Volumes/Photos/" + "a" * 31 + ".jpg", rf_name("/\u2026/Photos/" + "a" * 31 + ".jpg"))
+recent_case("RF_name_only", "name=~/Pictures/A very long file name that is more than fifty characters long.jpg",
+            rf_name("A very long file name that is more than fifty characters long.jpg"))
+recent_case("RF_name_amp", "name=/tmp/R%26D.jpg", rf_name("/tmp/R&&D.jpg"))
+recent_case("RF_amp_item", "open-copy=ok_444.jpg:long folder name one/long folder name two/R%26D photo.jpg",
+            "harness: recent menu: &1 [^|]*/R&&D photo\\.jpg \\(tip R&D photo\\.jpg\\)$")
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

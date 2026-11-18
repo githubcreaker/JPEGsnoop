@@ -229,6 +229,16 @@ when it is installed, so Pillow needn't be installed separately).
       `printer=pdf`; `select=N`, `select-all` and `select-none` in the report.
       It prints each dialog's printer and options when it shows, and the
       printer's format, orientation, paper, range and margins after each step.
+    - `--recent STEP[,STEP...]` (`--recent-at N`; `0` is before any file)
+      prints File > Recent File's place, its items (text, and the file name in
+      its tip) and the list as saved; then each STEP and them again:
+      `open=NAME` (as File > Open opens it), `open-copy=NAME:PATH` and
+      `link=NAME:PATH` (a copy of NAME, or a link to it, at PATH in the
+      settings folder, opened), `choose=N`, `gone=PATH` and `back=PATH` (move
+      PATH in the settings folder away and back), `reprocess` and `menu`. `name=PATH` prints how an
+      item names PATH (`~/` is the home folder; no file is needed). Values are
+      percent-encoded. `--recent-stored NAME[+NAME...]` saves a list before
+      the window opens, as a previous start would have.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -319,8 +329,8 @@ in its "Tools > Image Search Fwd and Rev" section, `LM` in its "Tools > Lookup M
 Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
 `AD` in its "Tools > Add Camera/SW to DB" section, `MD` in its "Tools >
 Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
-`VB` in its "View > Toolbar and Status Bar" section, and `PS` in its "File > Print
-Setup" section);
+`VB` in its "View > Toolbar and Status Bar" section, `PS` in its "File > Print
+Setup" section, and `RF` in its "File > Recent File" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

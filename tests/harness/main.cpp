@@ -278,6 +278,21 @@
 //     report's first N characters, all of it, or none). Print each dialog's
 //     printer and options when it shows, and the printer after each step.
 //
+// gui ... --recent STEP[,STEP...] [--recent-at N] [--recent-stored NAME[+NAME...]]
+//     After the first file (or file N; 0 is before any file), print the
+//     place of File > Recent File's placeholder in the menu, then its items
+//     (the placeholder's while there are none) and the list as saved. Then
+//     do each STEP and print them again: open=NAME (open NAME, in the folder
+//     of the files given, as File > Open does), open-copy=NAME:PATH and
+//     link=NAME:PATH (copy it, or link to it, at PATH in the settings folder
+//     and open that), choose=N (choose item
+//     N), gone=PATH and back=PATH (move PATH in the settings folder away and
+//     back), reprocess and
+//     menu. name=PATH prints how an item names PATH ("~/" is the home folder;
+//     no file is needed). Values are percent-encoded. --recent-stored saves a
+//     list (NAMEs in the folder of the files given, newest first) before the
+//     window opens, as a previous start would have.
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -393,6 +408,7 @@ static void usage()
           "                         [--mcu-grid STEP[,STEP...] [--mcu-grid-at N]]\n"
           "                         [--bars STEP[,STEP...] [--bars-at N]]\n"
           "                         [--print STEP[,STEP...] [--print-at N]]\n"
+          "                         [--recent STEP[,STEP...] [--recent-at N]] [--recent-stored NAME[+NAME...]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1117,6 +1133,9 @@ struct GuiOptions
   int nBarsAt = 1;                // --bars-at N
   QString strPrint;               // --print STEP[,STEP...]
   int nPrintAt = 1;               // --print-at N
+  QString strRecent;              // --recent STEP[,STEP...]
+  int nRecentAt = 1;              // --recent-at N
+  QString strRecentStored;        // --recent-stored NAME[+NAME...]
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -3331,6 +3350,143 @@ static void printMenu(MainWindow &window, const QString &strSteps, const QString
   out.flush();
 }
 
+// File > Recent File's items, from the placeholder to the separator after
+// them, as "TEXT (off)" or "TEXT (tip TIP)" (the tip's file name only), and
+// the list as saved (file names)
+static void recentState(MainWindow &window, QTextStream &out)
+{
+  QAction *pPlaceholder = findAction(window, QStringLiteral("Recent File"));
+  QMenu *pMenu = nullptr;
+  for(QObject *pObj : pPlaceholder ? pPlaceholder->associatedObjects() : QObjectList())
+  {
+    if(QMenu *pFound = qobject_cast<QMenu *>(pObj))
+      pMenu = pFound;
+  }
+  if(!pMenu)
+  {
+    out << "harness: recent menu: no File > Recent File\n";
+    return;
+  }
+  const QList<QAction *> actions = pMenu->actions();
+  QStringList astrItems;
+  for(qsizetype nInd = actions.indexOf(pPlaceholder); nInd < actions.size(); nInd++)
+  {
+    QAction *pAct = actions.at(nInd);
+    if(pAct->isSeparator())
+      break;
+    if(!pAct->isVisible())
+      continue;
+    astrItems << (pAct->isEnabled() ? QString("%1 (tip %2)").arg(pAct->text(), QFileInfo(pAct->statusTip()).fileName())
+                                    : QString("%1 (off)").arg(pAct->text()));
+  }
+  out << "harness: recent menu: " << astrItems.join(" | ") << "\n";
+  QStringList astrStored;
+  QSettings settings;
+  for(int nInd = 1; nInd <= 9; nInd++)
+  {
+    const QString strFile = settings.value(QString("Recent File List\\File%1").arg(nInd)).toString();
+    if(!strFile.isEmpty())
+      astrStored << QFileInfo(strFile).fileName();
+  }
+  out << "harness: recent stored: " << (astrStored.isEmpty() ? QStringLiteral("none") : astrStored.join(',')) << "\n";
+}
+
+// File > Recent File as a user uses it (see --recent above)
+static void recentMenu(MainWindow &window, const GuiOptions &opts, const QString &strSettingsDir, QTextStream &out)
+{
+  QAction *pPlaceholder = findAction(window, QStringLiteral("Recent File"));
+  if(!pPlaceholder)
+  {
+    out << "harness: menu Recent File unavailable\n";
+    return;
+  }
+  out << "harness: recent " << menuPlace(pPlaceholder) << "\n";
+  recentState(window, out);
+
+  for(const QString &strStep : opts.strRecent.split(',', Qt::SkipEmptyParts))
+  {
+    const qsizetype nEq = strStep.indexOf('=');
+    const QString strName = (nEq < 0) ? strStep : strStep.left(nEq);
+    const QString strArg = (nEq < 0) ? QString() : QUrl::fromPercentEncoding(strStep.mid(nEq + 1).toUtf8());
+    if(strName == "open")
+    {
+      // As File > Open does with the file chosen
+      const bool bOpened = window.openFile(QDir(opts.strFilesDir).filePath(strArg));
+      out << "harness: recent open " << strArg << ": opened=" << (bOpened ? 1 : 0) << "\n";
+    }
+    else if((strName == "open-copy") || (strName == "link"))
+    {
+      // A copy of NAME, or a symbolic link to it, at PATH in the settings
+      // folder (NAME:PATH), opened
+      const qsizetype nColon = strArg.indexOf(':');
+      const QString strTo = QDir(strSettingsDir).filePath(strArg.mid(nColon + 1));
+      const QString strFrom = QDir(opts.strFilesDir).filePath(strArg.left(nColon));
+      QDir().mkpath(QFileInfo(strTo).absolutePath());
+      if(strName == "link")
+        QFile::link(strFrom, strTo);
+      else
+        QFile::copy(strFrom, strTo);
+      const bool bOpened = window.openFile(strTo);
+      out << "harness: recent " << strName << " " << strArg.mid(nColon + 1) << ": opened=" << (bOpened ? 1 : 0) << "\n";
+    }
+    else if(strName == "choose")
+    {
+      // Item N (1 is the first) as the menu shows it
+      QAction *pChosen = nullptr;
+      const QList<QAction *> actions = window.findChildren<QAction *>();
+      for(QAction *pAct : actions)
+      {
+        if(pAct->isVisible() && pAct->text().startsWith(QString("&%1 ").arg(strArg)))
+          pChosen = pAct;
+      }
+      if(!pChosen)
+      {
+        out << "harness: recent no item " << strArg << "\n";
+        continue;
+      }
+      pChosen->trigger();
+      QCoreApplication::processEvents();
+      // The file the report is of (its "Filename:" line)
+      QString strReportFile = QStringLiteral("-");
+      for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
+      {
+        if(strLine.startsWith("  Filename: ["))
+          strReportFile = QFileInfo(strLine.mid(13).chopped(1)).fileName();
+      }
+      out << "harness: recent chose " << strArg << ": report file=" << strReportFile << "\n";
+    }
+    else if((strName == "gone") || (strName == "back"))
+    {
+      // PATH in the settings folder (a copy open-copy made) moved away and
+      // back, as if deleted or on a volume not mounted. (Not a file given:
+      // other runs may be using them.)
+      const QString strFile = QDir(strSettingsDir).filePath(strArg);
+      const bool bOk = (strName == "gone") ? QFile::rename(strFile, strFile + ".harness-gone")
+                                           : QFile::rename(strFile + ".harness-gone", strFile);
+      out << "harness: recent " << strName << " " << strArg << ": " << (bOk ? 1 : 0) << "\n";
+      continue;
+    }
+    else if(strName == "name")
+    {
+      // How an item names PATH ("~/" is the home folder); no file is needed
+      const QString strPath = strArg.startsWith("~/") ? (QDir::homePath() + strArg.mid(1)) : strArg;
+      const QString strShown = MainWindow::recentFileName(strPath);
+      out << "harness: recent name: \"" << strShown << "\" chars=" << strShown.size() << "\n";
+      continue;
+    }
+    else if(strName == "reprocess")
+      window.reprocess();
+    else if(strName != "menu")
+    {
+      out << "harness: unknown recent step " << strStep << "\n";
+      continue;
+    }
+    QCoreApplication::processEvents();
+    recentState(window, out);
+  }
+  out.flush();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -3797,6 +3953,15 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     else if((nColon < 0) && !opts.strUserDbMode.isEmpty())
       chmod(QFile::encodeName(strTarget).constData(), static_cast<mode_t>(opts.strUserDbMode.toUInt(nullptr, 8)));
   }
+  // File > Recent File's list as a previous start left it (--recent-stored)
+  if(!opts.strRecentStored.isEmpty())
+  {
+    QSettings settings;
+    int nInd = 0;
+    for(const QString &strName : opts.strRecentStored.split('+', Qt::SkipEmptyParts))
+      settings.setValue(QString("Recent File List\\File%1").arg(++nInd), QDir(opts.strFilesDir).filePath(strName));
+  }
+
   // (Writable again at the end, so the settings folder can be removed)
   const bool bDbDirMode = !opts.strDbDir.isEmpty() && !opts.strDbDirMode.isEmpty();
   if(bDbDirMode)
@@ -3853,6 +4018,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
   {
     out << "harness: dqt before any file\n";
     dqtMenu(window, opts, out);
+  }
+
+  // File > Recent File before any file has been opened
+  if(!opts.strRecent.isEmpty() && (opts.nRecentAt == 0))
+  {
+    out << "harness: recent before any file\n";
+    recentMenu(window, opts, strSettingsDir, out);
   }
 
   // File > Print Setup, Print and Print Preview before any file has been opened
@@ -3969,6 +4141,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           editSteps(window, opts.strEdit, out);
         if(!opts.strPrint.isEmpty() && (nFileInd == opts.nPrintAt))
           printMenu(window, opts.strPrint, strSettingsDir, out);
+        if(!opts.strRecent.isEmpty() && (nFileInd == opts.nRecentAt))
+          recentMenu(window, opts, strSettingsDir, out);
         if(!opts.strBars.isEmpty())
         {
           if(nFileInd == opts.nBarsAt)
@@ -4885,7 +5059,7 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
-                             "--db-dir-mode", "--mcu-grid", "--bars", "--print" })
+                             "--db-dir-mode", "--mcu-grid", "--bars", "--print", "--recent", "--recent-stored" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4939,6 +5113,10 @@ int main(int argc, char **argv)
       guiOpts.strBars = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--print"))
       guiOpts.strPrint = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--recent"))
+      guiOpts.strRecent = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--recent-stored"))
+      guiOpts.strRecentStored = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -4946,7 +5124,8 @@ int main(int argc, char **argv)
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
-                             "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at", "--print-at" })
+                             "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at", "--print-at",
+                             "--recent-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4985,6 +5164,8 @@ int main(int argc, char **argv)
       guiOpts.nBarsAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--print-at"))
       guiOpts.nPrintAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--recent-at"))
+      guiOpts.nRecentAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))
