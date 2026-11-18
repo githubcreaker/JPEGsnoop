@@ -98,6 +98,7 @@ private slots:
   void onAddToDb();
   void onManageLocalDb();
   void onMcuGrid(bool bOn);
+  void onStatusBar(bool bOn);
   void onAbout();
 
 private:

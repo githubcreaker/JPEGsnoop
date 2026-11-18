@@ -247,6 +247,18 @@
 //     dots are on, their spacing and colours, and other pixels that differ
 //     from the image.
 //
+// gui ... --bars STEP[,STEP...] [--bars-at N]
+//     After the first file (or file N; 0 is before any file), print the
+//     places of View > Toolbar and View > Status Bar in the menu, and whether
+//     the toolbar, this window's status bar and the image window's are shown
+//     and the items checked. Then do each STEP: toolbar and statusbar (choose
+//     the menu item), context (print the toolbar area's context menu and
+//     choose the toolbar's item in it) and hide-toolbar (hide the toolbar
+//     itself, as closing it does when it floats). After each step print the
+//     same, and whether the report and the image window's view got taller,
+//     shorter or stayed the same. After every file, print the same as
+//     "harness: bars file N:".
+//
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
 
@@ -298,6 +310,7 @@
 #include <QTextDocumentFragment>
 #include <QTextStream>
 #include <QTimer>
+#include <QToolBar>
 #include <QTreeWidget>
 #include <QWindow>
 #include <QtMath>
@@ -351,6 +364,7 @@ static void usage()
           "                         [--user-db [FOLDER:]NAME]... [--user-db-mode OCTAL]\n"
           "                         [--db-dir NAME [--db-dir-mode OCTAL]]\n"
           "                         [--mcu-grid STEP[,STEP...] [--mcu-grid-at N]]\n"
+          "                         [--bars STEP[,STEP...] [--bars-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1071,6 +1085,8 @@ struct GuiOptions
   QString strDbDirMode;           // --db-dir-mode OCTAL
   QString strMcuGrid;             // --mcu-grid STEP[,STEP...]
   int nMcuGridAt = 1;             // --mcu-grid-at N
+  QString strBars;                // --bars STEP[,STEP...]
+  int nBarsAt = 1;                // --bars-at N
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -2971,6 +2987,98 @@ static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream
   out.flush();
 }
 
+// View > Toolbar and Status Bar: whether the toolbar, this window's status bar
+// and the image window's are shown (as they would be with their window
+// shown), and the menu items' check marks
+static QString barsState(MainWindow &window)
+{
+  QAction *pToolbar = findAction(window, QStringLiteral("&Toolbar"));
+  QAction *pStatus = findAction(window, QStringLiteral("&Status Bar"));
+  const QToolBar *pTb = window.findChild<QToolBar *>();
+  const QStatusBar *pSb = window.findChild<QStatusBar *>(QString(), Qt::FindDirectChildrenOnly);
+  Q_Viewer *pViewer = findViewer();
+  const QStatusBar *pImgSb = pViewer ? pViewer->findChild<QStatusBar *>() : nullptr;
+  auto flag = [](bool b) { return b ? QStringLiteral("1") : QStringLiteral("0"); };
+  return QString("toolbar=%1 checked=%2 statusbar=%3 checked=%4 image-statusbar=%5")
+           .arg(pTb ? flag(pTb->isVisibleTo(&window)) : QStringLiteral("-"))
+           .arg(pToolbar ? flag(pToolbar->isChecked()) : QStringLiteral("-"))
+           .arg(pSb ? flag(pSb->isVisibleTo(&window)) : QStringLiteral("-"))
+           .arg(pStatus ? flag(pStatus->isChecked()) : QStringLiteral("-"))
+           .arg((pViewer && pImgSb) ? flag(pImgSb->isVisibleTo(pViewer)) : QStringLiteral("-"));
+}
+
+// The report's height and the image window's view's (0 while it isn't shown)
+static QSize barsSpace(MainWindow &window)
+{
+  Q_Viewer *pViewer = findViewer();
+  const QScrollArea *pScroll = pViewer ? pViewer->findChild<QScrollArea *>() : nullptr;
+  return QSize(window.textEdit->height(), (pViewer && pViewer->isVisible() && pScroll) ? pScroll->height() : 0);
+}
+
+// View > Toolbar and Status Bar as a user chooses them (see --bars above)
+static void barsMenu(MainWindow &window, const QString &strSteps, QTextStream &out)
+{
+  QAction *pToolbar = findAction(window, QStringLiteral("&Toolbar"));
+  QAction *pStatus = findAction(window, QStringLiteral("&Status Bar"));
+  QToolBar *pTb = window.findChild<QToolBar *>();
+  if(!pToolbar || !pStatus || !pTb)
+  {
+    out << "harness: menu Toolbar or Status Bar unavailable\n";
+    return;
+  }
+  for(QAction *pAction : { pToolbar, pStatus })
+  {
+    out << "harness: bars " << pAction->text() << " " << menuPlace(pAction)
+        << " checkable=" << (pAction->isCheckable() ? 1 : 0) << "\n";
+  }
+  out << "harness: bars at first: " << barsState(window) << "\n";
+
+  auto change = [](int nBefore, int nAfter) {
+    return (nAfter > nBefore) ? QStringLiteral("taller") : (nAfter < nBefore) ? QStringLiteral("shorter")
+                                                                              : QStringLiteral("same");
+  };
+  for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
+  {
+    QCoreApplication::processEvents();
+    const QSize sizeBefore = barsSpace(window);
+    if(strStep == "toolbar")
+      pToolbar->trigger();
+    else if(strStep == "statusbar")
+      pStatus->trigger();
+    else if(strStep == "context")
+    {
+      // The toolbar area's context menu: print its items, choose the toolbar's
+      std::unique_ptr<QMenu> pMenu(window.createPopupMenu());
+      QStringList astrItems;
+      QAction *pChoose = nullptr;
+      for(QAction *pItem : pMenu ? pMenu->actions() : QList<QAction *>())
+      {
+        astrItems << pItem->text();
+        if(pItem == pToolbar)
+          pChoose = pItem;
+      }
+      out << "harness: bars context menu: " << astrItems.join('|') << " toolbar's=" << (pChoose ? 1 : 0) << "\n";
+      if(pChoose)
+        pChoose->trigger();
+    }
+    else if(strStep == "hide-toolbar")
+      pTb->hide();          // as closing it does when it floats
+    else
+    {
+      out << "harness: unknown bars step " << strStep << "\n";
+      continue;
+    }
+    QCoreApplication::processEvents();
+    const QSize sizeAfter = barsSpace(window);
+    out << "harness: bars " << strStep << ": " << barsState(window)
+        << " report=" << change(sizeBefore.width(), sizeAfter.width())
+        << " image-view=" << ((sizeAfter.height() == 0) ? QStringLiteral("not shown")
+                                                         : change(sizeBefore.height(), sizeAfter.height()))
+        << "\n";
+  }
+  out.flush();
+}
+
 // Help > About JPEGsnoop as a user chooses it (see --about above)
 static void aboutMenu(MainWindow &window, QTextStream &out)
 {
@@ -3495,6 +3603,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     dqtMenu(window, opts, out);
   }
 
+  // View > Toolbar and Status Bar before any file has been opened
+  if(!opts.strBars.isEmpty() && (opts.nBarsAt == 0))
+  {
+    out << "harness: bars before any file\n";
+    barsMenu(window, opts.strBars, out);
+  }
+
   // View > Overlays > MCU Grid before any file has been opened
   if(!opts.strMcuGrid.isEmpty() && (opts.nMcuGridAt == 0))
   {
@@ -3593,6 +3708,12 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           aboutMenu(window, out);
         if(!opts.strEdit.isEmpty())
           editSteps(window, opts.strEdit, out);
+        if(!opts.strBars.isEmpty())
+        {
+          if(nFileInd == opts.nBarsAt)
+            barsMenu(window, opts.strBars, out);
+          out << "harness: bars file " << nFileInd << ": " << barsState(window) << "\n";
+        }
         if(!opts.strMcuGrid.isEmpty())
         {
           if(nFileInd == opts.nMcuGridAt)
@@ -4503,7 +4624,7 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--scale", "--zoom", "--pixels", "--out", "--format", "--detail", "--detail-dlg", "--mark",
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
-                             "--db-dir-mode", "--mcu-grid" })
+                             "--db-dir-mode", "--mcu-grid", "--bars" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4553,6 +4674,8 @@ int main(int argc, char **argv)
       guiOpts.strDbDirMode = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--mcu-grid"))
       guiOpts.strMcuGrid = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--bars"))
+      guiOpts.strBars = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -4560,7 +4683,7 @@ int main(int argc, char **argv)
   uint32_t nStart = 0;
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
-                             "--batch-close-after", "--add-db-at", "--mcu-grid-at" })
+                             "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -4595,6 +4718,8 @@ int main(int argc, char **argv)
       guiOpts.nAddDbAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--mcu-grid-at"))
       guiOpts.nMcuGridAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--bars-at"))
+      guiOpts.nBarsAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

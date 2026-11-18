@@ -387,6 +387,13 @@ void Q_Viewer::drawImage()
   setVisible(true);
 }
 
+// View > Status Bar: the MCU, file position and YCC under the mouse, which
+// on Windows were in the main window's one status bar
+void Q_Viewer::setStatusBarVisible(bool bOn)
+{
+  statusBar->setVisible(bOn);
+}
+
 // The MCU grid is drawn over a JPEG's image only: a Photoshop file's has no
 // MCUs. A JPEG's image is a whole number of MCUs.
 void Q_Viewer::updateMcuGrid()

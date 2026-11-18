@@ -456,13 +456,19 @@ void MainWindow::createActions(void)
 #endif
   connect(mcuGridAct, &QAction::toggled, this, &MainWindow::onMcuGrid);
 
-  toolbarAct = new QAction(tr("&Toolbar"), this);
-  toolbarAct->setCheckable(true);
-  toolbarAct->setChecked(true);
+  // View > Toolbar and Status Bar, as on Windows: shown at the start, and
+  // not saved. The toolbar's own action, so its check mark follows the
+  // toolbar however it is hidden (the toolbar area's context menu offers it
+  // too).
+  toolbarAct = fileToolBar->toggleViewAction();
+  toolbarAct->setText(tr("&Toolbar"));
+  toolbarAct->setStatusTip(tr("Show or hide the toolbar"));
 
   statusBarAct = new QAction(tr("&Status Bar"), this);
+  statusBarAct->setStatusTip(tr("Show or hide the status bar"));
   statusBarAct->setCheckable(true);
   statusBarAct->setChecked(true);
+  connect(statusBarAct, &QAction::toggled, this, &MainWindow::onStatusBar);
 
   // Tools
   imgSearchFwdAct = new QAction(tr("Image Search Fwd"), this);
@@ -2258,6 +2264,16 @@ void MainWindow::onMcuGrid(bool bOn)
 {
   m_pImgDec->SetPreviewOverlayMcuGrid(bOn);
   imgWindow->updateMcuGrid();
+}
+
+//-----------------------------------------------------------------------------
+// View > Status Bar: this window's and the image window's. Together they
+// hold what Windows' one status bar did: messages, and the MCU, file position
+// and YCC under the mouse.
+void MainWindow::onStatusBar(bool bOn)
+{
+  m_StatusBar->setVisible(bOn);
+  imgWindow->setStatusBarVisible(bOn);
 }
 
 //-----------------------------------------------------------------------------

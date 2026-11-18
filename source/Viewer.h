@@ -83,6 +83,7 @@ public:
   void drawImage();
   void clearImage();
   void updateMcuGrid();       // after View > Overlays > MCU Grid
+  void setStatusBarVisible(bool bOn);     // View > Status Bar
 
 public slots:
   void zoom(QAction *action);

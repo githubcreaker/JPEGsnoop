@@ -3318,6 +3318,52 @@ mcu_grid_case("MG_resize", MG_BIG, MG_ON + ",scroll=40;33,size=600;600,buffer", 
 mcu_grid_case("MG_scroll_grid_off", MG_BIG, "zoom=100,scroll=7;5,buffer", mg_buffer("7,5", "400x400", dots="0"))
 
 
+# --- View > Toolbar and Status Bar ----------------------------------------------
+def bars_case(cid, steps, expect, names=("mg_white_420.jpg",), extra="", forbid="-"):
+    case(cid, "VB", "gui", list(names), ("--bars " + steps + " " + extra).strip(), timeout=30, expect=expect,
+         forbid=forbid)
+
+
+def vb_state(toolbar, status):
+    return f"toolbar={toolbar} checked={toolbar} statusbar={status} checked={status} image-statusbar={status}"
+
+
+def vb_step(step, toolbar, status, report, view):
+    return rx(f"harness: bars {step}: {vb_state(toolbar, status)} report={report} image-view={view}") + "$"
+
+
+# The menu items, where Windows has them, with Windows' tips; both shown and
+# checked at first
+bars_case("VB_menu_toolbar", "statusbar", rx('harness: bars &Toolbar menu=&View after="Adjust..." separator=1 '
+          'enabled=1 tip="Show or hide the toolbar" checkable=1') + "$")
+bars_case("VB_menu_status", "statusbar", rx('harness: bars &Status Bar menu=&View after="&Toolbar" separator=0 '
+          'enabled=1 tip="Show or hide the status bar" checkable=1') + "$")
+bars_case("VB_at_first", "statusbar", rx("harness: bars at first: " + vb_state(1, 1)) + "$")
+# Status Bar: this window's and the image window's (which has the MCU, file
+# position and YCC that Windows' one status bar had); the report and the
+# image take the space
+bars_case("VB_status_off", "statusbar", vb_step("statusbar", 1, 0, "taller", "taller"))
+bars_case("VB_status_on", "statusbar,statusbar", vb_step("statusbar", 1, 1, "shorter", "shorter"))
+# Toolbar: the report takes the space
+bars_case("VB_toolbar_off", "toolbar", vb_step("toolbar", 0, 1, "taller", "same"))
+bars_case("VB_toolbar_on", "toolbar,toolbar", vb_step("toolbar", 1, 1, "shorter", "same"))
+bars_case("VB_both_off", "toolbar,statusbar", vb_step("statusbar", 0, 0, "taller", "taller"))
+# The check mark follows the toolbar however it is hidden: the toolbar area's
+# context menu (which names it Toolbar), or the toolbar itself
+bars_case("VB_context_menu", "context", "harness: bars context menu: &Toolbar toolbar's=1$")
+bars_case("VB_context_off", "context", vb_step("context", 0, 1, "taller", "same"))
+bars_case("VB_context_on", "context,context", vb_step("context", 1, 1, "shorter", "same"))
+bars_case("VB_hide_toolbar", "hide-toolbar", vb_step("hide-toolbar", 0, 1, "taller", "same"))
+bars_case("VB_hide_then_menu", "hide-toolbar,toolbar", vb_step("toolbar", 1, 1, "shorter", "same"))
+# Before any file is open (the image window isn't shown yet), and later files
+bars_case("VB_before_file", "statusbar,toolbar", vb_step("toolbar", 0, 0, "taller", "not shown"),
+          extra="--bars-at 0")
+bars_case("VB_before_file_image", "statusbar", rx("harness: bars file 1: " + vb_state(1, 0)) + "$",
+          extra="--bars-at 0")
+bars_case("VB_next_file", "statusbar,toolbar", rx("harness: bars file 2: " + vb_state(0, 0)) + "$",
+          names=("mg_white_420.jpg", "mg_white_444.jpg"))
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

@@ -2174,6 +2174,79 @@ dotted pen either; its case stays as a check.
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### View > Toolbar and Status Bar
+
+View > Toolbar and View > Status Bar did nothing but change their check marks: neither
+had a handler, so choosing View > Toolbar took its check mark off while the toolbar
+stayed. Now, as on Windows:
+- **View > Toolbar** shows or hides the toolbar, and **View > Status Bar** the status
+  bars, each with Windows' status tip ("Show or hide the toolbar", "Show or hide the
+  status bar").
+- **Both are shown at the start,** and the setting isn't saved (Windows didn't save it
+  either).
+- **The report and the image take the space** a hidden bar leaves.
+
+**Found and fixed** (the Qt port's):
+- **Neither item did anything.**
+- **The toolbar's two switches disagreed.** The toolbar area's context menu, which Qt
+  provides, named the toolbar "File" and could hide it, but View > Toolbar stayed checked.
+  View > Toolbar is now the toolbar's own show and hide action, named "Toolbar" in both
+  places, so its check mark follows the toolbar however it is hidden: from the menu, the
+  context menu, or by closing it while it floats.
+
+**Changes from Windows:**
+- **View > Status Bar covers two status bars.** Windows had one, below the report and the
+  image, with the messages and the MCU, file position and YCC under the mouse. Here the
+  messages are in the main window's status bar and the rest in the image window's, so the
+  item shows or hides both.
+
+**Unchanged from Windows:** the names, the places (after View > Adjust and a separator),
+the tips, shown at the start, not saved.
+
+**Tests:** 16 new `VB` cases (885 in all).
+- **The driver:** `gui --bars STEP[,STEP...]` (`--bars-at N`, 0 before any file) prints
+  the items' places, and whether the toolbar and both status bars are shown and the items
+  checked. Its steps choose either item, choose the toolbar in the toolbar area's context
+  menu, or hide the toolbar itself. After each it prints the same, and whether the report
+  and the image window's view got taller, shorter or stayed the same.
+
+The cases cover:
+- **The items:** their places and tips; both shown and checked at the start.
+- **Status Bar:** hiding both status bars and showing them again; the report and the image
+  take the space and give it back.
+- **Toolbar:** hiding and showing it; the report takes the space, the image's view
+  doesn't change; both bars hidden.
+- **The check mark:** following the toolbar when the context menu hides and shows it, and
+  when the toolbar itself is hidden; the context menu names it "Toolbar".
+- **Before any file is open,** with the image window not yet shown: its status bar stays
+  hidden when it appears; and a later file.
+
+On the previous commit 15 of them fail. The other checks what was already so: both shown
+and checked at the start. Eight deliberate breaks each fail their own cases:
+- **Status Bar:** no handler, 6 fail; only the main window's, 6 fail; only the image
+  window's, 6 fail; unchecked at the start, 13 fail.
+- **Toolbar:** no handler, 10 fail; an action of its own that shows and hides the toolbar
+  but doesn't follow it, 5 fail; named "File", 16 fail.
+- **No tips:** 2 fail.
+
+**Checks:**
+- **All 885 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings.
+- **cppcheck 2.22** finds nothing new in the changed files.
+- **Not checked:** on the macOS platform, the toolbar's look and the toolbar area's
+  context menu.
+
+**Still open:**
+- **Windows' red line** where the image ends inside its last MCUs (see View > Overlays >
+  MCU Grid).
+- **Menu items not yet ported:** File > Print Setup and Recent File, and the toolbar's New
+  button.
+- **For a decision:** Options > Check for Updates (Windows fetched a file over plain
+  HTTP), Edit > Undo and View > Adjust (both greyed out; Windows' Adjust did nothing),
+  and Options > Configuration's "Submit signature to Online DB", which does nothing.
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

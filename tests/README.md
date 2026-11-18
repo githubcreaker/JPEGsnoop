@@ -203,6 +203,16 @@ when it is installed, so Pillow needn't be installed separately).
       prints how many of its pixels painting it all again changes, and how
       many have the grid's colour. On a Retina screen the grab has one pixel
       per point.
+    - `--bars STEP[,STEP...]` (`--bars-at N`; `0` is before any file) prints
+      the places of View > Toolbar and View > Status Bar, and whether the
+      toolbar, the main window's status bar and the image window's are shown
+      and the items checked. Then it does each STEP: `toolbar` and
+      `statusbar` (choose the menu item), `context` (print the toolbar area's
+      context menu and choose the toolbar's item) and `hide-toolbar` (hide the
+      toolbar itself, as closing it does when it floats). After each step it
+      prints the same, and whether the report and the image window's view got
+      `taller`, `shorter` or stayed the `same`; after every file, the same as
+      `harness: bars file N:`.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
@@ -292,7 +302,8 @@ section, `FN` in its "Find" section, `OV` in its "File Overlay" section,
 in its "Tools > Image Search Fwd and Rev" section, `LM` in its "Tools > Lookup MCU
 Offset" section, `DQ` in its "Tools > Search Executable for DQT" section,
 `AD` in its "Tools > Add Camera/SW to DB" section, `MD` in its "Tools >
-Manage Local DB" section, and `MG` in its "View > Overlays > MCU Grid" section);
+Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
+`VB` in its "View > Toolbar and Status Bar" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case
