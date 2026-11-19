@@ -78,9 +78,10 @@ public:
   bool canExportYcc();
 
   // The files named when the app is started (main() passes its arguments),
-  // as on Windows: the last one is opened once the window shows. Windows'
-  // options (-i, -b and the rest), which ran it without its window, aren't
-  // ported, so with any argument that starts with "-" nothing is opened.
+  // as on Windows: the last one is opened once the window shows. With an
+  // option (-i, -b and the rest), main() runs the app without its window
+  // instead (see cmdline.h); here, with any argument that starts with "-",
+  // nothing is opened.
   void openArguments(const QStringList &astrArgs);
 
 protected:

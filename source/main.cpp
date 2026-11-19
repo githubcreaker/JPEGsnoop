@@ -17,16 +17,43 @@
 //
 
 #include <QApplication>
-#include <QDebug>
+#include <QTextStream>
 
+#include <cstdio>
+
+#include "cmdline.h"
 #include "mainwindow.h"
 
 int main(int argc, char *argv[])
 {
+    // With any option, the app runs without its window, as on Windows (see
+    // cmdline.h). The arguments are read before Qt starts, so that on macOS
+    // such a run never shows in the Dock; and Qt doesn't see them then, so
+    // it doesn't take a file named "-platform", say, for its own option.
+    // (So Qt's own options, such as -style, are unknown options here.)
+    QStringList astrArgs;
+    for(int nArg = 1; nArg < argc; nArg++)
+      astrArgs << QString::fromLocal8Bit(argv[nArg]);
+    const CmdLineOptions sCmdLine = parseCmdLine(astrArgs);
+    if(sCmdLine.bCmdLine)
+    {
+      hideArgsFromQt(argc, argv);
+#ifdef Q_OS_MACOS
+      prepareCmdLineApp();
+#endif
+    }
+
     QApplication a(argc, argv);
     QCoreApplication::setOrganizationName("ImpulseAdventure");
     QCoreApplication::setOrganizationDomain("www.impulseadventure.com");
     QCoreApplication::setApplicationName("JPEGsnoopQt");
+
+    if(sCmdLine.bCmdLine)
+    {
+      QTextStream out(stdout);
+      QTextStream err(stderr);
+      return runCmdLineApp(sCmdLine, out, err);
+    }
 
     MainWindow w;
     w.show();

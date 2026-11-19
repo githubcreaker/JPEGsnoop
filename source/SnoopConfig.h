@@ -45,7 +45,12 @@ public:
   void UseDefaults();
   void printSettings();
 
-  void RegistryLoad();
+  // Loads the settings. For the window (bForWindow), also shows the license
+  // terms if they haven't been accepted (and quits if they are declined),
+  // and makes the user database's folder if no other is set. Command-line
+  // mode does neither: it checks eulaAccepted() and says so instead of
+  // showing a window, and writes nothing but the files asked for.
+  void RegistryLoad(bool bForWindow = true);
   void RegistryStore();
   void Dirty(bool mode = true);
 
@@ -76,6 +81,7 @@ public:
   bool decodeAc() { return bDecodeScanImgAc; }
   bool decodeImage() { return bDecodeScanImg; }
   bool decodeMaker() { return bDecodeMaker; }
+  bool eulaAccepted() { return bEulaAccepted; }
   bool displayRgbHistogram() { return bHistoEn; }
   bool displayYHistogram() { return bDumpHistoY; }
   bool expandDht() { return bOutputDHTexpand; }
@@ -92,6 +98,16 @@ public:
   void setMaxErrors(int32_t errors) { nErrMaxDecodeScan = errors; }
   void setStartPos(uint32_t start) { nPosStart = start; }
   void setCoachIdct(bool b) { bCoachDecodeIdct = b; }
+  // Command-line mode's -scan, -maker, -scandump, -histo_y, -dhtexp and
+  // -exif_hide_unk (see cmdline.h): for that run only, as on Windows. They
+  // don't mark the settings changed, and command-line mode never saves them.
+  void setDecodeImage(bool b) { bDecodeScanImg = b; }
+  void setDecodeMaker(bool b) { bDecodeMaker = b; }
+  void setScanDump(bool b) { bOutputScanDump = b; }
+  void setDisplayRgbHistogram(bool b) { bHistoEn = b; }
+  void setDisplayYHistogram(bool b) { bDumpHistoY = b; }
+  void setExpandDht(bool b) { bOutputDHTexpand = b; }
+  void setHideUnknownExif(bool b) { bExifHideUnknown = b; }
   // The folders File > Batch Process used last (saved with the settings)
   void setBatchFolders(const QString &strInput, const QString &strOutput)
   {
@@ -107,10 +123,6 @@ public:
 
   // Temporary status (not saved)
   QString strCurFname;          // Current filename (Debug use only)
-
-  // TODO Move tp commandline processing
-  teOffsetMode eCmdLineOffset;  // Offset operating mode
-  unsigned long nCmdLineOffsetPos;      // File offset for DEC_OFFSET_POS mode
 
 signals:
   void ImgSrcChanged();
@@ -152,24 +164,8 @@ private:
   // - They indicate a critical error
   bool bInteractive;          // Do we want user input (interactive mode)? (ie. show message boxes)
 
-  bool bGuiMode;                // Do we want to show the GUI?
-  bool bCmdLineOpenEn;          // input file specified
-  QString strCmdLineOpenFname;  // input filename
-  bool bCmdLineOutputEn;        // output file specified?
-  QString strCmdLineOutputFname;        // output filename
-
-  bool bCmdLineBatchEn;         // Do we run a batch job on a directory?
-  QString strCmdLineBatchDirName;       // directory path for batch job
-  bool bCmdLineBatchRec;        // recursive subdir batch operation?
-
-  bool bCmdLineBatchSrch;       // In batch process, perform search forward first?
-
-  bool bCmdLineExtractEn;       // Do we extract all JPEGs from file?
-  bool bCmdLineExtractDhtAvi;   // Do we force MotionJPEG DHT?
-
-  bool bCmdLineDoneMsg;         // Indicate to user when command-line operations complete?
-
-  bool bCmdLineHelp;            // Show command list
+  // (Master's command-line options were kept here; see CmdLineOptions in
+  // cmdline.h)
 
   unsigned nPosStart;           // Starting decode file offset
 

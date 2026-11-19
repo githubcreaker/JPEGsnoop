@@ -88,7 +88,7 @@ bool removeLinkAt(const QString &strPath, QString &strError)
 ExtractAllResult extractAllJpegs(CwindowBuf *pWBuf, CjfifDecode *pJfifDec, CSnoopConfig *pAppConfig, CDocLog *pLog,
                                  QFile *pFile, const QString &strSrc, const QString &strOut,
                                  const ExportJpegSettings &sSettings, const std::function<void()> &fnSrcChanged,
-                                 const std::function<void(uint32_t)> &fnProgress)
+                                 const std::function<void(uint32_t)> &fnProgress, const FileKeep &fnKeep)
 {
   const uint32_t nStartSaved = pAppConfig->startPos();
   const bool bInteractiveSaved = pAppConfig->interactive();
@@ -128,6 +128,16 @@ ExtractAllResult extractAllJpegs(CwindowBuf *pWBuf, CjfifDecode *pJfifDec, CSnoo
     else
     {
       const QString strName = numberedExportName(strOut, sResult.nExported + 1);
+
+      // (Command-line mode: a file of that name is one of the batch's)
+      if(fnKeep && fnKeep(strName))
+      {
+        sResult.strWriteError = QString("ERROR: Couldn't write [%1]: it would replace one of the files analyzed").arg(strName);
+        sResult.astrResults << QString("  [%1] %2").arg(strPos, sResult.strWriteError);
+        sResult.abResultOk << false;
+        sResult.bWriteOk = false;
+        break;
+      }
 
       // A link of that name is replaced, as a file of that name is: written
       // through, it replaced the file it led to, which may be one of a
@@ -182,6 +192,12 @@ void addReportHeader(CDocLog *pLog, const QString &strPath, qint64 nSize)
 QString emptyFileError(const QString &strPath)
 {
   return QString("ERROR: File length is zero, no decoding done. [%1]").arg(strPath);
+}
+
+// (Master's "%I64X"; the port put the decimal size after "0x")
+QString tooLargeError(qint64 nSize)
+{
+  return QString("ERROR: File too large for this version of JPEGsnoop. [Size=0x%1]").arg(QString::number(nSize, 16).toUpper());
 }
 
 namespace
@@ -322,7 +338,7 @@ CBatchProcess::~CBatchProcess()
 // without the File Overlay, which this batch doesn't have. (Master wrote it
 // in the Windows code page, with characters it lacks changed to "?". The log
 // is UTF-8, as Save Log writes.)
-CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, bool bExtractAll)
+CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const BatchFileOptions &sOptions)
 {
   const uint32_t nStartSaved = m_pAppConfig->startPos();
   const bool bInteractiveSaved = m_pAppConfig->interactive();
@@ -331,8 +347,7 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, bool bExtra
     m_pAppConfig->setStartPos(nStartSaved);
   });
 
-  // Decode from the start of each file (master's default command-line and
-  // batch offset), and say nothing in message boxes
+  // Say nothing in message boxes
   m_pAppConfig->setStartPos(0);
   m_pAppConfig->setInteractive(false);
 
@@ -344,35 +359,91 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, bool bExtra
   m_pLog->Clear();
 
   QFile file(sFile.strSrc);
-  if(!file.open(QIODevice::ReadOnly))
+  const bool bOpened = file.open(QIODevice::ReadOnly);
+  if(!bOpened)
   {
-    // Master skipped the file without saying so
-    sResult.strError = QString("Couldn't open file: %1").arg(file.errorString());
-    return sResult;
+    // Master's batch skipped the file without saying so. Its command line
+    // wrote the log anyway, with the report's error (as File > Open shows it).
+    sResult.strOpenError = file.errorString();
+    sResult.strError = QString("Couldn't open file: %1").arg(sResult.strOpenError);
+    if(!sOptions.bLogOpenError || sFile.strLog.isEmpty())
+      return sResult;
+    m_pLog->AddLineErr(QString("ERROR: Couldn't open file: [%1]").arg(sFile.strSrc));
   }
 
-  const qint64 nSize = file.size();
+  const qint64 nSize = bOpened ? file.size() : 0;
   bool bAnalyzed = false;
 
-  if(nSize <= 0)
+  // The report of a decode from nPos, replacing any before it (as master's
+  // AnalyzeFile() did)
+  const auto decodeAt = [&](uint32_t nPos) {
+    emit ImgSrcChanged();
+    m_pImgDec->ClearDecodedImage();
+    m_pLog->Clear();
+    addReportHeader(m_pLog, sFile.strSrc, nSize);
+    m_pLog->AddLine("");
+    m_pWBuf->BufLoadWindow(nPos);
+    m_pAppConfig->setStartPos(nPos);
+    m_pJfifDec->ProcessFile(&file);
+  };
+
+  if(!bOpened)
+  {
+    // (Its log holds the error alone)
+  }
+  else if(nSize <= 0)
   {
     m_pLog->AddLineErr(emptyFileError(sFile.strSrc));
+    sResult.strDecodeError = "ERROR: File length is zero, no decoding done.";
   }
-  else
+  else if(nSize > 0xFFFFFFFF)
   {
     addReportHeader(m_pLog, sFile.strSrc, nSize);
     m_pLog->AddLine("");
+    sResult.strDecodeError = tooLargeError(nSize);
+    m_pLog->AddLineErr(sResult.strDecodeError);
+  }
+  else if((sOptions.eOffset == DEC_OFFSET_POS) && (sOptions.nOffsetPos >= nSize))
+  {
+    // (Master decoded it as if 0x00 bytes were there, as File > Offset did)
+    addReportHeader(m_pLog, sFile.strSrc, nSize);
+    m_pLog->AddLine("");
+    sResult.strDecodeError = QString("ERROR: The offset to decode from, %1 (0x%2), isn't in the file, which is %3 bytes")
+                               .arg(sOptions.nOffsetPos)
+                               .arg(sOptions.nOffsetPos, 8, 16, QChar('0'))
+                               .arg(nSize);
+    m_pLog->AddLineErr(sResult.strDecodeError);
+  }
+  else
+  {
+    m_pWBuf->BufFileSet(&file);
+    bAnalyzed = true;
 
-    if(nSize > 0xFFFFFFFF)
+    switch(sOptions.eOffset)
     {
-      m_pLog->AddLineErr(QString("ERROR: File too large for this version of JPEGsnoop. [Size=0x%1]").arg(nSize));
+    case DEC_OFFSET_POS:
+      decodeAt(sOptions.nOffsetPos);
+      break;
+
+    case DEC_OFFSET_SRCH1:
+    case DEC_OFFSET_SRCH2:
+    {
+      // From the start; then, unless SRCH1 found an image there, from the
+      // next SOI after it, if there is one
+      decodeAt(0);
+      uint32_t nFound = 0;
+      if(((sOptions.eOffset == DEC_OFFSET_SRCH2) || !m_pJfifDec->GetDecodeStatus()) &&
+         m_pWBuf->BufSearch(0, 0xFFD8FF, 3, true, nFound))
+      {
+        decodeAt(nFound);
+      }
+      break;
     }
-    else
-    {
-      m_pWBuf->BufFileSet(&file);
-      m_pWBuf->BufLoadWindow(0);
-      m_pJfifDec->ProcessFile(&file);
-      bAnalyzed = true;
+
+    case DEC_OFFSET_START:
+    default:
+      decodeAt(0);
+      break;
     }
   }
 
@@ -382,35 +453,46 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, bool bExtra
   // image. A QSaveFile is renamed into place, so it replaces a hard link
   // rather than the file it shares; a symbolic link is removed first. A
   // failed log also leaves the old one, if there was one.
-  QSaveFile fileLog(sFile.strLog);
-  QString strLinkError;
-  if(!QDir().mkpath(QFileInfo(sFile.strLog).path()))
+  if(!sFile.strLog.isEmpty())
   {
-    sResult.strError = QString("Couldn't create the folder for the log [%1]").arg(QFileInfo(sFile.strLog).path());
-  }
-  else if(!removeLinkAt(sFile.strLog, strLinkError))
-  {
-    sResult.strError = QString("Couldn't replace the link [%1]: %2").arg(sFile.strLog, strLinkError);
-  }
-  else if(!fileLog.open(QIODevice::WriteOnly | QIODevice::Text))
-  {
-    sResult.strError = QString("Couldn't write the log [%1]: %2").arg(sFile.strLog, fileLog.errorString());
-  }
-  else
-  {
-    QTextStream out(&fileLog);
-    out << m_pReport->toPlainText();
-    out.flush();
-    if(!fileLog.commit())
-      sResult.strError = QString("Couldn't write the log [%1]: %2").arg(sFile.strLog, fileLog.errorString());
+    QSaveFile fileLog(sFile.strLog);
+    QString strLinkError;
+    if(sOptions.fnKeep && sOptions.fnKeep(sFile.strLog))
+    {
+      sResult.strLogError = QString("Couldn't write the log [%1]: it would replace one of the files analyzed").arg(sFile.strLog);
+    }
+    else if(!QDir().mkpath(QFileInfo(sFile.strLog).path()))
+    {
+      sResult.strLogError = QString("Couldn't create the folder for the log [%1]").arg(QFileInfo(sFile.strLog).path());
+    }
+    else if(!removeLinkAt(sFile.strLog, strLinkError))
+    {
+      sResult.strLogError = QString("Couldn't replace the link [%1]: %2").arg(sFile.strLog, strLinkError);
+    }
+    else if(!fileLog.open(QIODevice::WriteOnly | QIODevice::Text))
+    {
+      sResult.strLogError = QString("Couldn't write the log [%1]: %2").arg(sFile.strLog, fileLog.errorString());
+    }
     else
-      sResult.bLogWritten = true;
+    {
+      QTextStream out(&fileLog);
+      out << m_pReport->toPlainText();
+      out.flush();
+      if(!fileLog.commit())
+        sResult.strLogError = QString("Couldn't write the log [%1]: %2").arg(sFile.strLog, fileLog.errorString());
+      else
+        sResult.bLogWritten = true;
+    }
+
+    if(sResult.strError.isEmpty())
+      sResult.strError = sResult.strLogError;
   }
 
   // Every JPEG in the file, with Tools > Export JPEG's defaults (master left
   // out the standard Huffman tables a Motion JPEG video's frames need, which
-  // Export JPEG adds by default)
-  if(bExtractAll && bAnalyzed)
+  // Export JPEG adds by default; and its -ext_dht_avi, which was to add them
+  // to any file's, did nothing)
+  if(sOptions.bExtractAll && bAnalyzed)
   {
     bool bIsAvi = false;
     bool bIsMjpeg = false;
@@ -418,11 +500,12 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, bool bExtra
 
     ExportJpegSettings sExport;
     sExport.bExtractAll = true;
-    sExport.bDhtAviInsert = bIsMjpeg;
+    sExport.bDhtAviInsert = bIsMjpeg || sOptions.bForceDhtAvi;
 
     sResult.bExtracted = true;
     sResult.sExtract = extractAllJpegs(m_pWBuf, m_pJfifDec, m_pAppConfig, m_pLog, &file, sFile.strSrc,
-                                       sFile.strExport, sExport, [this]() { emit ImgSrcChanged(); });
+                                       sFile.strExport, sExport, [this]() { emit ImgSrcChanged(); }, nullptr,
+                                       sOptions.fnKeep);
   }
 
   if(bAnalyzed)

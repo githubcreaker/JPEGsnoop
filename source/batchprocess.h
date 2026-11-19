@@ -24,7 +24,8 @@
 //   in CJPEGsnoopCore).
 // - CBatchProcess has its own decoders, as master's batch had its own
 //   CJPEGsnoopCore, so the file shown in the main window (its report state,
-//   preview and File Overlay) is left as it was.
+//   preview and File Overlay) is left as it was. Command-line mode
+//   (cmdline.h) uses it too, as master's used CJPEGsnoopCore.
 // - Also Extract All's loop, shared with Tools > Export JPEG.
 //
 // ==========================================================================
@@ -41,6 +42,7 @@
 #include <QStringList>
 
 #include "exportdialogs.h"
+#include "snoop.h"              // For teOffsetMode
 
 class QFile;
 class QPlainTextEdit;
@@ -79,14 +81,20 @@ struct ExtractAllResult
   QString strWriteError;
 };
 
+// A file a batch mustn't replace, by its path (command-line mode's: one of
+// the batch's files)
+using FileKeep = std::function<bool(const QString &strPath)>;
+
 // Export the JPEG at each SOI (FF D8 FF) in pFile, from its start, to
 // numberedExportName(strOut, 1), (strOut, 2), ..., replacing any files of
 // those names (a link of one of those names is replaced, not written
 // through). Each place is analyzed with pLog and message boxes off.
 // fnSrcChanged() must tell the decoders the image source changed, and
 // fnProgress (if given) is called before each place with the number
-// exported so far. The start offset is put back afterwards; the buffer is
-// left at the last place looked at.
+// exported so far. If fnKeep (if given) says a name is to be kept, nothing
+// is written there, and the export stops, as when a file can't be written.
+// The start offset is put back afterwards; the buffer is left at the last
+// place looked at.
 //
 // PRE:
 // - pWBuf is reading pFile
@@ -94,7 +102,8 @@ struct ExtractAllResult
 ExtractAllResult extractAllJpegs(CwindowBuf *pWBuf, CjfifDecode *pJfifDec, CSnoopConfig *pAppConfig, CDocLog *pLog,
                                  QFile *pFile, const QString &strSrc, const QString &strOut,
                                  const ExportJpegSettings &sSettings, const std::function<void()> &fnSrcChanged,
-                                 const std::function<void(uint32_t)> &fnProgress = nullptr);
+                                 const std::function<void(uint32_t)> &fnProgress = nullptr,
+                                 const FileKeep &fnKeep = nullptr);
 
 //-----------------------------------------------------------------------------
 // Batch Process
@@ -105,6 +114,10 @@ void addReportHeader(CDocLog *pLog, const QString &strPath, qint64 nSize);
 
 // The report's one line for a file of no length (also File > Open's)
 QString emptyFileError(const QString &strPath);
+
+// The report's line for a file over 4 GiB, which isn't decoded (also File >
+// Open's)
+QString tooLargeError(qint64 nSize);
 
 struct BatchSettings
 {
@@ -120,8 +133,28 @@ struct BatchSettings
 struct BatchFile
 {
   QString strSrc;               // The file
-  QString strLog;               // Its report
+  QString strLog;               // Its report (none if empty: command-line mode without -o)
   QString strExport;            // With Extract All, the name its exports are numbered from
+};
+
+// How CBatchProcess::process() handles a file. File > Batch Process uses the
+// defaults but for bExtractAll; command-line mode (cmdline.h) the rest.
+struct BatchFileOptions
+{
+  bool bExtractAll = false;     // Also extract every JPEG in the file
+  bool bForceDhtAvi = false;    // With Extract All, add the standard Huffman tables a
+                                // frame lacks even if it isn't a Motion JPEG video's (-ext_dht_avi)
+  // Where to decode from (master's CJPEGsnoopCore::DoAnalyzeOffset()):
+  // - DEC_OFFSET_START: the start of the file
+  // - DEC_OFFSET_SRCH1: the first SOI in the file: the start if the image
+  //   there decodes, else the next SOI after it
+  // - DEC_OFFSET_SRCH2: the first SOI after the start
+  // - DEC_OFFSET_POS: nOffsetPos (an error in the report if it isn't in the file)
+  // In the search modes, the start is used when no SOI is found.
+  teOffsetMode eOffset = DEC_OFFSET_START;
+  uint32_t nOffsetPos = 0;
+  bool bLogOpenError = false;   // Write the log even if the file can't be opened (saying so)
+  FileKeep fnKeep;              // Files not to replace with the log or exports (see extractAllJpegs())
 };
 
 // A folder whose files couldn't be listed
@@ -165,13 +198,18 @@ public:
   {
     bool bLogWritten = false;
     QString strError;           // Why the file couldn't be read or its log written
+    QString strOpenError;       // If the file couldn't be opened, why, as the system says it
+    QString strLogError;        // Why the log couldn't be written
+    QString strDecodeError;     // Why the file wasn't decoded, as its report says (without its
+                                // name): it is empty or too large, or the offset isn't in it
     bool bExtracted = false;    // Extract All ran
     ExtractAllResult sExtract;
   };
 
-  // Analyze the file from its start, write its report to its log, and with
-  // bExtractAll, export every JPEG in it. Message boxes are off meanwhile.
-  Result process(const BatchFile &sFile, bool bExtractAll);
+  // Analyze the file (from its start, unless sOptions say otherwise), write
+  // its report to its log, and with Extract All, export every JPEG in it
+  // (each from the start). Message boxes are off meanwhile.
+  Result process(const BatchFile &sFile, const BatchFileOptions &sOptions);
 
 signals:
   void ImgSrcChanged();

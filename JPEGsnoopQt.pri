@@ -80,6 +80,7 @@ SOURCES += \
     $$PWD/source/aboutdialog.cpp \
     $$PWD/source/batchdialog.cpp \
     $$PWD/source/batchprocess.cpp \
+    $$PWD/source/cmdline.cpp \
     $$PWD/source/dbmanagedialog.cpp \
     $$PWD/source/dbsubmitdialog.cpp \
     $$PWD/source/finddialog.cpp \
@@ -111,6 +112,7 @@ HEADERS += \
     $$PWD/source/aboutdialog.h \
     $$PWD/source/batchdialog.h \
     $$PWD/source/batchprocess.h \
+    $$PWD/source/cmdline.h \
     $$PWD/source/dbmanagedialog.h \
     $$PWD/source/dbsubmitdialog.h \
     $$PWD/source/finddialog.h \
@@ -132,3 +134,9 @@ FORMS += \
     $$PWD/source/mainwindow.ui
 
 RESOURCES += $$PWD/JPEGsnoop.qrc
+
+# Command-line mode's start on macOS (see cmdline.h)
+macx{
+    OBJECTIVE_SOURCES += $$PWD/source/cmdline_mac.mm
+    LIBS += -framework AppKit
+}

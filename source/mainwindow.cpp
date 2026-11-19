@@ -1199,7 +1199,7 @@ void MainWindow::AnalyzeFileDo()
   // Perform the actual decoding
   if(m_lFileSize > 0xFFFFFFFF)
   {
-    m_pDocLog->AddLineErr(QString("ERROR: File too large for this version of JPEGsnoop. [Size=0x%1]").arg(m_lFileSize));
+    m_pDocLog->AddLineErr(tooLargeError(m_lFileSize));
   }
   else if(m_lFileSize == 0)
   {
@@ -2801,6 +2801,8 @@ void MainWindow::runBatch(const BatchSettings &sBatch, const BatchList &list)
   const qsizetype nFolderErrors = list.folderErrors.size();
   CBatchProcess batch(m_pAppConfig, m_pDbSigs);
   QList<CBatchProcess::Result> results;
+  BatchFileOptions sOptions;
+  sOptions.bExtractAll = sBatch.bExtractAll;
 
   {
     QProgressDialog progress(this);
@@ -2829,7 +2831,7 @@ void MainWindow::runBatch(const BatchSettings &sBatch, const BatchList &list)
         break;
       }
 
-      results << batch.process(files.at(nInd), sBatch.bExtractAll);
+      results << batch.process(files.at(nInd), sOptions);
     }
 
     if(!progress.wasCanceled())

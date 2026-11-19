@@ -40,25 +40,6 @@ CSnoopConfig::CSnoopConfig(QObject *_parent) : QObject(_parent)
   // Default to showing message dialogs
   bInteractive = true;
 
-  // Command-line modes
-  bGuiMode = true;
-  bCmdLineOpenEn = false;
-  strCmdLineOpenFname = "";
-  bCmdLineOutputEn = false;     // No output file specified
-  strCmdLineOutputFname = "";
-  bCmdLineBatchEn = false;
-  strCmdLineBatchDirName = "";
-  bCmdLineBatchRec = false;
-  bCmdLineExtractEn = false;
-  bCmdLineExtractDhtAvi = false;
-  bCmdLineBatchSrch = false;
-  bCmdLineDoneMsg = false;
-
-  eCmdLineOffset = DEC_OFFSET_START;
-  nCmdLineOffsetPos = 0;
-
-  bCmdLineHelp = false;
-
   nPosStart = 0;
 
   // --------------------------------
@@ -133,7 +114,7 @@ void CSnoopConfig::Dirty(bool mode)
 
 //-----------------------------------------------------------------------------
 // Fetch all configuration values from the registry
-void CSnoopConfig::RegistryLoad()
+void CSnoopConfig::RegistryLoad(bool bForWindow)
 {
   QSettings settings;
   
@@ -147,7 +128,7 @@ void CSnoopConfig::RegistryLoad()
 
     QDir appDir(strDbDir);
 
-    if(!appDir.exists())
+    if(!appDir.exists() && bForWindow)
     {
       appDir.mkpath(strDbDir);
     }
@@ -194,7 +175,7 @@ void CSnoopConfig::RegistryLoad()
     docImageDirty();
   }
 
-  if(!bEulaAccepted)
+  if(!bEulaAccepted && bForWindow)
   {
     Q_Eula eulaDlg;               // on the stack (was never deleted)
     eulaDlg.exec();

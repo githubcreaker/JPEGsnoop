@@ -2942,6 +2942,184 @@ deliberate breaks each fail their own cases:
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### Command-line mode
+
+Windows' options ran JPEGsnoop without its window: `JPEGsnoop.exe -i photo.jpg -o
+photo.txt` analyzed the file, saved its report, and quit. The port ignored them: with
+any argument starting with "-" it opened its window with nothing in it. Now started with
+any option, it runs as Windows did (`CMyCommandParser`, `CJPEGsnoopApp::DoCmdLineCore()`
+and `CmdLineHelp()`), from `JPEGsnoopQt.app/Contents/MacOS/JPEGsnoopQt`:
+- **`-i FILE`** analyzes the file, and **`-o LOG`** saves its report to LOG: the report
+  File > Open shows, the same as Save Log and Batch Process write. A file named without
+  an option is taken as `-i`'s, as on Windows, and the last one named counts. With no
+  option, the window opens the file, as before.
+- **`-b DIR`** analyzes each `.jpg` and `.jpeg` file in the folder (**`-br`** also in its
+  subfolders), saving each one's report next to it as `NAME.txt`, as File > Batch Process
+  does with the folder as both input and output. `-o` isn't used. With both `-i` and
+  `-b`, `-i` counts.
+- **`-ext_all`** also extracts every JPEG in the file (with `-b`, in each file of any
+  type), named from `-o`'s log without its extension, or else from `FILE.export`:
+  `photo.000001.jpg`, ... (Windows' names.)
+- **`-scan`, `-maker`, `-scandump`, `-histo_y`, `-dhtexp`, `-exif_hide_unk`** turn
+  those options on for the run, over the saved settings, which are left as they were.
+  The saved settings apply otherwise (Options and Scan Segment as last set in the
+  window).
+- **`-offset_start`, `-offset_srch1`, `-offset_srch2`, `-offset_pos N`** say where each
+  file is decoded from: its start; the first SOI in it (the start if an image decodes
+  there); the first SOI after the start; byte N. Extract All starts at the start.
+- **`-help`, `-h`, `-?`** print Windows' command summary, and **`-done`** says "JPEGsnoop
+  operations complete" at the end.
+- **The value after `-i`, `-o`, `-b`, `-br`** is taken even if it starts with "-", as on
+  Windows. Options are case-sensitive, as on Windows.
+
+Windows wrote the summary, its errors and `-done` to the console it was started from;
+here they go to the standard output (the summary and `-done`) and the standard error (the
+errors). Otherwise nothing is written to either.
+
+**Not as on Windows:**
+- **No window, ever:** an unknown option is an error on the standard error, not a
+  message box; and if the license terms haven't been accepted, the error says so ("Open
+  JPEGsnoop and accept them first") and nothing is done, instead of showing them. The
+  summary needs no license.
+- **Errors Windows ignored are errors,** with the exit status 1 (0 if everything worked):
+  an option missing its value (Windows ignored it), an offset that isn't a decimal number
+  below 2^32 (Windows' `_ttoi()` made it 0), no file or folder named (Windows did
+  nothing), a log that would replace the file analyzed (Windows only checked in its debug
+  build; also through a link), a file or folder that can't be read (Windows skipped it
+  silently in a batch), a file that isn't decoded because it is empty or over 4 GiB
+  (Windows only said so in the report), and a log or export that can't be written. A
+  file that can't be opened still gets its log with the error in it, as on Windows.
+- **A batch's files are kept:** no log or export replaces one of them (with `-ext_all`,
+  every file in the folder is one), before or after it is analyzed, nor by a name in
+  another case. It is an error: that log isn't written, or the export stops there.
+  Windows replaced it, and then analyzed what had replaced it. So a second `-b DIR
+  -ext_all` run over the same folder reports each of the first run's files it would
+  replace, which are now among the batch's.
+- **An offset past the end of a file** is an error, in its report too (as File > Offset
+  refuses it). Windows decoded it as if 0x00 bytes were there.
+- **`-ext_dht_avi`** adds the standard Huffman tables a frame lacks, as Tools > Export
+  JPEG's "Insert MJPEG DHT" does; on Windows the option was read but did nothing.
+  Without it, Extract All adds them to a Motion JPEG AVI's frames, as Export JPEG does by
+  default (Windows added none).
+- **Nothing is written but the logs and exports:** not the settings (Windows saved them
+  when something had changed them, as at its first start, options and all), nor the user
+  database's folder, which the window makes at its first start. A missing folder in
+  `-o`'s path is made, as for a batch's logs.
+- **The Dock:** the report is a Qt text widget, so the run needs `QApplication`, which on
+  macOS makes the app a foreground app with a Dock icon. Before `QApplication` is made,
+  `prepareCmdLineApp()` (`cmdline_mac.mm`) sets the app's activation policy to
+  "prohibited" and stops Qt making it foreground
+  (`QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM`), so it never shows in the Dock, the
+  app switcher or the menu bar. Qt's own debug messages (`qDebug()` in the decoders) are
+  dropped; its warnings are kept.
+- **Arguments are read before Qt starts,** for the Dock, and Qt is then given none of
+  them (`hideArgsFromQt()`): it read them as its own options, so a file named
+  `-platform` made it take `-o` for a platform plugin and stop the app. Qt's options
+  (`-style` and the rest) are unknown options here. macOS's old `-psn_...` argument is
+  ignored.
+
+**Code:** `cmdline.h`/`.cpp` parse the arguments and run them. Each file goes through
+`CBatchProcess::process()`, File > Batch Process's, which now takes the offset mode, the
+forced Huffman tables, a log name that may be empty (no `-o`) and whether to log a file
+that can't be opened. `CSnoopConfig` loses Windows' unused command-line fields, and
+`RegistryLoad(false)` neither shows the license terms nor makes the database folder.
+The report's "File too large" line now gives the size in hex, as Windows' did: the port
+put the decimal size after "0x" (in the window's report too).
+
+**Tests:** 120 new `CL` cases (1,183 in all).
+- **The driver:** `cmdline` runs the command-line mode as `main()` does (from the raw
+  arguments), in a temporary folder with copies of the files, and prints the exit status,
+  the files there (each with its size, MD5, DHT markers and whether the run made or
+  changed it), each line written to the standard output and error, each log's lines, and
+  which saved settings changed. `--put`, `--link`, `--mkdir`, `--chmod`, `--sparse` (a
+  file of any size that takes no room on the disk), `--setting` and `--no-eula` set the
+  folder and settings up first. As `main()` does, it gives Qt none of the arguments.
+- **The cases:**
+  - **Arguments:** the summary (also with `-h` and `-?`, and before a file); each error
+    above, with the summary after it and nothing done; only file names open the window,
+    and `-psn_` is ignored.
+  - **`-i`:** the log, with the file's name as given; a file and a log whose names start
+    with "-"; a name with accents; the last file named; `-i` over `-b`; a log in a new
+    folder; an empty file and one of 4 GiB (errors, also without `-o`, and the
+    window's report of the latter); a file that is missing, unreadable or a folder (its
+    log says so); a log that would replace the file, by its name or through a link (the
+    file is kept); a log that can't be written.
+  - **Options:** each of the six on and off, over saved settings that turn it off; a
+    saved setting applying; no setting changed.
+  - **Offsets:** each mode, the last one given counting, the report decoded once, an
+    offset past the end and one at the last byte.
+  - **Extract All:** the names from the file and from the log, the exports byte for
+    byte, a Motion JPEG file's frames with and without `-ext_dht_avi`, an AVI's frames,
+    `-ext_dht_avi` alone, a missing file, a folder that can't be written.
+  - **Batches:** with and without subfolders and Extract All, the logs' names and
+    contents, `-o` unused, an offset, a missing folder, an unreadable folder and file, a
+    file of 4 GiB; a batch file kept from another's log, export, and export by a name in
+    another case, while the rest is written.
+  - **Qt:** a file named `-platform`, analyzed and with `-help`.
+  - **`-done`,** also after an error, and **the license check.**
+
+On the previous commit (with its `main()`: any option opens the window, with nothing in
+it), 118 fail; the 2 that open the window pass, as nothing changed there. 24 deliberate
+breaks each fail their own cases:
+- **Arguments:** options not leading to command-line mode, 101 fail; `-psn_` taken for
+  an option, 1; a value starting with "-" refused, 2; `-h` unknown, 1; an unknown option
+  ignored, 4; a missing value ignored, 3; no file named ignored, 2; a junk offset read as
+  0, 1.
+- **`-i`:** the log allowed over the file, 3; no log for a file that can't be opened, 2;
+  Extract All always named from the file, 2; `-b` over `-i`, 1; the exit status always 0,
+  4.
+- **Options:** not applied, 7; saved, 2; `-histo_y` without the RGB histogram, 2.
+- **Offsets:** `-offset_srch1` searching past an image at the start, 1; no second decode
+  after a search, 3; an offset past the end decoded, 3.
+- **Extract All, batches and the rest:** `-ext_dht_avi` ignored, 1; `-br`'s subfolders
+  not searched, 3; a batch's file errors left out of the exit status, 1; `-done` not
+  said, 2; the license terms not checked, 2.
+
+(A first version of the `-h` and `-?` cases didn't catch `-h` being unknown: an unknown
+option shows the summary too. They now check for no error and the exit status 0.)
+
+**Second check:** a review before the commit found three problems, each reproduced and
+now fixed (above):
+- **A batch could replace its own files.** With `-b . -ext_all`, the first file's export
+  `a.jpg.export.000001.jpg` replaced another file of that name in the folder, which the
+  batch then analyzed, and it exited 0. The batch's files are now kept from every log and
+  export: their folder entries (device and inode, not following a link) are noted when
+  the files are listed.
+- **Qt read the app's arguments.** `-i -platform -o log.txt -help` stopped the app (exit
+  134: "Could not find the Qt platform plugin "-o""). Qt now gets the program's name
+  alone.
+- **A file over 4 GiB was skipped quietly:** `-i FILE -ext_all -done` exited 0, said
+  "operations complete", and wrote nothing. It is now an error on the standard error and
+  in the exit status, as is an empty file.
+
+These added 17 of the cases above, all of which fail on the previous commit (the two
+Qt cases stop with exit status 134). Eight more deliberate breaks each fail their own
+cases: the batch's files not kept, 6 fail; kept from the exports only, 2, or the log
+only, 4; compared by name, 1 (the other case); Qt given the arguments, 2; a file not
+decoded not an error, 7; an empty file not an error, 2; the size in decimal, 4.
+
+**Checks:**
+- **All 1,183 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings (the changed files built one at a time, with
+  the previous commit's).
+- **cppcheck 2.22** finds nothing new in the changed files (it can't read
+  `cmdline_mac.mm`, which the driver doesn't run either: the next check covers it).
+- **The app itself,** run from its bundle in Terminal: the summary (also after `-i
+  -platform -o log.txt`), an unknown option, a bad offset and the license check give the
+  right output and exit status, with nothing
+  else on either stream, and nothing written to the settings or the Library. Polling
+  `lsappinfo` caught 2 of 6 short runs, both as a background-only app. (A small Qt app in
+  a bundle with only the variable set was a foreground one; with the policy set too,
+  before or after `QApplication`, a background-only one.)
+- **Not checked:** a run with accepted license terms in the app itself (this Mac's app
+  has none, so only the driver ran files through it, the same code); a run from a login
+  without the window server (over SSH, say).
+
+**Still open:**
+- **Not yet ported:** File > Open's list of types lacks Windows' "AVI Movie".
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

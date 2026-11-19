@@ -3912,6 +3912,304 @@ removed_case("RM_license", "settings", "-", "-",
                 "below=10") + "$")
 removed_case("RM_settings_not_stored", "settings", "-", "-", "^harness: removed settings stored=none$")
 
+
+# --- CL: command-line mode ---------------------------------------------------------
+# Started with an option ("-i", "-b", ...), the app analyzes files without its
+# window and quits, as on Windows (master's CMyCommandParser, DoCmdLineCore()
+# and CmdLineHelp()); it used to ignore the options. cmdline mode runs it as
+# main() does, in a folder of its own holding copies of the files given, and
+# prints the exit status and the files there, what was written to the
+# standard output and error, and each log. OWN are cmdline's own options
+# (--put DEST=NAME and the rest), ARGS the app's arguments.
+def cl_case(cid, names, args, expect, forbid="-", own=""):
+    case(cid, "CL", "cmdline", names, (own + " -- " + args).strip(), timeout=60, expect=expect, forbid=forbid)
+
+
+def cl_status(status, files):
+    return f"^harness: cmdline status={status} files={rx('|'.join(files))}$"
+
+
+def cl_log(name, line):
+    return f"^harness: cmdline log {rx(name)}: {line}$"
+
+
+CL_OK = ["ok_420.jpg"]
+CL_LOG = ["log.txt", "ok_420.jpg"]
+CL_I = "-i ok_420.jpg -o log.txt"
+
+# The command summary (master's), on the standard output; -h and -? as -help
+cl_case("CL_help", CL_OK, "-help",
+        "^harness: cmdline out:    -offset_pos <###>  : Decode from byte ### \\(decimal\\) in file$")
+cl_case("CL_help_version", CL_OK, "-help", f"^harness: cmdline out: JPEGsnoop v{ver_re}$")
+cl_case("CL_help_program", CL_OK, "-help",
+        "^harness: cmdline out: " + rx("JPEGsnoopQt.app/Contents/MacOS/JPEGsnoopQt <parameters>") + "$")
+cl_case("CL_help_status", CL_OK, "-help", cl_status(0, CL_OK))
+# (An unknown option shows the summary too, after an error)
+cl_case("CL_help_h", CL_OK, "-h", cl_status(0, CL_OK), forbid="^harness: cmdline err:")
+cl_case("CL_help_q", CL_OK, "-?", cl_status(0, CL_OK), forbid="^harness: cmdline err:")
+cl_case("CL_help_first", CL_OK, "-help " + CL_I, cl_status(0, CL_OK))
+
+# Arguments in error: the error, then the summary, and nothing done. (Master
+# showed an unknown option in a message box, and ignored the rest.)
+cl_case("CL_unknown_flag", CL_OK, "-x " + CL_I, "^harness: cmdline err: ERROR: Unknown command-line flag \\[-x\\]$")
+cl_case("CL_unknown_flag_nothing_done", CL_OK, "-x " + CL_I, cl_status(1, CL_OK))
+cl_case("CL_unknown_flag_help", CL_OK, "-x " + CL_I, "^harness: cmdline out:  Zero or more of the following")
+cl_case("CL_unknown_flag_case", CL_OK, "-I ok_420.jpg", "^harness: cmdline err: ERROR: Unknown command-line flag \\[-I\\]$")
+cl_case("CL_missing_value", CL_OK, "-i",
+        "^harness: cmdline err: ERROR: Command-line flag \\[-i\\] needs a value after it$")
+cl_case("CL_missing_value_o", CL_OK, "-i ok_420.jpg -o",
+        "^harness: cmdline err: ERROR: Command-line flag \\[-o\\] needs a value after it$")
+cl_case("CL_missing_value_status", CL_OK, "-i ok_420.jpg -o", cl_status(1, CL_OK))
+cl_case("CL_offset_not_number", CL_OK, CL_I + " -offset_pos 12ab",
+        "^harness: cmdline err: ERROR: Offset for command-line flag \\[-offset_pos\\] isn't a decimal number "
+        "below 4294967296: \\[12ab\\]$")
+cl_case("CL_offset_too_big", CL_OK, CL_I + " -offset_pos 4294967296",
+        "^harness: cmdline err: ERROR: Offset for command-line flag \\[-offset_pos\\] isn't a decimal number")
+cl_case("CL_offset_too_big_status", CL_OK, CL_I + " -offset_pos 4294967296", cl_status(1, CL_OK))
+cl_case("CL_no_input", CL_OK, "-scan -o log.txt",
+        "^harness: cmdline err: ERROR: No file to analyze: give -i <fname_in>, -b <dir> or -br <dir>$")
+cl_case("CL_no_input_status", CL_OK, "-scan -o log.txt", cl_status(1, CL_OK))
+
+# Only file names: the window opens the last (MainWindow::openArguments()).
+# macOS's old "-psn_" argument isn't an option.
+cl_case("CL_window_files_only", ["ok_420.jpg", "ok_444.jpg"], "ok_444.jpg ok_420.jpg",
+        "^harness: cmdline window input=ok_420\\.jpg$")
+cl_case("CL_window_psn", CL_OK, "-psn_0_1234 ok_420.jpg", "^harness: cmdline window input=ok_420\\.jpg$")
+
+# -i: the report File > Open shows, saved to -o's log; nothing written to the
+# terminal. A file named without an option is -i's; the last one counts.
+cl_case("CL_file_log", CL_OK, CL_I, cl_log("log.txt", "  Filename: \\[ok_420\\.jpg\\]"))
+cl_case("CL_file_log_offset", CL_OK, CL_I, cl_log("log.txt", "Start Offset: 0x00000000"))
+cl_case("CL_file_log_assessment", CL_OK, CL_I, cl_log("log.txt", "  ASSESSMENT: Class [0-9] - .*"))
+cl_case("CL_file_status", CL_OK, CL_I, cl_status(0, CL_LOG))
+cl_case("CL_file_quiet", CL_OK, CL_I, cl_status(0, CL_LOG), forbid="^harness: cmdline (out|err):")
+cl_case("CL_file_no_log", CL_OK, "-i ok_420.jpg", cl_status(0, CL_OK))
+cl_case("CL_file_plain_name", CL_OK, "ok_420.jpg -o log.txt", cl_log("log.txt", "  Filename: \\[ok_420\\.jpg\\]"))
+cl_case("CL_file_last", ["ok_420.jpg", "ok_444.jpg"], "-i ok_444.jpg -i ok_420.jpg -o log.txt",
+        cl_log("log.txt", "  Filename: \\[ok_420\\.jpg\\]"))
+cl_case("CL_file_dash_name", CL_OK, "-i -x.jpg -o log.txt", cl_log("log.txt", "  Filename: \\[-x\\.jpg\\]"),
+        own="--put -x.jpg=ok_420.jpg")
+cl_case("CL_file_dash_log", CL_OK, "-i ok_420.jpg -o -log.txt", cl_status(0, ["-log.txt", "ok_420.jpg"]))
+cl_case("CL_file_unicode", CL_OK, "-i \u00e9t\u00e9.jpg -o log.txt",
+        cl_log("log.txt", "  Filename: \\[\u00e9t\u00e9\\.jpg\\]"), own="--put \u00e9t\u00e9.jpg=ok_420.jpg")
+cl_case("CL_file_beats_batch", CL_OK, "-b . " + CL_I, cl_status(0, CL_LOG))
+cl_case("CL_file_log_folder", CL_OK, "-i ok_420.jpg -o out/log.txt", cl_status(0, ["ok_420.jpg", "out/log.txt"]))
+cl_case("CL_file_empty", ["s_empty.jpg"], "-i s_empty.jpg -o log.txt",
+        cl_log("log.txt", "ERROR: File length is zero, no decoding done\\. \\[s_empty\\.jpg\\]"))
+# A file that isn't decoded, empty or over 4 GiB: an error, also without -o
+# (the report said so, but the exit status was 0, and without -o nothing
+# did). The size is in hex, as on Windows (it was decimal after "0x", in the
+# window's report too).
+cl_case("CL_file_empty_error", ["s_empty.jpg"], "-i s_empty.jpg",
+        "^harness: cmdline err: ERROR: File length is zero, no decoding done\\. \\[s_empty\\.jpg\\]$")
+cl_case("CL_file_empty_status", ["s_empty.jpg"], "-i s_empty.jpg", cl_status(1, ["s_empty.jpg"]))
+CL_BIG = "--sparse big.jpg=4294967296"
+cl_case("CL_file_too_large", CL_OK, "-i big.jpg -ext_all -done",
+        "^harness: cmdline err: ERROR: File too large for this version of JPEGsnoop\\. \\[Size=0x100000000\\] "
+        "\\[big\\.jpg\\]$", own=CL_BIG)
+cl_case("CL_file_too_large_status", CL_OK, "-i big.jpg -ext_all -done", cl_status(1, ["big.jpg", "ok_420.jpg"]),
+        own=CL_BIG)
+cl_case("CL_file_too_large_log", CL_OK, "-i big.jpg -o log.txt",
+        cl_log("log.txt", "ERROR: File too large for this version of JPEGsnoop\\. \\[Size=0x100000000\\]"), own=CL_BIG)
+cl_case("CL_batch_too_large", CL_OK, "-b .",
+        "^harness: cmdline err: ERROR: File too large for this version of JPEGsnoop\\. \\[Size=0x100000000\\] "
+        "\\[\\./big\\.jpg\\]$", own=CL_BIG)
+with open(files_dir / "cl_big.jpg", "wb") as f_big:
+    f_big.truncate(4294967296)
+case("CL_gui_too_large", "CL", "gui", ["cl_big.jpg"], "--log", timeout=60,
+     expect="^ERROR: File too large for this version of JPEGsnoop\\. \\[Size=0x100000000\\]$")
+# A file that can't be read: said so, with the log saying it too (as
+# master's did)
+cl_case("CL_file_missing", CL_OK, "-i nosuch.jpg -o log.txt",
+        "^harness: cmdline err: ERROR: Couldn't open file \\[nosuch\\.jpg\\]: No such file or directory$")
+cl_case("CL_file_missing_log", CL_OK, "-i nosuch.jpg -o log.txt",
+        cl_log("log.txt", "ERROR: Couldn't open file: \\[nosuch\\.jpg\\]"))
+cl_case("CL_file_missing_status", CL_OK, "-i nosuch.jpg -o log.txt", cl_status(1, CL_LOG))
+cl_case("CL_file_unreadable", CL_OK, CL_I,
+        "^harness: cmdline err: ERROR: Couldn't open file \\[ok_420\\.jpg\\]: Permission denied$", own="--chmod 000:ok_420.jpg")
+cl_case("CL_file_folder", CL_OK, "-i sub -o log.txt", "^harness: cmdline err: ERROR: Couldn't open file \\[sub\\]: ",
+        own="--mkdir sub")
+# A log that would replace the file analyzed (master only checked in its
+# debug build), by its name or through a link; one that can't be written
+cl_case("CL_log_same_file", CL_OK, "-i ok_420.jpg -o ok_420.jpg",
+        "^harness: cmdline err: ERROR: The log \\[ok_420\\.jpg\\] would replace the file analyzed \\[ok_420\\.jpg\\]$")
+cl_case("CL_log_same_file_kept", CL_OK, "-i ok_420.jpg -o ok_420.jpg",
+        f"^harness: cmdline file ok_420\\.jpg size={len(c420)} md5={md5(c420)} dht=[0-9]+ same$")
+cl_case("CL_log_link_to_file", CL_OK, CL_I, "^harness: cmdline err: ERROR: The log \\[log\\.txt\\] would replace",
+        own="--link log.txt=ok_420.jpg")
+cl_case("CL_log_link_to_file_kept", CL_OK, CL_I,
+        f"^harness: cmdline file ok_420\\.jpg size={len(c420)} md5={md5(c420)} dht=[0-9]+ same$",
+        own="--link log.txt=ok_420.jpg")
+cl_case("CL_log_unwritable", CL_OK, "-i ok_420.jpg -o ro/log.txt",
+        "^harness: cmdline err: ERROR: Couldn't write the log \\[ro/log\\.txt\\]: ", own="--mkdir ro --chmod 500:ro")
+cl_case("CL_log_unwritable_status", CL_OK, "-i ok_420.jpg -o ro/log.txt", cl_status(1, CL_OK),
+        own="--mkdir ro --chmod 500:ro")
+
+# The options, for this run only: each changes the report, and no saved
+# setting changes (master's parser set them in its settings, which it saved
+# only when something else had changed them). The saved settings apply too.
+cl_case("CL_opt_scandump", CL_OK, CL_I + " -scandump", cl_log("log.txt", "  Scan Data: \\(after bitstuff removed\\)"))
+cl_case("CL_opt_scandump_off", CL_OK, CL_I, cl_log("log.txt", "  Filename: .*"), forbid="Scan Data: \\(after")
+cl_case("CL_opt_dhtexp", CL_OK, CL_I + " -dhtexp", cl_log("log.txt", "  Expanded Form of Codes:"))
+cl_case("CL_opt_dhtexp_off", CL_OK, CL_I, cl_log("log.txt", "  Filename: .*"), forbid="Expanded Form of Codes")
+cl_case("CL_opt_histo_y", CL_OK, CL_I + " -histo_y", cl_log("log.txt", "  Y Histogram in DC: \\(DCT sums\\) Full"))
+cl_case("CL_opt_histo_y_rgb", CL_OK, CL_I + " -histo_y", cl_log("log.txt", "  RGB histogram in DC \\(after clip\\):"))
+cl_case("CL_opt_histo_y_off", CL_OK, CL_I, cl_log("log.txt", "  Filename: .*"), forbid="Y Histogram in DC")
+cl_case("CL_opt_maker", ["r_canon_crw.jpg"], "-i r_canon_crw.jpg -o log.txt -maker",
+        cl_log("log.txt", "    \\[Canon\\.ImageType +\\] = \"CRW:EOS 300D DIGITAL CMOS RAW\""))
+cl_case("CL_opt_maker_off", ["r_canon_crw.jpg"], "-i r_canon_crw.jpg -o log.txt",
+        cl_log("log.txt", "    Makernote decode option not enabled\\."))
+cl_case("CL_opt_scan", CL_OK, CL_I + " -scan", cl_log("log.txt", "\\*\\*\\* Decoding SCAN Data \\*\\*\\*"),
+        own="--setting General\\DecScanImg=false")
+cl_case("CL_opt_scan_saved_off", CL_OK, CL_I, cl_log("log.txt", "  Filename: .*"), forbid="Decoding SCAN Data",
+        own="--setting General\\DecScanImg=false")
+cl_case("CL_opt_exif_hide_unk", ["r_exif.jpg"], "-i r_exif.jpg -o log.txt -exif_hide_unk",
+        cl_log("log.txt", "  Filename: .*"), forbid="GPS\\.0x0050", own="--setting General\\ExifHideUnk=false")
+cl_case("CL_opt_exif_saved_shown", ["r_exif.jpg"], "-i r_exif.jpg -o log.txt", cl_log("log.txt", ".*GPS\\.0x0050.*"),
+        own="--setting General\\ExifHideUnk=false")
+cl_case("CL_opt_saved_applies", CL_OK, CL_I, cl_log("log.txt", "  Scan Data: \\(after bitstuff removed\\)"),
+        own="--setting General\\DumpScan=true")
+CL_ALL_OPTS = " -scan -maker -scandump -histo_y -dhtexp -exif_hide_unk"
+cl_case("CL_opt_not_saved", CL_OK, CL_I + CL_ALL_OPTS, "^harness: cmdline settings changed=none$")
+cl_case("CL_opt_not_saved_over_off", CL_OK, CL_I + CL_ALL_OPTS, "^harness: cmdline settings changed=none$",
+        own="--setting General\\DecScanImg=false --setting General\\ExifHideUnk=false --setting General\\DecMaker=false")
+
+# Where to decode from (master's DoAnalyzeOffset()). e_two.jpg is 100 junk
+# bytes, a JPEG, 100 junk bytes, another JPEG; fo_start_two.jpg a JPEG, 100
+# junk bytes, another JPEG. The last of the -offset_ options counts.
+two_second = f"0x{len(c444) + len(junk):08x}"
+cl_case("CL_offset_pos", ["e_two.jpg"], "-i e_two.jpg -o log.txt -offset_pos 100",
+        cl_log("log.txt", "Start Offset: 0x00000064"))
+cl_case("CL_offset_start", ["e_two.jpg"], "-i e_two.jpg -o log.txt -offset_pos 100 -offset_start",
+        cl_log("log.txt", "Start Offset: 0x00000000"))
+cl_case("CL_offset_srch1_after_junk", ["e_two.jpg"], "-i e_two.jpg -o log.txt -offset_srch1",
+        cl_log("log.txt", "Start Offset: 0x00000064"))
+cl_case("CL_offset_srch1_at_start", ["fo_start_two.jpg"], "-i fo_start_two.jpg -o log.txt -offset_srch1",
+        cl_log("log.txt", "Start Offset: 0x00000000"))
+cl_case("CL_offset_srch2", ["fo_start_two.jpg"], "-i fo_start_two.jpg -o log.txt -offset_srch2",
+        cl_log("log.txt", "Start Offset: " + two_second))
+cl_case("CL_offset_srch2_one", CL_OK, CL_I + " -offset_srch2", cl_log("log.txt", "Start Offset: 0x00000000"))
+cl_case("CL_offset_report_once", ["fo_start_two.jpg"], "-i fo_start_two.jpg -o log.txt -offset_srch2",
+        cl_log("log.txt", "Start Offset: " + two_second), forbid="Start Offset: 0x00000000")
+# Past the end: an error, in the report too (master decoded 0x00 bytes)
+n420 = len(c420)
+cl_case("CL_offset_past_end", CL_OK, f"{CL_I} -offset_pos {n420}",
+        f"^harness: cmdline err: ERROR: The offset to decode from, {n420} \\(0x{n420:08x}\\), isn't in the file, "
+        f"which is {n420} bytes \\[ok_420\\.jpg\\]$")
+cl_case("CL_offset_past_end_log", CL_OK, f"{CL_I} -offset_pos {n420}",
+        cl_log("log.txt", f"ERROR: The offset to decode from, {n420} .*"))
+cl_case("CL_offset_past_end_status", CL_OK, f"{CL_I} -offset_pos {n420}", cl_status(1, CL_LOG))
+cl_case("CL_offset_last_byte", CL_OK, f"{CL_I} -offset_pos {n420 - 1}", cl_status(0, CL_LOG))
+
+# -ext_all: every JPEG in the file, named from the log's name without its
+# extension, or else from FILE.export (as master). -ext_dht_avi adds the
+# standard Huffman tables a frame lacks (master's did nothing); a Motion JPEG
+# AVI's frames get them anyway, as Export JPEG gives them by default.
+cl_case("CL_ext_all", ["e_two.jpg"], "-i e_two.jpg -ext_all",
+        cl_status(0, ["e_two.jpg", "e_two.jpg.export.000001.jpg", "e_two.jpg.export.000002.jpg"]))
+cl_case("CL_ext_all_first", ["e_two.jpg"], "-i e_two.jpg -ext_all",
+        f"^harness: cmdline file e_two\\.jpg\\.export\\.000001\\.jpg size={len(c444)} md5={md5(c444)} ")
+cl_case("CL_ext_all_second", ["e_two.jpg"], "-i e_two.jpg -ext_all",
+        f"^harness: cmdline file e_two\\.jpg\\.export\\.000002\\.jpg size={len(c420)} md5={md5(c420)} ")
+cl_case("CL_ext_all_log_name", ["e_two.jpg"], "-i e_two.jpg -o log.txt -ext_all",
+        cl_status(0, ["e_two.jpg", "log.000001.jpg", "log.000002.jpg", "log.txt"]))
+cl_case("CL_ext_all_log_report", ["e_two.jpg"], "-i e_two.jpg -o log.txt -ext_all",
+        cl_log("log.txt", "  Filename: \\[e_two\\.jpg\\]"))
+cl_case("CL_ext_all_mjpeg", ["e_mjpeg_frames.bin"], "-i e_mjpeg_frames.bin -ext_all",
+        f"^harness: cmdline file e_mjpeg_frames\\.bin\\.export\\.000001\\.jpg size={len(mjpeg_frame)} "
+        f"md5={md5(mjpeg_frame)} dht=0 new$")
+cl_case("CL_ext_dht_avi", ["e_mjpeg_frames.bin"], "-i e_mjpeg_frames.bin -ext_all -ext_dht_avi",
+        f"^harness: cmdline file e_mjpeg_frames\\.bin\\.export\\.000002\\.jpg size={len(mjpeg_std)} "
+        f"md5={md5(mjpeg_std)} dht=1 new$")
+cl_case("CL_ext_all_avi", ["e_mjpeg.avi"], "-i e_mjpeg.avi -ext_all",
+        f"^harness: cmdline file e_mjpeg\\.avi\\.export\\.000002\\.jpg size={len(mjpeg_std)} "
+        f"md5={md5(mjpeg_std)} dht=1 new$")
+cl_case("CL_ext_dht_avi_alone", ["e_mjpeg_frames.bin"], "-i e_mjpeg_frames.bin -ext_dht_avi",
+        cl_status(0, ["e_mjpeg_frames.bin"]))
+cl_case("CL_ext_all_missing", CL_OK, "-i nosuch.jpg -ext_all", cl_status(1, CL_OK))
+cl_case("CL_ext_all_unwritable", ["e_two.jpg"], "-i e_two.jpg -o ro/log.txt -ext_all",
+        "^harness: cmdline err: ERROR: Couldn't open file for write \\[ro/log\\.000001\\.jpg\\]",
+        own="--mkdir ro --chmod 500:ro")
+
+# -b and -br: each .jpg and .jpeg file in the folder (and with -br, in its
+# subfolders), its log next to it; -o isn't used. With -ext_all, every file.
+CL_TREE = "--put sub/a.jpg=ok_444.jpg --put B.JPEG=ok_gray.jpg --put notes.dat=ok_444.jpg"
+CL_TREE_FILES = ["ok_420.jpg", "ok_444.jpg", "ok_gray.jpg"]
+cl_case("CL_batch", CL_TREE_FILES, "-b .",
+        cl_status(0, ["B.JPEG", "B.JPEG.txt", "notes.dat", "ok_420.jpg", "ok_420.jpg.txt", "ok_444.jpg",
+                      "ok_444.jpg.txt", "ok_gray.jpg", "ok_gray.jpg.txt", "sub/a.jpg"]), own=CL_TREE)
+cl_case("CL_batch_subfolders", CL_TREE_FILES, "-br .",
+        cl_status(0, ["B.JPEG", "B.JPEG.txt", "notes.dat", "ok_420.jpg", "ok_420.jpg.txt", "ok_444.jpg",
+                      "ok_444.jpg.txt", "ok_gray.jpg", "ok_gray.jpg.txt", "sub/a.jpg", "sub/a.jpg.txt"]), own=CL_TREE)
+cl_case("CL_batch_log", CL_TREE_FILES, "-br .", cl_log("sub/a.jpg.txt", "  Filename: \\[\\./sub/a\\.jpg\\]"), own=CL_TREE)
+cl_case("CL_batch_quiet", CL_TREE_FILES, "-br .", "^harness: cmdline status=0 ", forbid="^harness: cmdline (out|err):",
+        own=CL_TREE)
+cl_case("CL_batch_ignores_o", CL_TREE_FILES, "-b . -o log.txt", "^harness: cmdline status=0 ",
+        forbid="^harness: cmdline status=.*[=|]log\\.txt", own=CL_TREE)
+cl_case("CL_batch_ext_all", CL_TREE_FILES, "-b . -ext_all",
+        "^harness: cmdline status=0 files=.*\\|notes\\.dat\\|notes\\.dat\\.export\\.000001\\.jpg\\|notes\\.dat\\.txt\\|",
+        own=CL_TREE)
+cl_case("CL_batch_offset", ["e_two.jpg"], "-b . -offset_pos 100", cl_log("e_two.jpg.txt", "Start Offset: 0x00000064"))
+cl_case("CL_batch_missing", CL_OK, "-b nosuch",
+        "^harness: cmdline err: ERROR: Couldn't read the folder \\[nosuch\\]: No such file or directory$")
+cl_case("CL_batch_missing_status", CL_OK, "-b nosuch", cl_status(1, CL_OK))
+cl_case("CL_batch_unreadable_folder", CL_TREE_FILES, "-br .",
+        "^harness: cmdline err: ERROR: Couldn't read the folder \\[\\./locked\\]: Permission denied$",
+        own=CL_TREE + " --mkdir locked --put locked/x.jpg=ok_444.jpg --chmod 000:locked")
+cl_case("CL_batch_unreadable_file", CL_TREE_FILES, "-b .",
+        "^harness: cmdline err: ERROR: Couldn't open file \\[\\./B\\.JPEG\\]: Permission denied$",
+        own=CL_TREE + " --chmod 000:B.JPEG")
+cl_case("CL_batch_unreadable_file_others", CL_TREE_FILES, "-b .",
+        "^harness: cmdline status=1 files=B\\.JPEG\\|notes\\.dat\\|ok_420\\.jpg\\|ok_420\\.jpg\\.txt\\|",
+        own=CL_TREE + " --chmod 000:B.JPEG")
+
+# No log or export replaces one of the batch's files (with -ext_all, every
+# file in the folder), before or after it is analyzed, nor by a name in
+# another case (on a disk that ignores case, as macOS's usually do). Master
+# replaced it, and then analyzed what had replaced it.
+CL_KEEP_EXPORT = "--put a.jpg=ok_444.jpg --put a.jpg.export.000001.jpg=ok_420.jpg"
+cl_case("CL_batch_keeps_export", CL_OK, "-b . -ext_all",
+        f"^harness: cmdline file a\\.jpg\\.export\\.000001\\.jpg size={len(c420)} md5={md5(c420)} dht=[0-9]+ same$",
+        own=CL_KEEP_EXPORT)
+cl_case("CL_batch_keeps_export_error", CL_OK, "-b . -ext_all",
+        "^harness: cmdline err: ERROR: Couldn't write \\[\\./a\\.jpg\\.export\\.000001\\.jpg\\]: it would replace one "
+        "of the files analyzed$", own=CL_KEEP_EXPORT)
+cl_case("CL_batch_keeps_export_status", CL_OK, "-b . -ext_all", "^harness: cmdline status=1 ", own=CL_KEEP_EXPORT)
+cl_case("CL_batch_keeps_export_analyzed", CL_OK, "-b . -ext_all",
+        cl_log("a.jpg.export.000001.jpg.txt", "  Filename: \\[\\./a\\.jpg\\.export\\.000001\\.jpg\\]"),
+        own=CL_KEEP_EXPORT)
+CL_KEEP_LOG = "--put x.dat=ok_444.jpg --put x.dat.txt=ok_420.jpg"
+cl_case("CL_batch_keeps_log", CL_OK, "-b . -ext_all",
+        f"^harness: cmdline file x\\.dat\\.txt size={len(c420)} md5={md5(c420)} dht=[0-9]+ same$", own=CL_KEEP_LOG)
+cl_case("CL_batch_keeps_log_error", CL_OK, "-b . -ext_all",
+        "^harness: cmdline err: ERROR: Couldn't write the log \\[\\./x\\.dat\\.txt\\]: it would replace one of the files "
+        "analyzed$", own=CL_KEEP_LOG)
+cl_case("CL_batch_keeps_case", CL_OK, "-b . -ext_all",
+        f"^harness: cmdline file a\\.jpg\\.export\\.000001\\.jpg size={len(c420)} md5={md5(c420)} dht=[0-9]+ same$",
+        own="--put A.JPG=ok_444.jpg --put a.jpg.export.000001.jpg=ok_420.jpg")
+cl_case("CL_batch_writes_others", CL_OK, "-b . -ext_all",
+        "^harness: cmdline file a\\.jpg\\.txt size=[0-9]+ md5=[0-9a-f]+ dht=0 new$", own=CL_KEEP_EXPORT)
+
+# Qt doesn't read the app's arguments: given "-i -platform -o LOG", it took
+# "-o" for its platform plugin and stopped the app
+cl_case("CL_qt_option_name", CL_OK, "-i -platform -o log.txt", cl_log("log.txt", "  Filename: \\[-platform\\]"),
+        own="--put -platform=ok_420.jpg")
+cl_case("CL_qt_option_help", CL_OK, "-i -platform -o log.txt -help", cl_status(0, CL_OK))
+
+# -done: said at the end, also after an error
+cl_case("CL_done", CL_OK, CL_I + " -done", "^harness: cmdline out: JPEGsnoop operations complete$")
+cl_case("CL_done_after_error", CL_OK, "-i nosuch.jpg -done", "^harness: cmdline out: JPEGsnoop operations complete$")
+cl_case("CL_no_done", CL_OK, CL_I, cl_status(0, CL_LOG), forbid="operations complete")
+
+# The license terms not accepted: said so, and nothing done (master showed
+# them). The summary needs no license.
+cl_case("CL_eula", CL_OK, CL_I,
+        "^harness: cmdline err: ERROR: The license terms haven't been accepted\\. Open JPEGsnoop and accept them "
+        "first\\.$", own="--no-eula")
+cl_case("CL_eula_nothing_done", CL_OK, CL_I, cl_status(1, CL_OK), own="--no-eula")
+cl_case("CL_eula_help", CL_OK, "-help", cl_status(0, CL_OK), own="--no-eula")
+cl_case("CL_eula_not_saved", CL_OK, CL_I, "^harness: cmdline settings changed=none$", own="--no-eula")
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

@@ -345,6 +345,28 @@ when it is installed, so Pillow needn't be installed separately).
     It also prints the menu item's place, the progress dialog and its
     labels, the folders saved in the settings, and with a file open, the
     file that Reprocess shows afterwards;
+  - `cmdline <file>... [OWN...] -- ARGS...` runs the app's command-line mode
+    with ARGS, as `main()` does when the app is started with options (`-i`,
+    `-b` and the rest), in a temporary folder holding a copy of each file
+    given, which is the current folder. OWN can be:
+    - `--put DEST=NAME` copies NAME (from the folder of the files given) to
+      DEST, and `--mkdir DIR` makes a folder;
+    - `--link DEST=TARGET` makes a symbolic link;
+    - `--chmod OCTAL:REL` sets permissions for the run (put back afterwards);
+    - `--sparse NAME=SIZE` makes a file of SIZE bytes that takes no room on the
+      disk (a file over 64 MiB isn't read: its MD5 shows as `big` and its size);
+    - `--setting KEY=VALUE` saves a setting first (such as
+      `General\DumpScan=false`), and `--no-eula` leaves the license terms not
+      accepted.
+
+    It prints the exit status with every file in the folder, each line
+    written to the standard output and error (`harness: cmdline out:` and
+    `err:`), each file's size, MD5, number of DHT markers and whether the run
+    made or changed it, each line of each `.txt` log that is text
+    (`harness: cmdline log NAME: LINE`), and which saved settings changed. If
+    ARGS would open the window instead, it prints only
+    `harness: cmdline window input=FILE`. As `main()` does, it gives Qt none of
+    ARGS;
   - `settings` exercises settings load/store, option toggles and the
     Configuration dialog, and prints that dialog's groups, their heights,
     the room below them and its checkboxes, the license terms' groups,
@@ -388,8 +410,9 @@ Setup" section, `RF` in its "File > Recent File" section, `NB` in its "The
 toolbar's New button" section, `IE` in its "The red line where the image
 ends inside its MCUs" section, `OF` in its "Opening a file from outside the
 app: a drop, Finder, the command line" section, `TB` in its "The toolbar's
-Copy and About buttons" section, and `RM` in its "Removed: Check for Updates,
-Edit > Undo, View > Adjust, Submit signature" section);
+Copy and About buttons" section, `RM` in its "Removed: Check for Updates,
+Edit > Undo, View > Adjust, Submit signature" section, and `CL` in its
+"Command-line mode" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

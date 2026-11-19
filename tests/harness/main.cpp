@@ -68,6 +68,29 @@
 //     separate decode of the file ("harness: tiff ... check=ok").
 //     --out-same exports over the file itself.
 //
+// cmdline <file> [<file> ...] [--put DEST=NAME]... [--link DEST=TARGET]...
+//     [--mkdir DIR]... [--chmod OCTAL:REL]... [--sparse NAME=SIZE]...
+//     [--setting KEY=VALUE]... [--no-eula] -- ARGS...
+//     Run the app's command-line mode with ARGS, as main() does when the app
+//     is started with them (cmdline.h; read as main() reads them, before
+//     QApplication takes out those it knows), in a fresh folder that holds a
+//     copy of each file given (by its name), and is the current folder. --put
+//     copies NAME (from the folder of the files given) to DEST there, --link
+//     makes a symbolic link DEST to TARGET (as given), --mkdir makes a
+//     folder, and --chmod sets a file's or folder's permissions (put back
+//     afterwards). --sparse makes a file of SIZE bytes that takes no room
+//     on the disk (one over 64 MiB isn't read: its MD5 shows as "big" and
+//     its size). --setting saves a setting first (KEY as QSettings names
+//     it, e.g. General\DumpScan=false), and --no-eula leaves the license
+//     terms not accepted. If ARGS would open the window instead, prints
+//     "harness: cmdline window input=FILE". Otherwise prints the exit
+//     status and every file in the folder, "harness: cmdline out:" and
+//     "err:" for each line written to the standard output and error, a
+//     "harness: cmdline file" line for each file (its size, MD5, number of
+//     DHT markers, and whether the run made or changed it), each line of
+//     each .txt file that is text ("harness: cmdline log NAME: LINE"), and
+//     which saved settings the run changed.
+//
 // gui ... [--export-menus | --export-menus-cancel | --export-menus-all]
 //     [--old-numbered] [--replace]
 //     After each file, choose Tools > Export JPEG and Tools > Export TIFF,
@@ -448,6 +471,7 @@
 #include "Viewer.h"
 #include "WindowBuf.h"
 #include "aboutdialog.h"
+#include "cmdline.h"
 #include "eula.h"
 #include "mainwindow.h"
 #include "q_decodedetaildlg.h"
@@ -485,6 +509,10 @@ static void usage()
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
           "                         [--out-same-case]\n"
           "       jpegsnoop-harness export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]\n"
+          "       jpegsnoop-harness cmdline <file> [<file> ...] [--put DEST=NAME]... [--link DEST=TARGET]...\n"
+          "                         [--mkdir DIR]... [--chmod OCTAL:REL]... [--sparse NAME=SIZE]...\n"
+          "                         [--setting KEY=VALUE]...\n"
+          "                         [--no-eula] -- ARGS...\n"
           "       jpegsnoop-harness batch <folder> [<file to open first> ...] --batch STEPS [--batch-cat REL]...\n"
           "                         [--batch-unreadable REL]... [--batch-mode OCTAL:REL]...\n"
           "                         [--batch-link sym|hard:NAME=TARGET]... [--batch-compare] [--batch-open-missing]\n"
@@ -5779,6 +5807,190 @@ static int runBatchMode(const QString &strFolder, const QStringList &astrOpen, c
   return 0;
 }
 
+// Every saved setting and its value
+static QMap<QString, QString> savedSettings()
+{
+  QSettings settings;
+  QMap<QString, QString> mapSettings;
+  for(const QString &strKey : settings.allKeys())
+    mapSettings.insert(strKey, settings.value(strKey).toString());
+  return mapSettings;
+}
+
+// Every file below strRoot, as filesBelow() lists them, but without reading
+// one over 64 MiB (--sparse's): "big" and its size instead of its MD5
+static QMap<QString, QString> cmdLineFiles(const QString &strRoot)
+{
+  QMap<QString, QString> mapFiles;
+  const QDir dirRoot(strRoot);
+  QDirIterator it(strRoot, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+  while(it.hasNext())
+  {
+    const QString strPath = it.next();
+    const qint64 nSize = QFileInfo(strPath).size();
+    mapFiles.insert(dirRoot.relativeFilePath(strPath),
+                    (nSize > (qint64(64) << 20)) ? QString("big%1").arg(nSize) : fileMd5(strPath));
+  }
+  return mapFiles;
+}
+
+// The command-line mode, as main() runs it (see the usage at the top)
+static int runCmdLineMode(const QStringList &astrIn)
+{
+  QTextStream out(stdout);
+  QTemporaryDir tmpDir;
+  if(!tmpDir.isValid())
+  {
+    fprintf(stderr, "cannot create a temporary folder\n");
+    return 2;
+  }
+  const QString strSettingsDir = tmpDir.filePath("settings");
+  const QString strWork = tmpDir.filePath("work");
+  QDir().mkpath(strSettingsDir);
+  QDir().mkpath(strWork);
+  useTestSettings(strSettingsDir);
+  const QDir dirWork(strWork);
+
+  // The harness's options, then "--" and the app's arguments
+  const qsizetype nDashes = astrIn.indexOf("--");
+  if(nDashes < 0)
+  {
+    usage();
+    return 2;
+  }
+  const QStringList astrOwn = astrIn.mid(0, nDashes);
+  const QStringList astrArgs = astrIn.mid(nDashes + 1);
+
+  QStringList astrFiles;
+  QList<QPair<QString, QString>> chmods;  // REL, OCTAL
+  QString strFilesDir;
+  for(qsizetype nInd = 0; nInd < astrOwn.size(); nInd++)
+  {
+    const QString &strOpt = astrOwn.at(nInd);
+    const bool bHasValue = nInd + 1 < astrOwn.size();
+    if(strOpt == "--no-eula")
+    {
+      QSettings().remove("General\\EulaAccepted");
+    }
+    else if(bHasValue && ((strOpt == "--put") || (strOpt == "--link") || (strOpt == "--mkdir") ||
+                          (strOpt == "--chmod") || (strOpt == "--setting") || (strOpt == "--sparse")))
+    {
+      const QString strValue = astrOwn.at(++nInd);
+      const qsizetype nEq = strValue.indexOf(strOpt == "--chmod" ? ':' : '=');
+      const QString strLeft = strValue.left(nEq);
+      const QString strRight = strValue.mid(nEq + 1);
+      if(strOpt == "--mkdir")
+        dirWork.mkpath(strValue);
+      else if(strOpt == "--put")
+      {
+        dirWork.mkpath(QFileInfo(dirWork.filePath(strLeft)).path());
+        QFile::copy(QDir(strFilesDir).filePath(strRight), dirWork.filePath(strLeft));
+      }
+      else if(strOpt == "--link")
+      {
+        dirWork.mkpath(QFileInfo(dirWork.filePath(strLeft)).path());
+        QFile::link(strRight, dirWork.filePath(strLeft));
+      }
+      else if(strOpt == "--chmod")
+        chmods << qMakePair(strRight, strLeft);
+      else if(strOpt == "--sparse")
+      {
+        // (A file of that many bytes, which takes no room on the disk)
+        QFile fileSparse(dirWork.filePath(strLeft));
+        if(fileSparse.open(QIODevice::WriteOnly))
+          fileSparse.resize(strRight.toLongLong());
+      }
+      else
+        QSettings().setValue(strLeft, strRight);
+    }
+    else
+    {
+      // A file: copied in by its name
+      astrFiles << strOpt;
+      if(strFilesDir.isEmpty())
+        strFilesDir = QFileInfo(strOpt).absolutePath();
+      QFile::copy(strOpt, dirWork.filePath(QFileInfo(strOpt).fileName()));
+    }
+  }
+
+  const CmdLineOptions sOptions = parseCmdLine(astrArgs);
+  if(!sOptions.bCmdLine)
+  {
+    out << "harness: cmdline window input=" << sOptions.strInput << "\n";
+    return 0;
+  }
+
+  for(const auto &chmodPair : chmods)
+  {
+    bool bOk = false;
+    const uint nMode = chmodPair.second.toUInt(&bOk, 8);
+    if(bOk)
+      ::chmod(QFile::encodeName(dirWork.filePath(chmodPair.first)).constData(), static_cast<mode_t>(nMode));
+  }
+
+  const QMap<QString, QString> filesBefore = cmdLineFiles(strWork);
+  const QMap<QString, QString> settingsBefore = savedSettings();
+
+  QString strOut;
+  QString strErr;
+  int nStatus = 0;
+  {
+    QTextStream streamOut(&strOut);
+    QTextStream streamErr(&strErr);
+    const QString strCwd = QDir::currentPath();
+    QDir::setCurrent(strWork);
+    nStatus = runCmdLineApp(sOptions, streamOut, streamErr);
+    QDir::setCurrent(strCwd);
+  }
+
+  // (So the folder can be listed and removed)
+  for(const auto &chmodPair : chmods)
+    ::chmod(QFile::encodeName(dirWork.filePath(chmodPair.first)).constData(), 0700);
+
+  const QMap<QString, QString> filesAfter = cmdLineFiles(strWork);
+  out << "harness: cmdline status=" << nStatus << " files=" << QStringList(filesAfter.keys()).join('|') << "\n";
+
+  const auto printLines = [&out](const QString &strWhat, QString strText) {
+    if(strText.endsWith('\n'))
+      strText.chop(1);
+    if(strText.isEmpty())
+      return;
+    for(const QString &strLine : strText.split('\n'))
+      out << "harness: cmdline " << strWhat << ": " << strLine << "\n";
+  };
+  printLines("out", strOut);
+  printLines("err", strErr);
+
+  for(auto it = filesAfter.cbegin(); it != filesAfter.cend(); ++it)
+  {
+    const QString strPath = dirWork.filePath(it.key());
+    QFile file(strPath);
+    QByteArray abData;
+    if(!it.value().startsWith("big") && file.open(QIODevice::ReadOnly))
+      abData = file.readAll();
+    const QString strChange = !filesBefore.contains(it.key()) ? "new"
+                              : (filesBefore.value(it.key()) != it.value()) ? "changed" : "same";
+    out << "harness: cmdline file " << it.key() << " size=" << QFileInfo(strPath).size() << " md5=" << it.value()
+        << " dht=" << abData.count(QByteArray("\xFF\xC4", 2)) << " " << strChange
+        << (QFileInfo(strPath).isSymLink() ? " link" : "") << "\n";
+    // (Not a .txt file that isn't text: a batch's file kept, say)
+    if(it.key().endsWith(".txt") && !abData.contains('\0'))
+      printLines("log " + it.key(), QString::fromUtf8(abData));
+  }
+
+  QStringList astrChanged;
+  const QMap<QString, QString> settingsAfter = savedSettings();
+  for(const QString &strKey : QSet<QString>(settingsBefore.keyBegin(), settingsBefore.keyEnd()) +
+                                  QSet<QString>(settingsAfter.keyBegin(), settingsAfter.keyEnd()))
+  {
+    if(settingsBefore.value(strKey, "-") != settingsAfter.value(strKey, "-"))
+      astrChanged << strKey;
+  }
+  astrChanged.sort();
+  out << "harness: cmdline settings changed=" << (astrChanged.isEmpty() ? "none" : astrChanged.join('|')) << "\n";
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   if(qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
@@ -5791,10 +6003,23 @@ int main(int argc, char **argv)
       qputenv("QT_SCALE_FACTOR", argv[i + 1]);
   }
 
+  // cmdline: the arguments as the app's main() reads them for its
+  // command-line mode, before QApplication removes those it knows (macOS's
+  // "-psn_..." among them); and as main() does then, Qt gets none of them
+  QStringList astrRawArgs;
+  for(int i = 1; i < argc; i++)
+    astrRawArgs << QString::fromLocal8Bit(argv[i]);
+  const bool bCmdLineMode = !astrRawArgs.isEmpty() && (astrRawArgs.first() == "cmdline");
+  if(bCmdLineMode)
+    hideArgsFromQt(argc, argv);
+
   QApplication app(argc, argv);
   QCoreApplication::setOrganizationName("JPEGsnoopTests");
   QCoreApplication::setOrganizationDomain("tests.invalid");
   QCoreApplication::setApplicationName("jpegsnoop-harness");
+
+  if(bCmdLineMode)
+    return runCmdLineMode(astrRawArgs.mid(1));
 
   QStringList args = app.arguments().mid(1);
   if(args.isEmpty())
