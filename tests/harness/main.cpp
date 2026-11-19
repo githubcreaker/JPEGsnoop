@@ -44,7 +44,10 @@
 //
 // settings
 //     Exercise settings load/store, option toggles and the Configuration
-//     dialog against a throwaway settings store; prints "harness:" lines.
+//     dialog against a throwaway settings store; prints "harness:" lines,
+//     also the Configuration dialog's groups, their heights, the room below
+//     them and its checkboxes, the license terms' groups and checkboxes and
+//     the room below them, and which settings no longer kept are stored.
 //
 // export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
 //     [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]
@@ -100,6 +103,10 @@
 //     After the first file, print the toolbar's buttons in order, each by its
 //     tooltip ("-" for a separator), and for each its tip, key, menus,
 //     whether it is on and whether it has an icon.
+//
+// gui ... --menus
+//     After the first file, print each menu of the menu bar with the items
+//     shown in it ("-" for a separator; a submenu by its name).
 //
 // gui ... --edit STEPS [--edit-before]
 //     After each file (and with --edit-before, also once before the first),
@@ -352,6 +359,7 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QCheckBox>
+#include <QGroupBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QCryptographicHash>
@@ -369,6 +377,7 @@
 #include <QLabel>
 #include <QMap>
 #include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -439,6 +448,7 @@
 #include "Viewer.h"
 #include "WindowBuf.h"
 #include "aboutdialog.h"
+#include "eula.h"
 #include "mainwindow.h"
 #include "q_decodedetaildlg.h"
 #include "snoopconfigdialog.h"
@@ -456,7 +466,7 @@ static void usage()
           "                         [--old-numbered] [--replace]\n"
           "                         [--detail-dlg STEPS [--mark X,Y[/X,Y...]] [--detail-dlg-at N]\n"
           "                          [--auto-reprocess] [--no-decode-image]]\n"
-          "                         [--about | --about-button] [--buttons]\n"
+          "                         [--about | --about-button] [--buttons] [--menus]\n"
           "                         [--edit STEPS [--edit-before]] [--overlay STEPS [--overlay-at N]]\n"
           "                         [--offset STEPS [--offset-at N]] [--search STEPS [--search-at N]]\n"
           "                         [--lookup STEPS [--lookup-at N] [--hover X,Y[/X,Y...]]]\n"
@@ -805,14 +815,6 @@ static int runSettings(const QString &strSettingsDir)
     out << "harness: maxErrors after restart=" << cfg.maxDecodeError() << "\n";
   }
 
-  // The update-check date is stored as today's yyyyMMdd
-  {
-    QSettings settings;
-    const QString strStored = settings.value("General\\UpdateLastChk").toString();
-    out << "harness: lastchk=" << strStored
-        << " is_today=" << (strStored == QDate::currentDate().toString("yyyyMMdd")) << "\n";
-  }
-
   // Options > Configuration: Save applies and stores, Reset re-enables tips
   {
     CSnoopConfig cfg;
@@ -830,6 +832,25 @@ static int runSettings(const QString &strSettingsDir)
       return 1;
     }
 
+    // Its groups and checkboxes, each group's height (the groups stretch to
+    // fill the dialog's column), and the room below the lowest
+    dlg.show();
+    QCoreApplication::processEvents();
+    QStringList astrGroups;
+    QStringList astrHeights;
+    int nBottom = 0;
+    for(const QGroupBox *pGroup : dlg.findChildren<QGroupBox *>())
+    {
+      astrGroups << pGroup->title();
+      astrHeights << QString::number(pGroup->height());
+      nBottom = std::max(nBottom, pGroup->mapTo(&dlg, QPoint(0, pGroup->height())).y());
+    }
+    QStringList astrBoxes;
+    for(const QCheckBox *pBox : dlg.findChildren<QCheckBox *>())
+      astrBoxes << pBox->text();
+    out << "harness: config dialog groups=" << astrGroups.join('|') << " heights=" << astrHeights.join('|')
+        << " below=" << (dlg.height() - nBottom) << " checkboxes=" << astrBoxes.join('|') << "\n";
+
     pMaxErrors->setText("7");
     pAutoReprocess->setChecked(true);
     pReset->click();
@@ -839,6 +860,41 @@ static int runSettings(const QString &strSettingsDir)
     out << "harness: dialog result=" << dlg.result() << " maxErrors=" << cfg.maxDecodeError()
         << " autoReprocess=" << cfg.autoReprocess() << " coachIdct=" << cfg.coachIdct()
         << " stored=" << settings.value("Report\\ErrMaxDecodeScan").toInt() << "\n";
+  }
+
+  // The license terms shown at the first start: their groups and checkboxes
+  // (one per line of its text), and the room below the lowest of them
+  {
+    Q_Eula dlg;
+    dlg.show();
+    QCoreApplication::processEvents();
+    QStringList astrGroups;
+    int nBottom = 0;
+    for(const QGroupBox *pGroup : dlg.findChildren<QGroupBox *>())
+    {
+      astrGroups << pGroup->title();
+      nBottom = std::max(nBottom, pGroup->geometry().bottom() + 1);
+    }
+    QStringList astrBoxes;
+    for(const QCheckBox *pBox : dlg.findChildren<QCheckBox *>())
+      astrBoxes << pBox->text().replace('\n', QStringLiteral(" / "));
+    out << "harness: license groups=" << astrGroups.join('|') << " checkboxes=" << astrBoxes.join('|')
+        << " below=" << (dlg.height() - nBottom) << "\n";
+  }
+
+  // Settings this version doesn't keep (Windows' names): the update check's,
+  // and "Submit signature to Online DB"
+  {
+    QSettings settings;
+    QStringList astrStored;
+    for(const char *pszKey : { "General\\UpdateAuto", "General\\UpdateAutoDays", "General\\UpdateLastChk",
+                               "General\\DbSubmitNet" })
+    {
+      if(settings.contains(QLatin1String(pszKey)))
+        astrStored << QLatin1String(pszKey).mid(8);
+    }
+    out << "harness: removed settings stored=" << (astrStored.isEmpty() ? QStringLiteral("none") : astrStored.join('|'))
+        << "\n";
   }
 
   out << "harness: done\n";
@@ -1199,6 +1255,7 @@ struct GuiOptions
   bool bAbout = false;            // --about
   bool bAboutButton = false;      // --about-button
   bool bButtons = false;          // --buttons
+  bool bMenus = false;            // --menus
   QString strEdit;                // --edit STEPS
   bool bEditBefore = false;       // --edit-before
   QString strOverlay;             // --overlay STEPS
@@ -4183,6 +4240,24 @@ static void toolbarButtons(MainWindow &window, QTextStream &out)
     out << strLine << "\n";
 }
 
+// The menu bar's menus and the items shown in them (see --menus above)
+static void menuItems(MainWindow &window, QTextStream &out)
+{
+  for(QAction *pMenuAction : window.menuBar()->actions())
+  {
+    const QMenu *pMenu = pMenuAction->menu();
+    if(!pMenu)
+      continue;
+    QStringList astrItems;
+    for(const QAction *pAction : pMenu->actions())
+    {
+      if(pAction->isVisible())
+        astrItems << (pAction->isSeparator() ? QStringLiteral("-") : pAction->text());
+    }
+    out << "harness: menu " << pMenu->title() << ": " << astrItems.join('|') << "\n";
+  }
+}
+
 // Help > About JPEGsnoop as a user chooses it, or the toolbar's About button
 // as a user clicks it (see --about above)
 static void aboutMenu(MainWindow &window, bool bButton, QTextStream &out)
@@ -4289,10 +4364,10 @@ static QString editState(MainWindow &window, const QString &strBefore)
   else
     strClipWhat = QString("other(%1)").arg(strClip.size());
 
-  return QString("selected=%1 chars=%2 copy=%3 selectall=%4 undo=%5 undo-steps=%6 readonly=%7 focus=%8 report=%9 clipboard=%10")
+  return QString("selected=%1 chars=%2 copy=%3 selectall=%4 undo-steps=%5 readonly=%6 focus=%7 report=%8 clipboard=%9")
            .arg(strSelWhat)
            .arg(strText.size())
-           .arg(enabled("&Copy"), enabled("Select All"), enabled("Undo"))
+           .arg(enabled("&Copy"), enabled("Select All"))
            .arg(pReport->document()->availableUndoSteps())
            .arg(pReport->isReadOnly() ? 1 : 0)
            .arg(strFocus, (strText == strBefore) ? QStringLiteral("same") : QStringLiteral("changed"), strClipWhat);
@@ -4862,6 +4937,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           exportMenus(window, opts, strSettingsDir + "/menu-export-" + QString::number(nFileInd), out);
         if(opts.bButtons && (nFileInd == 1))
           toolbarButtons(window, out);
+        if(opts.bMenus && (nFileInd == 1))
+          menuItems(window, out);
         if((opts.bAbout || opts.bAboutButton) && (nFileInd == 1))
           aboutMenu(window, opts.bAboutButton, out);
         if(!opts.strEdit.isEmpty())
@@ -5753,6 +5830,7 @@ int main(int argc, char **argv)
   guiOpts.bAbout = args.removeAll("--about") > 0;
   guiOpts.bAboutButton = args.removeAll("--about-button") > 0;
   guiOpts.bButtons = args.removeAll("--buttons") > 0;
+  guiOpts.bMenus = args.removeAll("--menus") > 0;
   guiOpts.bEditBefore = args.removeAll("--edit-before") > 0;
   ExportOptions exportOpts;
   exportOpts.sJpeg.bExtractAll = args.removeAll("--all") > 0;

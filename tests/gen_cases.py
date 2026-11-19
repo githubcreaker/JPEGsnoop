@@ -859,7 +859,6 @@ case("S2_makernotes_toggle", "S2", "settings", "-", expect="makernotes 1 0 1$")
 case("S3_max_errors_persist", "S3", "settings", "-", expect="maxErrors after restart=5$")
 case("S4_config_dialog_save", "S4", "settings", "-",
      expect="dialog result=1 maxErrors=7 autoReprocess=1 coachIdct=1 stored=7")
-case("S5_update_date_format", "S5", "settings", "-", expect="is_today=1")
 case("S5_empty_file", "S5", "gui", ["ok_444.jpg", write("s_empty.jpg", b"")], "--log", timeout=30,
      expect="File length is zero")
 case("S5_reprocess_no_file", "S5", "gui", ["ok_444.jpg"], "--reprocess-first", timeout=30,
@@ -1548,7 +1547,7 @@ edit_case("T_paste_ignored", "key:paste", "harness: edit key:paste: .* report=sa
 edit_case("T_cut_ignored", "key:selectall,key:cut", "harness: edit key:cut: .* report=same ", forbid="report=changed")
 edit_case("T_backspace_ignored", "key:selectall,key:backspace", "harness: edit key:backspace: .* report=same ",
           forbid="report=changed")
-edit_case("T_undo_ignored", "key:undo", "harness: edit key:undo: selected=none .* undo=0 .* report=same ",
+edit_case("T_undo_ignored", "key:undo", "harness: edit key:undo: selected=none .* undo-steps=0 .* report=same ",
           forbid="report=changed")
 # No undo history is kept for the decoder's lines (one step per line before)
 edit_case("T_no_undo_history", "state", "harness: edit state: .* undo-steps=0 readonly=1 ")
@@ -3438,7 +3437,7 @@ def vb_step(step, toolbar, status, report, view):
 
 # The menu items, where Windows has them, with Windows' tips; both shown and
 # checked at first
-bars_case("VB_menu_toolbar", "statusbar", rx('harness: bars &Toolbar menu=&View after="Adjust..." separator=1 '
+bars_case("VB_menu_toolbar", "statusbar", rx('harness: bars &Toolbar menu=&View after="Overlays" separator=1 '
           'enabled=1 tip="Show or hide the toolbar" checkable=1') + "$")
 bars_case("VB_menu_status", "statusbar", rx('harness: bars &Status Bar menu=&View after="&Toolbar" separator=0 '
           'enabled=1 tip="Show or hide the status bar" checkable=1') + "$")
@@ -3882,6 +3881,36 @@ button_case("TB_about_opens", "--about-button",
             f"harness: about: About JPEGsnoop \\(JPEGsnoop / Version {ver_re} / Copyright [^ ]+ 2017 Calvin Hass / "
             "Qt 6\\.[0-9]+\\.[0-9]+\\)$")
 button_case("TB_about_closes", "--about-button", "harness: about closed=1$")
+
+
+# --- Removed: Check for Updates, Edit > Undo, View > Adjust, Submit signature ------
+# Options > Check for Updates did nothing, Edit > Undo and View > Adjust were
+# always greyed out, and Options > Configuration's "Submit signature to Online
+# DB" sent nothing: Windows' update check and online database are no longer
+# relevant. All are gone, with the update check's settings in Configuration
+# and in the license terms shown at the first start, which are now shorter.
+# gui --menus prints the menus; settings mode prints the two dialogs and which
+# of the settings are stored.
+def removed_case(cid, mode, files, flags, expect, forbid="-"):
+    case(cid, "RM", mode, files, flags, timeout=30, expect=expect, forbid=forbid)
+
+
+removed_case("RM_edit_menu", "gui", ["ok_444.jpg"], "--menus",
+             rx("harness: menu &Edit: &Copy|Select All|-|Find...|Find Next") + "$")
+removed_case("RM_view_menu", "gui", ["ok_444.jpg"], "--menus",
+             rx("harness: menu &View: Image Chan|Image Zoom|Overlays|-|&Toolbar|&Status Bar") + "$")
+removed_case("RM_options_menu", "gui", ["ok_444.jpg"], "--menus",
+             rx("harness: menu &Options: DHT Expand|Hide Unknown EXIF Tags|Maker Notes|Signature Search|Relaxed Parsing|"
+                "-|Scan Segment|-|Configuration...") + "$")
+removed_case("RM_no_items", "gui", ["ok_444.jpg"], "--menus", "^harness: menu &Help: ",
+             forbid="^harness: menu .*(Undo|Adjust|Check for Updates)")
+removed_case("RM_config_dialog", "settings", "-", "-",
+             rx("harness: config dialog groups=Directory for User Database|Processing Options|Report Settings|Help "
+                "heights=87|60|60|60 below=13 checkboxes=Auto Reprocess files on change in Options (slower)") + "$")
+removed_case("RM_license", "settings", "-", "-",
+             rx("harness: license groups=Software Agreement: checkboxes=I have read and agree to the terms above "
+                "below=10") + "$")
+removed_case("RM_settings_not_stored", "settings", "-", "-", "^harness: removed settings stored=none$")
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

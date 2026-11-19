@@ -2874,6 +2874,74 @@ On the previous commit all 10 fail. Eleven deliberate breaks each fail their own
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
 
+### Removed: Check for Updates, Edit > Undo, View > Adjust, Submit signature
+
+Four items kept from Windows did nothing in the port, and what two of them were for is
+no longer relevant: Windows checked impulseadventure.com for a new version, and could
+post compression signatures to an online database there. All four are removed:
+- **Options > Check for Updates...** had no handler. (Windows fetched a page over plain
+  HTTP.)
+- **Edit > Undo** was always greyed out: the report is read-only. Cmd+Z still does
+  nothing in it.
+- **View > Adjust...** was always greyed out. (Windows' did nothing.)
+- **Options > Configuration's "Submit signature to Online DB when User submit"** sent
+  nothing: Tools > Add Camera/SW to DB adds to the user database only.
+
+The rest of the update check goes with them, since nothing used it:
+- **Configuration's "Software Update" group,** "Automatically check for updates every N
+  days".
+- **The license terms' "Software Updates" group,** "Periodically check for updates",
+  shown at the first start.
+- **The settings** `UpdateAuto`, `UpdateAutoDays`, `UpdateLastChk` and `DbSubmitNet`
+  (Windows' names), which are no longer read or written. Any already stored are left as
+  they are, unused.
+- **The decoder's code that built a signature entry and posted it** to the online
+  database (`PrepareSendSubmit()` and `SendSubmit()`, about 370 lines, never called), and
+  the web addresses and Windows Internet switches in `snoop.h` that only it used.
+
+What remains closes up:
+- **Edit:** Copy, Select All | Find..., Find Next.
+- **View:** Image Chan, Image Zoom, Overlays | Toolbar, Status Bar.
+- **Options:** ends with Configuration. On macOS, where Configuration is the app menu's
+  Preferences item (M3), Options now ends with Scan Segment: Qt hides the separator left
+  at the end (`QCocoaMenu::syncSeparatorsCollapsible()`).
+- **Configuration and the license terms** are shorter by the groups removed; the other
+  groups keep their sizes. Processing Options, now one checkbox, is as tall as Report
+  Settings.
+
+**Tests:** 7 new `RM` cases (1,063 in all; `S5_update_date_format`, which checked the
+update check's stored date, goes with it).
+- **The driver:** `gui --menus` prints each menu's items. The `settings` mode prints
+  Configuration's groups, their heights, the room below them and its checkboxes; the
+  license terms' groups, checkboxes and the room below them; and which of the four
+  settings are stored. `--edit`'s state no longer lists Edit > Undo.
+- **The cases:** the Edit, View and Options menus as above; none of the removed items in
+  any menu; Configuration's groups, heights, room below and checkbox; the license
+  terms'; none of the four settings stored. The case for View > Toolbar's place now has
+  it after Overlays.
+
+On the previous commit the 7 new cases and the View > Toolbar case fail. Eight
+deliberate breaks each fail their own cases:
+- **Menus:** Undo kept, 2 fail; the separator after it kept, 1 fails; Adjust kept, 3
+  fail; Check for Updates kept, 2 fail.
+- **Dialogs:** Processing Options left to stretch, 1 fails; Configuration left at its old
+  height, 1 fails; the license terms left at theirs, 1 fails.
+- **Settings:** one of the four still stored, 1 fails.
+
+**Checks:**
+- **All 1,063 pass** with and without ASan/UBSan.
+- **The app builds** with no new warnings, compared with the previous commit's whole
+  build (12 fewer, with the code removed).
+- **cppcheck 2.22** finds nothing new in the changed files (10 fewer).
+- **Both dialogs** were drawn offscreen before and after, to see them close up.
+- **Not checked:** the two dialogs and the menus on the macOS platform.
+
+**Still open:**
+- **Not yet ported:** Windows' command-line mode (its options; see "Opening a file from
+  outside the app"). File > Open's list of types also lacks Windows' "AVI Movie".
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

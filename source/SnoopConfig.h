@@ -56,7 +56,6 @@ public:
   // Getter functions
   QString dbPath() { return strDbDir; }
 
-  int32_t autoUpdateDays() { return nUpdateAutoDays; }
   int32_t maxDecodeError() { return nErrMaxDecodeScan; }
 
   uint32_t startPos() { return nPosStart; }
@@ -74,7 +73,6 @@ public:
   bool autoReprocess() { return bReprocessAuto; }
   bool clipStats() { return bStatClipEn; }
   bool coachIdct() { return bCoachDecodeIdct; }
-  bool dbSubmitNet() { return bDbSubmitNet; }
   bool decodeAc() { return bDecodeScanImgAc; }
   bool decodeImage() { return bDecodeScanImg; }
   bool decodeMaker() { return bDecodeMaker; }
@@ -86,16 +84,11 @@ public:
   bool relaxedParsing() { return bRelaxedParsing; }
   bool scanDump() { return bOutputScanDump; }
   bool searchSig() { return bSigSearch; }
-  bool submitDbNet() { return bDbSubmitNet; }
-  bool swUpdateEnabled() { return bUpdateAuto; }
 
   // Setter functions
   void setDbPath(QString path) {strDbDir = path; }
-  void setAutoUpdate(bool b) { bUpdateAuto = b; }
-  void setUpdatePeriod(int32_t days) {nUpdateAutoDays = days; }
   void setAutoReprocess(bool b) { bReprocessAuto = b; }
   void setInteractive(bool b) { bInteractive = b; }
-  void setOnlineDb(bool b) { bDbSubmitNet = b; }
   void setMaxErrors(int32_t errors) { nErrMaxDecodeScan = errors; }
   void setStartPos(uint32_t start) { nPosStart = start; }
   void setCoachIdct(bool b) { bCoachDecodeIdct = b; }
@@ -186,17 +179,14 @@ private:
 
   // Registry Configuration options
   QString strDbDir;             // Directory for User DB
-  QString strUpdateLastChk;     // When last checked for updates
   QString strBatchLastInput;    // Last batch process input directory
   QString strBatchLastOutput;   // Last batch process output directory
   QString strBatchExtensions;   // Extension list for batch processing (eg. ".jpg,.jpeg")
 
-  int nUpdateAutoDays;          // How many days between checks
   int nErrMaxDecodeScan;        // Max # errs to show in scan decode
 
   bool bDirty;                  // Registry entry options dirtied?
   bool bEulaAccepted;           // Accepted the EULA?
-  bool bUpdateAuto;             // Automatically check for updates
   bool bReprocessAuto;          // Auto reprocess file when option change
   bool bSigSearch;              // Automatically search for comp signatures
   bool bDecodeScanImg;          // Scan image decode enabled
@@ -207,7 +197,6 @@ private:
   bool bHistoEn;                // Histogram calcs enabled?
   bool bStatClipEn;             // Enable scan decode clip stats?
   bool bDumpHistoY;             // Dump full Y DC Histogram
-  bool bDbSubmitNet;            // Submit new entries to net?
   bool bExifHideUnknown;        // Hide unknown exif tags?
   bool bRelaxedParsing;         // Proceed despite bad marker / format?
   bool bCoachReprocessAuto;     // Coach msg: Need to reprocess or change to auto

@@ -37,20 +37,12 @@ SnoopConfigDialog::SnoopConfigDialog(CSnoopConfig *pAppConfig, QWidget *parent) 
   connect(ui->btnReset, SIGNAL(released()), this, SLOT(onReset()));
 
   // Whole numbers only
-  ui->leUpdateDays->setValidator(new QIntValidator(1, 9999, this));
   ui->leMaxErrors->setValidator(new QIntValidator(0, 99999, this));
 
   ui->leDbPath->setText(m_pAppConfig->dbPath());
 
-  bAutoUpdate = m_pAppConfig->swUpdateEnabled();
-  ui->cbAutoUpdate->setChecked(bAutoUpdate);
-
-  autoUpdateDays = m_pAppConfig->autoUpdateDays();
-  ui->leUpdateDays->setText(QString("%1").arg(autoUpdateDays));
   bAutoReprocess = m_pAppConfig->autoReprocess();
   ui->cbAutoReprocess->setChecked(bAutoReprocess);
-  bOnlineDb = m_pAppConfig->dbSubmitNet();
-  ui->cbOblineDb->setChecked(bOnlineDb);
   maxDecodeErrors = m_pAppConfig->maxDecodeError();
   ui->leMaxErrors->setText(QString("%1").arg(maxDecodeErrors));
 }
@@ -96,17 +88,7 @@ void SnoopConfigDialog::onSave()
   int32_t nVal;
 
   m_pAppConfig->setDbPath(ui->leDbPath->text());
-  m_pAppConfig->setAutoUpdate(ui->cbAutoUpdate->isChecked());
-
-  nVal = ui->leUpdateDays->text().toInt(&bOk);
-
-  if(bOk)
-  {
-    m_pAppConfig->setUpdatePeriod(nVal);
-  }
-
   m_pAppConfig->setAutoReprocess(ui->cbAutoReprocess->isChecked());
-  m_pAppConfig->setOnlineDb(ui->cbOblineDb->isChecked());
 
   nVal = ui->leMaxErrors->text().toInt(&bOk);
 

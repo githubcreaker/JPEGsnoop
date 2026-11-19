@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>541</width>
-    <height>429</height>
+    <height>308</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -38,7 +38,7 @@
      <x>20</x>
      <y>10</y>
      <width>402</width>
-     <height>406</height>
+     <height>285</height>
     </rect>
    </property>
    <layout class="QVBoxLayout" name="verticalLayout_3">
@@ -112,88 +112,17 @@ QGroupBox::title {
      </widget>
     </item>
     <item>
-     <widget class="QGroupBox" name="groupBox_2">
+     <widget class="QGroupBox" name="groupBox_3">
       <property name="minimumSize">
        <size>
         <width>400</width>
         <height>60</height>
        </size>
       </property>
-      <property name="styleSheet">
-       <string notr="true">QGroupBox {
-    border: 1px solid gray;
-    border-radius: 9px;
-    margin-top: 0.5em;
-}
-
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 3px 0 3px;
-}</string>
-      </property>
-      <property name="title">
-       <string>Software Update</string>
-      </property>
-      <property name="flat">
-       <bool>true</bool>
-      </property>
-      <widget class="QWidget" name="layoutWidget">
-       <property name="geometry">
-        <rect>
-         <x>10</x>
-         <y>20</y>
-         <width>381</width>
-         <height>31</height>
-        </rect>
-       </property>
-       <layout class="QHBoxLayout" name="horizontalLayout">
-        <item>
-         <widget class="QCheckBox" name="cbAutoUpdate">
-          <property name="maximumSize">
-           <size>
-            <width>260</width>
-            <height>20</height>
-           </size>
-          </property>
-          <property name="text">
-           <string>Automatically check for updates every </string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLineEdit" name="leUpdateDays">
-          <property name="maximumSize">
-           <size>
-            <width>40</width>
-            <height>20</height>
-           </size>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QLabel" name="label_2">
-          <property name="maximumSize">
-           <size>
-            <width>40</width>
-            <height>20</height>
-           </size>
-          </property>
-          <property name="text">
-           <string>days</string>
-          </property>
-         </widget>
-        </item>
-       </layout>
-      </widget>
-     </widget>
-    </item>
-    <item>
-     <widget class="QGroupBox" name="groupBox_3">
-      <property name="minimumSize">
+      <property name="maximumSize">
        <size>
-        <width>400</width>
-        <height>80</height>
+        <width>16777215</width>
+        <height>60</height>
        </size>
       </property>
       <property name="styleSheet">
@@ -221,7 +150,7 @@ QGroupBox::title {
          <x>10</x>
          <y>20</y>
          <width>335</width>
-         <height>42</height>
+         <height>31</height>
         </rect>
        </property>
        <layout class="QVBoxLayout" name="verticalLayout_2">
@@ -229,13 +158,6 @@ QGroupBox::title {
          <widget class="QCheckBox" name="cbAutoReprocess">
           <property name="text">
            <string>Auto Reprocess files on change in Options (slower)</string>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QCheckBox" name="cbOblineDb">
-          <property name="text">
-           <string>Submit signature to Online DB when User submit</string>
           </property>
          </widget>
         </item>

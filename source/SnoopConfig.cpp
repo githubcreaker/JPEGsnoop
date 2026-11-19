@@ -17,7 +17,6 @@
 //
 
 #include <QApplication>
-#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QStandardPaths>
@@ -66,9 +65,6 @@ CSnoopConfig::CSnoopConfig(QObject *_parent) : QObject(_parent)
   // Registry settings
   bDirty = false;               // Have the registry options been dirtied?
   bEulaAccepted = false;
-  bUpdateAuto = true;
-  nUpdateAutoDays = 14;         // Check every 14 days
-  strUpdateLastChk = "";
   strDbDir = "";
   bReprocessAuto = false;
   bDecodeScanImg = true;
@@ -84,8 +80,6 @@ CSnoopConfig::CSnoopConfig(QObject *_parent) : QObject(_parent)
   // Performance boost ~ 25%
   bHistoEn = false;             // Histogram & clipping stats enabled?
   bStatClipEn = false;          // UNUSED: Enable Scan Decode clip stats?
-
-  bDbSubmitNet = true;          // Default to submit new DB entries to web
 
   bExifHideUnknown = true;      // Default to hiding unknown EXIF tags
   bRelaxedParsing = false;      // Normal parsing stops on bad marker
@@ -166,28 +160,9 @@ void CSnoopConfig::RegistryLoad()
     strDbDir = regUserDbPath;
   }
 
-  // (MM is the month; mm would be minutes)
-  QString strCurDate = QDateTime::currentDateTime().toString("yyyyMMdd");
-  QString regUpdateLastChk = settings.value("General\\UpdateLastChk", "").toString();
-
-  // Try to load the registry entry
-  if(regUpdateLastChk == "")
-  {
-    // None specified, so determine a suitable default
-    strUpdateLastChk = strCurDate;
-    bDirty = true;
-  }
-  else
-  {
-    // Specified, so store in App Config struct
-    strUpdateLastChk = regUpdateLastChk;
-  }
-
   // A missing key keeps the default set in the constructor, as master did with
   // its 999 sentinel. (Hard-coded fallbacks here had left a fresh install with
   // image decoding and the coach messages switched off.)
-  bUpdateAuto = settings.value("General\\UpdateAuto", bUpdateAuto).toBool();
-  nUpdateAutoDays = settings.value("General\\UpdateAutoDays", nUpdateAutoDays).toInt();
   bEulaAccepted = settings.value("General\\EulaAccepted", bEulaAccepted).toBool();
   bReprocessAuto = settings.value("General\\ReprocessAuto", bReprocessAuto).toBool();
   bSigSearch = settings.value("General\\SigSearch", bSigSearch).toBool();
@@ -201,7 +176,6 @@ void CSnoopConfig::RegistryLoad()
 //      RegistryLoadBool("General\\DecScanClip"),    999,   bStatClipEn;
   bHistoEn = settings.value("General\\DecScanHisto", bHistoEn).toBool();
 
-  bDbSubmitNet = settings.value("General\\DbSubmitNet", bDbSubmitNet).toBool();
   bExifHideUnknown = settings.value("General\\ExifHideUnk", bExifHideUnknown).toBool();
   bRelaxedParsing = settings.value("General\\RelaxedParsing", bRelaxedParsing).toBool();
 
@@ -228,7 +202,6 @@ void CSnoopConfig::RegistryLoad()
     if(eulaDlg.result())
     {
       bEulaAccepted = true;
-      bUpdateAuto = eulaDlg.updateStatus();
       bDirty = true;
       RegistryStore();
     }
@@ -290,9 +263,6 @@ void CSnoopConfig::RegistryStore()
   {
     qDebug() << "Saving Config";
     settings.setValue("General\\UserDbPath", strDbDir);
-    settings.setValue("General\\UpdateAuto", bUpdateAuto);
-    settings.setValue("General\\UpdateAutoDays", nUpdateAutoDays);
-    settings.setValue("General\\UpdateLastChk", strUpdateLastChk);
     settings.setValue("General\\EulaAccepted", bEulaAccepted);
     settings.setValue("General\\ReprocessAuto", bReprocessAuto);
     settings.setValue("General\\SigSearch", bSigSearch);
@@ -305,7 +275,6 @@ void CSnoopConfig::RegistryStore()
     settings.setValue("General\\DumpHistoY", bDumpHistoY);
     settings.setValue("General\\DecScanHisto", bHistoEn);
 
-    settings.setValue("General\\DbSubmitNet", bDbSubmitNet);
     settings.setValue("General\\ExifHideUnk", bExifHideUnknown);
     settings.setValue("General\\RelaxedParsing", bRelaxedParsing);
 
@@ -327,9 +296,6 @@ void CSnoopConfig::RegistryStore()
 void CSnoopConfig::printSettings()
 {
   qDebug() << "strDbDir" << strDbDir;
-  qDebug() << "bUpdateAuto" << bUpdateAuto;
-  qDebug() << "nUpdateAutoDays" << nUpdateAutoDays;
-  qDebug() << "strUpdateLastChk" << strUpdateLastChk;
   qDebug() << "bEulaAccepted" << bEulaAccepted;
   qDebug() << "bReprocessAuto" << bReprocessAuto;
   qDebug() << "bSigSearch" << bSigSearch;
@@ -342,7 +308,6 @@ void CSnoopConfig::printSettings()
   qDebug() << "bDumpHistoY" << bDumpHistoY;
   qDebug() << "bHistoEn" << bHistoEn;
 
-  qDebug() << "bDbSubmitNet" << bDbSubmitNet;
   qDebug() << "bExifHideUnknown" << bExifHideUnknown;
   qDebug() << "bRelaxedParsing" << bRelaxedParsing;
 

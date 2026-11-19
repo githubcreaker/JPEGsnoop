@@ -60,26 +60,10 @@
 // TODO: Might also use this for command-line nogui mode
 #define QUICKLOG
 
-// Define the type of Internet support
-// - WINHTTP is only supported in newer OS versions
-#define WWW_WININET
-//#define WWW_WINHTTP
-
 // The following DEFINEs are used in debugging and local batch operations
 //#define DEBUG_SIG                             // Print debugging info for signature generation
 //#define BATCH_DO_DBSUBMIT
 //#define BATCH_DO_DBSUBMIT_ALL
-
-// Internet access parameters
-// - If the user has enabled sharing of the signature data with the online
-//   repository, then the following host and URLs are used.
-// - The URLs that are used to indicate new release availability are also
-//   provided here. These pages have specific formatting that JPEGsnoop
-//   parses to identify if a newer version is available.
-#define IA_HOST				"www.impulseadventure.com"
-#define IA_DB_SUBMIT_PAGE	"/photo/jpeg-snoop-submit.php"
-#define IA_UPDATES_CHK_PAGE	"/photo/jpeg-snoop.html"
-#define IA_UPDATES_DL_PAGE	"http://www.impulseadventure.com/photo/jpeg-snoop.html#download"
 
 // Registry settings
 #define REG_KEY_PATH		"Software\\ImpulseAdventure\\JPEGsnoop\\"

@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>639</width>
-    <height>419</height>
+    <height>321</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -81,33 +81,6 @@
     </property>
     <property name="text">
      <string>I have read and agree to the terms above</string>
-    </property>
-   </widget>
-  </widget>
-  <widget class="QGroupBox" name="groupBox_2">
-   <property name="geometry">
-    <rect>
-     <x>10</x>
-     <y>320</y>
-     <width>520</width>
-     <height>91</height>
-    </rect>
-   </property>
-   <property name="title">
-    <string>Software Updates:</string>
-   </property>
-   <widget class="QCheckBox" name="cbUpdate">
-    <property name="geometry">
-     <rect>
-      <x>10</x>
-      <y>30</y>
-      <width>500</width>
-      <height>41</height>
-     </rect>
-    </property>
-    <property name="text">
-     <string>Periodically check for updates
-You can always change this option later in Configuration</string>
     </property>
    </widget>
   </widget>

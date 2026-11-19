@@ -33,8 +33,6 @@ public:
   explicit Q_Eula(QWidget *parent = 0);
   ~Q_Eula();
 
-  bool updateStatus();
-
 private slots:
   void okClicked();
 

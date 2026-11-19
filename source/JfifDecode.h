@@ -174,9 +174,6 @@ public:
   // UI elements
   void SetStatusBar(QStatusBar * pStatBar);
 
-  // Signature database:
-  void PrepareSendSubmit(QString strQual, teSource eUserSource, QString strUserSoftware, QString strUserNotes);
-
 signals:
   void updateStatus(QString statusMsg, int);
 
@@ -192,14 +189,6 @@ private:
   void PrepareSignatureThumb();
   void PrepareSignatureThumbSingle(bool bRotate);
   bool CompareSignature(bool bQuiet);
-  void SendSubmit(QString strExifMake, QString strExifModel, QString strQual,
-                  QString strDqt0, QString strDqt1, QString strDqt2, QString strDqt3,
-                  QString strCss,
-                  QString strSig, QString strSigRot, QString strSigThumb,
-                  QString strSigThumbRot, double fQFact0, double fQFact1, uint32_t nImgW, uint32_t nImgH,
-                  QString strExifSoftware, QString strComment, teMaker eMaker,
-                  teSource eUserSource, QString strUserSoftware, QString strExtra,
-                  QString strUserNotes, uint32_t nExifLandscape, uint32_t nThumbX, uint32_t nThumbY);
   void OutputSpecial();
 
   // Display routines

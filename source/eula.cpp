@@ -52,8 +52,3 @@ void Q_Eula::okClicked()
     done(1);
   }
 }
-
-bool Q_Eula::updateStatus()
-{
-  return ui->cbUpdate->isChecked();
-}

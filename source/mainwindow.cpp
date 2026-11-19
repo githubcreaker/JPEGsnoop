@@ -342,10 +342,6 @@ void MainWindow::createActions(void)
 //   exitAct->setStatusTip(tr("Exit the application"));
   connect(exitAct, &QAction::triggered, this, &MainWindow::close);
 
-  undoAct = new QAction(tr("Undo"), this);
-  undoAct->setShortcuts(QKeySequence::Undo);
-  undoAct->setEnabled(false);
-
   // Edit > Copy, Select All, Find and Find Next act on the report, as on
   // Windows. Copy is enabled while part of the report is selected; Select All
   // and Find while the report has any text (also when it only holds the error
@@ -375,9 +371,6 @@ void MainWindow::createActions(void)
   connect(findNextAct, &QAction::triggered, this, &MainWindow::onFindNext);
 
   connect(textEdit, &QPlainTextEdit::textChanged, this, &MainWindow::updateTextActions);
-
-  adjustAct = new QAction(tr("Adjust..."), this);
-  adjustAct->setEnabled(false);
 
   // Image Channel
   rgbAct = new QAction(tr("RGB"), this);
@@ -608,8 +601,6 @@ void MainWindow::createActions(void)
   configAct->setShortcuts(QKeySequence::Preferences);
   connect(configAct, &QAction::triggered, this, &MainWindow::onConfig);
 
-  checkUpdatesAct = new QAction(tr("Check for Updates..."), this);
-
   // Scan Segment menu
   decodeImageAct = new QAction(tr("Decode Image"), this);
   decodeImageAct->setCheckable(true);
@@ -715,8 +706,6 @@ void MainWindow::createMenus(void)
   fileMenu->addAction(exitAct);
 
   editMenu = menuBar()->addMenu("&Edit");
-  editMenu->addAction(undoAct);
-  editMenu->addSeparator();
   editMenu->addAction(copyAct);
   editMenu->addAction(selectAllAct);
   editMenu->addSeparator();
@@ -727,7 +716,6 @@ void MainWindow::createMenus(void)
   imageChanMenu = viewMenu->addMenu(tr("Image Chan"));
   imageZoomMenu = viewMenu->addMenu(tr("Image Zoom"));
   overlayMenu = viewMenu->addMenu(tr("Overlays"));
-  viewMenu->addAction(adjustAct);
   viewMenu->addSeparator();
   viewMenu->addAction(toolbarAct);
   viewMenu->addAction(statusBarAct);
@@ -781,7 +769,6 @@ void MainWindow::createMenus(void)
   scanSegMenu = optionsMenu->addMenu(tr("Scan Segment"));
   optionsMenu->addSeparator();
   optionsMenu->addAction(configAct);
-  optionsMenu->addAction(checkUpdatesAct);
 
   // Scan Segment menu
   scanSegMenu->addAction(decodeImageAct);
@@ -2574,8 +2561,9 @@ void MainWindow::searchDqt(const QString &strChosen)
 // Tools > Add Camera/SW to DB: add the shown file's compression signature to
 // the user database, with what the user says made the file (master's
 // CJPEGsnoopDoc::OnToolsAddcameratodb). Every signature search uses it from
-// then on. Windows also posted the entry to impulseadventure.com when
-// "Submit signature to Online DB" was on; this version doesn't.
+// then on. Windows could also post the entry to impulseadventure.com
+// (Options > Configuration's "Submit signature to Online DB"); this version
+// has no such option.
 void MainWindow::onAddToDb()
 {
   if(m_currentFile.isEmpty())

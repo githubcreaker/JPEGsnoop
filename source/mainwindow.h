@@ -198,14 +198,12 @@ private:
   QAction *exitAct;
 
   // Edit menu
-  QAction *undoAct;
   QAction *copyAct;
   QAction *selectAllAct;
   QAction *findAct;
   QAction *findNextAct;
 
   // View menu
-  QAction *adjustAct;
   QAction *toolbarAct;
   QAction *statusBarAct;
 
@@ -256,7 +254,6 @@ private:
   QAction *sigSearchAct;
   QAction *relaxedParseAct;
   QAction *configAct;
-  QAction *checkUpdatesAct;
 
   // Scan Segment menu
   QAction *decodeImageAct;

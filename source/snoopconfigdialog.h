@@ -51,11 +51,8 @@ private:
   CSnoopConfig *m_pAppConfig;
 
   QString dbPath;
-  bool bAutoUpdate;
   bool bAutoReprocess;
-  bool bOnlineDb;
 
-  int32_t autoUpdateDays;
   int32_t maxDecodeErrors;
 
 };

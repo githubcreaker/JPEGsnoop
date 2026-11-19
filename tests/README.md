@@ -73,6 +73,8 @@ when it is installed, so Pillow needn't be installed separately).
     - `--buttons` prints, after the first file, the toolbar's buttons in
       order, each by its tooltip (`-` for a separator), and for each its tip,
       key, menus, whether it is on and whether it has an icon.
+    - `--menus` prints, after the first file, each menu of the menu bar with
+      the items shown in it (`-` for a separator, a submenu by its name).
     - `--edit STEPS` runs STEPS on the report after each file (and, with
       `--edit-before`, once before the first): a comma-separated list of
       `state`, `selectall` and `copy` (choose Edit > Select All or Copy),
@@ -344,7 +346,10 @@ when it is installed, so Pillow needn't be installed separately).
     labels, the folders saved in the settings, and with a file open, the
     file that Reprocess shows afterwards;
   - `settings` exercises settings load/store, option toggles and the
-    Configuration dialog;
+    Configuration dialog, and prints that dialog's groups, their heights,
+    the room below them and its checkboxes, the license terms' groups,
+    checkboxes and room below them, and which settings no longer kept are
+    stored;
   - `--scale F`, in any mode, runs as if on a screen with F device pixels per
     point (2 for Retina).
 
@@ -382,8 +387,9 @@ Manage Local DB" section, `MG` in its "View > Overlays > MCU Grid" section, and
 Setup" section, `RF` in its "File > Recent File" section, `NB` in its "The
 toolbar's New button" section, `IE` in its "The red line where the image
 ends inside its MCUs" section, `OF` in its "Opening a file from outside the
-app: a drop, Finder, the command line" section, and `TB` in its "The toolbar's
-Copy and About buttons" section);
+app: a drop, Finder, the command line" section, `TB` in its "The toolbar's
+Copy and About buttons" section, and `RM` in its "Removed: Check for Updates,
+Edit > Undo, View > Adjust, Submit signature" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case
