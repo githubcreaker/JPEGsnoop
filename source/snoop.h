@@ -32,6 +32,13 @@
 //   JPEGsnoop.rc resource under "Version.VS_VERSION_INFO".
 #define VERSION_STR "1.8.0"
 
+// Who the app says it is. On macOS the domain reversed and the name are the
+// name of its settings, which must be the bundle ID (JPEGsnoopQt.pro):
+// com.impulseadventure.JPEGsnoopQt, so no "www.".
+#define APP_ORG_NAME "ImpulseAdventure"
+#define APP_ORG_DOMAIN "impulseadventure.com"
+#define APP_NAME "JPEGsnoopQt"
+
 // Version number for the database signatures
 // - This version number has been provided in case I decide
 //   to change the database format. If a change to the format is
@@ -102,9 +109,13 @@ enum tePreviewZoom
   PRV_ZOOM_300,
   PRV_ZOOM_400,
   PRV_ZOOM_800,
+  PRV_ZOOM_1600,                // (past Windows' 800%)
+  PRV_ZOOM_3200,
+  PRV_ZOOM_6400,
   PRV_ZOOMEND,
   PRV_ZOOM_IN,
-  PRV_ZOOM_OUT
+  PRV_ZOOM_OUT,
+  PRV_ZOOM_FIT                  // Zoom to Fit Window, the default
 };
 
 // DB Signature modes

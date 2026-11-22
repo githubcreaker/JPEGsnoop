@@ -334,6 +334,9 @@ public:
   bool isYHistogramReady() {return m_bDibHistYReady; }
   bool isRgbHistogramReady() {return m_bDibHistRgbReady; }
   bool IsPreviewReady();
+  // Whether the preview was decoded with AC (Full IDCT): how it was decoded,
+  // which a change of the option doesn't change until the file is reprocessed
+  bool IsPreviewAc() const { return m_bDecodeScanAc; }
 
   // Config
   void SetImageDimensions(uint32_t nWidth, uint32_t nHeight);

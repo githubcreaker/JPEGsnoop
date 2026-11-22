@@ -90,6 +90,7 @@ public:
   bool relaxedParsing() { return bRelaxedParsing; }
   bool scanDump() { return bOutputScanDump; }
   bool searchSig() { return bSigSearch; }
+  bool skipLargeHashes() { return bSkipLargeHashes; }
 
   // Setter functions
   void setDbPath(QString path) {strDbDir = path; }
@@ -126,7 +127,6 @@ public:
 
 signals:
   void ImgSrcChanged();
-  void scanImageAc(bool);
   void reprocess();
 
 public slots:
@@ -135,6 +135,7 @@ public slots:
   void onScansegmentDecodeImage();
   void onOptionsHideuknownexiftags();
   void onOptionsRelaxedparsing();
+  void onOptionsSkipLargeHashes();
   void onOptionsSignaturesearch();
   void onScansegmentNoidct();
   void onScansegmentFullidct();
@@ -195,6 +196,7 @@ private:
   bool bDumpHistoY;             // Dump full Y DC Histogram
   bool bExifHideUnknown;        // Hide unknown exif tags?
   bool bRelaxedParsing;         // Proceed despite bad marker / format?
+  bool bSkipLargeHashes;        // No hashes in the intro for files of 4 GiB or more?
   bool bCoachReprocessAuto;     // Coach msg: Need to reprocess or change to auto
   bool bCoachDecodeIdct;        // Coach msg: Warn about slow AC decode / lowres DC
 

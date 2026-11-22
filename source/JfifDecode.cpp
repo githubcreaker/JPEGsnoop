@@ -180,6 +180,8 @@ void CjfifDecode::Reset()
   m_strSoftware = "";
   m_bImgProgressive = false;
   m_bImgSofUnsupported = false;
+  m_nSofMode = 0;
+  m_strNoImage.clear();
   strcpy(m_acApp0Identifier, "");
 
   // Derived metadata
@@ -239,6 +241,146 @@ void CjfifDecode::Reset()
   m_nScanDecodeNum = 0;
   m_bImgJfif = false;
   m_bStateEoi = false;
+}
+
+//-----------------------------------------------------------------------------
+// With no image to show, say so and why at the end of the report. What was
+// said was a note under each scan ("Scan parsing doesn't support this SOF
+// mode"), or nothing at all (a height of 0, no frame).
+//
+// INPUT:
+// - bPsd                       A Photoshop file, which has no scans
+//
+// POST:
+// - m_strNoImage               The reason in a few words, "" if there's an image
+//
+void CjfifDecode::ReportNoImage(bool bPsd)
+{
+  m_strNoImage.clear();
+  if(m_pImgDec->m_bDibTempReady)
+  {
+    return;
+  }
+
+  const quint64 nPixels = static_cast<quint64>(m_nSofSampsPerLine_X) * m_nSofNumLines_Y;
+  QString strShort;
+  QStringList astrWhy;
+
+  // What the file is comes before Decode Image being off: turning it on
+  // wouldn't help with those
+  if(bPsd)
+  {
+    strShort = "Photoshop image that can't be drawn";
+    astrWhy << "Its Photoshop image can't be drawn: the Photoshop section above says why.";
+  }
+  else if(!m_bStateSoi)
+  {
+    strShort = "no JPEG found";
+    astrWhy << QString("There is no JPEG at the start offset (0x%1).").arg(m_pAppConfig->startPos(), 8, 16, QChar('0'))
+            << "For one inside another file, such as a video or RAW file, use [Tools->Image Search Fwd].";
+  }
+  else if(!m_bStateSof)
+  {
+    strShort = "no frame header";
+    astrWhy << "The JPEG has no frame header (SOF) that JPEGsnoop knows, which gives an image's size and type.";
+  }
+  else if(m_bImgSofUnsupported)
+  {
+    QString strKind;
+    switch(m_nSofMode)
+    {
+      case 2:  strKind = "progressive"; break;
+      case 3:  strKind = "lossless"; break;
+      case 9:  strKind = "arithmetic-coded"; break;
+      case 10: strKind = "arithmetic-coded progressive"; break;
+      case 11: strKind = "arithmetic-coded lossless"; break;
+      default: strKind = "hierarchical"; break;         // 5 to 7 and 13 to 15
+    }
+    strShort = strKind + " JPEG";
+    const QString strArticle = QString("aeiou").contains(strKind.at(0)) ? "an" : "a";
+    astrWhy << QString("This is %1 %2 JPEG (SOF%3), which JPEGsnoop can't decode. It decodes")
+                 .arg(strArticle, strKind).arg(m_nSofMode)
+            << "only baseline and extended sequential JPEGs (SOF0 and SOF1).";
+    if(m_bImgProgressive)
+    {
+      astrWhy << "That doesn't mean the file is damaged: other viewers show progressive JPEGs."
+              << "The rest of this report still applies, but there's no image, MCU map or Detailed Decode.";
+    }
+  }
+  else if(!m_bStateSofOk)
+  {
+    strShort = "invalid frame header";
+    astrWhy << "The frame header (SOF) isn't valid: the errors above say how.";
+  }
+  else if(nPixels == 0)
+  {
+    strShort = "size of 0";
+    astrWhy << QString("The frame header gives a size of %1 x %2.").arg(m_nSofSampsPerLine_X).arg(m_nSofNumLines_Y)
+            << "Either it's damaged, or the height comes after the scan (DNL), which isn't supported.";
+  }
+  else if(m_nSofNumComps_Nf == 4)
+  {
+    strShort = "CMYK JPEG";
+    astrWhy << "This is a CMYK or YCCK JPEG (4 components), which JPEGsnoop can't decode.";
+  }
+  else if((m_nSofNumComps_Nf != 1) && (m_nSofNumComps_Nf != 3))
+  {
+    strShort = QString("%1 color components").arg(m_nSofNumComps_Nf);
+    astrWhy << QString("It has %1 color components. JPEGsnoop decodes only images with 1 or 3.").arg(m_nSofNumComps_Nf);
+  }
+  else if(!m_bStateSos)
+  {
+    strShort = "no image data";
+    astrWhy << "No scan (SOS), which holds the image, was found: the file may be cut short or damaged.";
+  }
+  else if(!m_bStateDqtOk)
+  {
+    strShort = "no quantization tables";
+    astrWhy << "It has no valid quantization tables (DQT), which are needed to decode it.";
+  }
+  else if(!m_bStateDhtOk)
+  {
+    strShort = "no Huffman tables";
+    astrWhy << "It has no valid Huffman tables (DHT), which are needed to decode it.";
+  }
+  else if(nPixels > (1ull << 28))
+  {
+    strShort = "too large";
+    astrWhy << QString("At %1 x %2 it is too large to decode: the most is 268 million pixels.")
+                 .arg(m_nSofSampsPerLine_X).arg(m_nSofNumLines_Y);
+  }
+  else if(!m_pAppConfig->decodeImage())
+  {
+    strShort = "Decode Image is off";
+    astrWhy << "[Options->Scan Segment->Decode Image] is off. Turn it on, then use [File->Reprocess File].";
+  }
+  else
+  {
+    strShort = "scan couldn't be decoded";
+    astrWhy << "Its scan couldn't be decoded: the notes and errors above say why.";
+  }
+
+  m_strNoImage = strShort;
+  m_pLog->AddLine("");
+  m_pLog->AddLineHdr("*** Image Not Shown ***");
+  for(const QString &strLine : astrWhy)
+  {
+    m_pLog->AddLineWarn("  " + strLine);
+  }
+}
+
+//-----------------------------------------------------------------------------
+// "Done", and with no image to show why not
+void CjfifDecode::ShowDoneStatus()
+{
+  if(!m_pStatBar)
+  {
+    return;
+  }
+  if(m_strNoImage.isEmpty())
+    m_pStatBar->showMessage("Done");
+  else
+    m_pStatBar->showMessage(QString("Done. Image not shown: %1").arg(m_strNoImage));
 }
 
 //-----------------------------------------------------------------------------
@@ -6767,6 +6909,7 @@ uint32_t CjfifDecode::DecodeMarker()
       //   would want to skip the update of class members.
 
       m_bStateSof = true;
+      m_nSofMode = nCode - JFIF_SOF0;
 
       // Determine if this is a SOF mode that we support
       // At this time, we only support Baseline DCT & Extended Sequential Baseline DCT
@@ -9758,10 +9901,8 @@ void CjfifDecode::ProcessFile(QFile *inFile)
 
     // No more processing of file, even if the PSD decode stopped at an
     // error: a JPEG decode would only add "File did not start with JPEG marker"
-    if(m_pStatBar)
-    {
-      m_pStatBar->showMessage("Done");
-    }
+    ReportNoImage(true);
+    ShowDoneStatus();
 
     return;
   }
@@ -9931,11 +10072,11 @@ void CjfifDecode::ProcessFile(QFile *inFile)
     OutputSpecial();
   }
 
+  // Last, where it is seen: the report is scrolled to its end
+  ReportNoImage(false);
+
   // Reset the status bar text
-  if(m_pStatBar)
-  {
-    m_pStatBar->showMessage("Done");
-  }
+  ShowDoneStatus();
 
   // Mark the file as closed
   //m_pWBuf->BufFileUnset();

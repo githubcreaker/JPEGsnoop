@@ -161,8 +161,9 @@ In detail:
   - The histograms are drawn at screen resolution.
 - **U4:** showing 800% took 193 MB for a 1024×768 image, about 0.7 MB now, because no
   enlarged copy of the whole image is made.
-- **M5 Packaging:** bundle ID `com.impulseadventure.JPEGsnoopQt` (the name macOS gives
-  the app's settings), version 1.8.0 from `snoop.h`, and an app icon made from
+- **M5 Packaging:** bundle ID `com.impulseadventure.JPEGsnoopQt` (said here to be the
+  name macOS gives the app's settings, which it wasn't until "One settings file, named
+  as the bundle ID"), version 1.8.0 from `snoop.h`, and an app icon made from
   `images/jpegsnoop.ico` by `scripts/make-macos-icon.py`. The 48-pixel art is enlarged
   in whole-pixel steps, so the large sizes are sharp but look like pixel art. (It first
   used the `.ico`'s 16-colour frames; fixed later, see [About](#about).)
@@ -3191,8 +3192,8 @@ what it claimed. None was a fault in the app, but each would have hidden one:
   does in Terminal (not offscreen). The four new cases (`CL_app_*`) check the summary and
   an unknown option after `-i -platform -o log.txt`, with the exit status. They run only
   what reads no settings: a run with a file reads the license terms' setting, which would
-  be your own. (`CFFIXED_USER_HOME` doesn't move them: macOS's preferences daemon still
-  read the real ones.)
+  be your own. (`CFFIXED_USER_HOME` doesn't move them. That was first tried with the
+  wrong name for them: see "Correction: the app's settings file" below.)
 - **The native printer.** On a Mac with no printer set up, `printer=native` left Qt's
   printer a PDF one, so two cases failed and others passed with the wrong printer. That
   step now checks, as the Finder cases do, and skips the case (see "Third check" under
@@ -3279,10 +3280,276 @@ check what was already so. Eleven deliberate breaks each fail their own cases:
   purpose and F6, Windows' key for moving between its panes (the image has a window of
   its own here). Compared with `upstream/master`: the menus, toolbar, menu shortcuts,
   list of dialogs and Configuration's controls. Not compared again: the other dialogs'
-  controls, and the decoders' output.
+  controls, and the decoders' output. (When Windows showed its notices wasn't compared
+  either, and one differed: see "The low-resolution notice, and the image window's title
+  and width".)
 - **A link that leads nowhere** when a batch starts isn't kept (see Command-line mode).
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
+### The image window's indicators with no pixel under the mouse
+
+Reported from the packaged app: with the mouse off the image, the MCU, file and YCC
+indicators were empty, and their empty frames looked like buttons. Now:
+- **They read "MCU N/A", "File N/A" and "YCC N/A"** when no pixel of a JPEG scan is under
+  the mouse: at the start, off the image or the preview, and over a Photoshop file's
+  image.
+- **Also once their image is gone** (the next file, Reprocess, New). They kept the
+  previous image's values until the mouse next moved.
+
+**Change from Windows:** its three panes were blank.
+
+**Unchanged:** the values over a pixel, and "File: not decoded" for an MCU after the scan
+stopped.
+
+**Tests:** 12 new `PI` cases (1,234 in all). `--hover` takes `leave`, the mouse leaving
+the preview. The cases: the start, and a file shown with the mouse not moved; off each
+side of the image; leaving the preview, and coming back; a Photoshop file's image; the
+next file, with and without an image, and New, each after a pixel was under the mouse.
+
+On the previous commit 11 of them fail (all but coming back). Ten deliberate breaks each
+fail their own cases:
+- **When:** not at the start, 1; blank off the image, 6; left as they were off it, 5;
+  blank over a Photoshop image, 1; not once the image is gone, 3; not on leaving the
+  preview, 1; also over a pixel, 5.
+- **The text:** MCU's empty, File's with a colon, YCC's without its name, 11 each.
+
+**Found on the way,** and fixed in the next section: the low-resolution notice missing
+when a file opens, the image window's title without "DC", and the window widening under
+the mouse.
+
+### The low-resolution notice, and the image window's title and width
+
+The report's note explains the blurred preview (No IDCT decodes one colour per 8x8
+block), but three things that should have made it plain didn't. Now:
+- **The notice shows when a file opens,** as on Windows, which opened files through
+  `Reprocess()`: "Currently only decoding low-res view (DC-only)...", or the high-res one
+  with Full IDCT. The port showed it only for File > Reprocess. The window is empty
+  behind it, and a file from Finder waits until it is closed. Its "do not show" box is
+  ticked at first, so as on Windows it shows once unless that is unticked.
+- **Turning it off is always saved.** It was lost when the settings had been saved
+  earlier in the session, as accepting the license terms does at a first start.
+- **The title is "Image (RGB, DC) @ 12.5%",** or "DC+AC", as on Windows. It had neither
+  until one was chosen under Scan Segment, and then followed the option rather than the
+  image: it said DC+AC over a DC-only image before that was reprocessed.
+- **The image window doesn't widen under the mouse.** Each indicator has room from the
+  start for the widest it shows (four-digit MCUs, a 32-bit offset, 16-bit DC values), so
+  the window starts about 494 points wide on macOS rather than 400.
+
+**Changes from Windows:** no notice for an empty file, whose error says why; the title
+has no "(1/8)" after the zoom, as before.
+
+**Tests:** 34 new cases, 20 `RN`, 10 `IT` and 4 `IW` (1,268 in all).
+- **The driver:** `--note` answers the notice; `--image-window` prints the title, and
+  whether the window widened or cut an indicator's text.
+- **The cases:** the notice for each way of opening a file and for Reprocess, its two
+  texts, what is behind it, turned off, kept, saved, and when there is none; the title
+  for each channel, zoom and IDCT change, and a Photoshop file's; the width with the
+  mouse on a pixel, on one not decoded, and with the widest values.
+
+On the previous commit 28 of them fail. 23 deliberate breaks each fail their own cases.
+Four first got past them: a label given too little room cuts its text instead of
+widening the window, and a file not waiting for the notice showed a second one. The
+cases now check both.
+- **The notice:** 13 breaks (when, the text, what is behind it, turning it off, saving,
+  waiting).
+- **The title:** 6 (each part, and following the option rather than the image).
+- **The width:** 4 (none reserved, or too little for each indicator).
+
+**17 older cases changed for the wider window.** The 9 MCU grid scrolling cases expected
+a 400-point window, and 3 of them could no longer scroll sideways. 8 red line cases
+still passed, but had less room to scroll sideways, or none. Both groups now give the
+window its size and use an image twice as large, and the red line's also check where
+they scrolled to. With the dots counted from the area painted (the bug they are for), the
+same 11 of the 17 fail as before.
+
+**Correction: the app's settings file.** macOS keeps the settings in
+`com.impulseadventure.www.JPEGsnoopQt.plist`, as `main.cpp` sets the organisation domain
+`www.impulseadventure.com`. It isn't the bundle ID's, as M5 and the project file's
+comment said. Earlier checks here that the real settings were unchanged watched the bundle
+ID's file, so they showed nothing; and that `CFFIXED_USER_HOME` doesn't move the settings
+was concluded with that name too (tried again since with a right name, it doesn't). The driver doesn't use either file: it
+has an organisation and INI files of its own.
+
+**Still open:**
+- **The settings' name** differed from the bundle ID (above): fixed in the next section.
+- **When Windows showed its other notices and messages** hasn't been compared.
+
+### One settings file, named as the bundle ID
+
+The app and macOS each wrote a file of their own: the app's 21 settings in
+`com.impulseadventure.www.JPEGsnoopQt.plist` (its domain had a "www.", from the first Qt
+port), and macOS's 2 values for the Open panel in the bundle ID's,
+`com.impulseadventure.JPEGsnoopQt.plist`. Now:
+- **The domain is `impulseadventure.com`,** so both use the bundle ID's file. The names
+  are in `snoop.h` (`APP_ORG_DOMAIN`, `APP_NAME`).
+- **The old name isn't read.** There are no published builds that used it, so there is
+  no code to move settings over: a Mac that ran an older build asks for the license
+  again and starts with the default options. (On this Mac they were copied once by such
+  code, checked, and the old ones deleted; the code was then removed, before any commit.)
+- **Unchanged:** the user database's folder (named by the organisation, not its domain),
+  and the settings' place on other systems.
+
+**Tests:** 1 new case, `SM_name` (1,269 in all): the settings' name against the built
+app's bundle ID, and that app's own domain. It fails on the previous commit, and with
+"www." back in either `main()` or `snoop.h`.
+
+**Checks,** for this section and the two before it:
+- **The app and the driver build** with no new warnings, compared with the previous
+  commit's whole builds.
+- **cppcheck 2.22** finds nothing new in the changed files, and ruff nothing new in the
+  generator.
+- **The reserved width** was laid out with macOS's style and fonts, off screen: 494
+  points, nothing cut.
+- **In the packaged app's window on macOS,** the user saw that the indicators, the title
+  and the window's width look right.
+
+**Not checked:** the notice in the app's own window on macOS (it is turned off in the
+settings there).
+
+### The zoom menu: Zoom to Fit Window, and up to 6400%
+
+View > Image Zoom had Windows' nine fixed zooms, up to 800%, and started at 12.5%. Now:
+- **Zoom to Fit Window (Cmd+0) is the default.** It shows all of the image in the middle,
+  as large as fits with no scroll bars, shrunk or enlarged (up to 6400%), and follows
+  the window, the next file, Reprocess and New until another zoom is chosen. The title
+  says what it comes to: "Image (RGB, DC+AC) @ Fit (37%)". The zoom isn't saved, as
+  before.
+- **1600%, 3200% and 6400%** are added. 12800% would still be drawn right for the widest
+  image decoded (65536 pixels); at 25600% Qt's widget size limit cuts it off at one
+  screen pixel a point.
+- **Zoom In and Out** go to the next zoom from what is shown, which can be between two
+  when fitted. Their shortcuts and Cmd+0 work in the image window too.
+
+**Found and fixed:**
+- **The check mark didn't follow Zoom In and Out** (the Qt port's: Windows' did).
+- **Zooming moved the view.** The scroll position stayed, so from 400% to 800% the middle
+  of a 6000x4000 image went from 2999,1999 to 1499,999. The middle now stays. (Qt shows
+  scroll bars later, by a queued call, which is done first, or the middle moved by half a
+  bar's width.)
+
+**For uneven zooms,** which only fitting gives:
+- **Enlarged,** the image is drawn from a copy at its size on screen, each screen pixel
+  the colour of the image pixel under its centre. QPainter's own enlarging put edges up
+  to a screen pixel from the MCU grid, such as 4 of 31 lines at 137%.
+- **The red line** is on the padding's first screen pixel, and there is none without
+  padding, however the size rounds.
+- **The size** is whole screen pixels: rounded up, one image in ten was a point too big.
+- **While the window is resized** a reduced image is reduced quickly, then smoothly 150
+  ms after that stops (smoothly takes 70 to 100 ms for the largest images).
+
+**Changes from Windows:** the default (its was 12.5%), fitting, the three zooms added,
+and the middle staying.
+
+**Tests:** 75 new `ZM` cases (1,344 in all), and the 7 title cases that named 12.5% now
+expect Fit.
+- **The driver:** `--image-window` gets steps for the zoom, the window's size, scrolling
+  and the shortcuts, a `view` report, and `sweep`: Fit at 24 window sizes, each checked
+  for scroll bars and, pixel by pixel, whole and painted in part.
+- **The cases:** the menu; Fit shrinking, enlarging, at its limit and following the
+  window, files, Reprocess and New; each zoom; stepping and the check mark; the
+  shortcuts in both windows; the middle; and Retina and 1.5x screens.
+
+On the previous tree 59 of them fail. 27 deliberate breaks each fail their own cases. Of
+two more, which changed nothing, the code they broke was removed: Qt lays the window out
+as it shows, and needs no scroll bar policy to keep a fitted image free of them. Three
+got past the cases at first, which now use sizes that aren't powers of two, detailed
+images and parts painted by themselves.
+
+**Checks:**
+- **All 1,344 pass.** The 75 `ZM` cases also pass with ASan/UBSan, as the enlarged copy
+  is new pixel code; the other groups weren't rerun with it, or with the printers
+  hidden, which this doesn't touch.
+- **cppcheck 2.22** finds nothing new in the changed files.
+- **With macOS's platform, style and scroll bars** at Retina density, laid out off
+  screen: Fit through resizes, stepping and the middle, up to 6400%.
+- **Not checked:** the menu, Cmd+0 and a live resize in the app's own window.
+
+### Why an image isn't shown
+
+Reported with a progressive JPEG, which didn't display. That is a limit of the decoder,
+not a fault: it decodes only baseline and extended sequential scans (SOF0 and SOF1), as
+on Windows. But it was hard to tell. Each scan had "NOTE: Scan parsing doesn't support
+this SOF mode", the status bar said "Done", and the image window, if open, was empty
+under the last image's title. A height of 0, or no frame, had no note at all. Now:
+- **The report ends with "*** Image Not Shown ***"** and the reason: progressive,
+  lossless, hierarchical or arithmetic-coded, CMYK, another number of components, an
+  invalid frame header, a size of 0, no frame, scan or tables, too large, no JPEG at the
+  offset, a Photoshop image that can't be drawn, or Decode Image off. For a progressive
+  JPEG it adds that the file needn't be damaged. Logs have it too.
+- **The report is scrolled to it,** once it is laid out (a long one stopped short).
+- **The status bar says "Done. Image not shown: progressive JPEG",** and so on.
+- **The image window's title says the same,** rather than keeping the last image's.
+
+**Unchanged from Windows:** what is decoded, and the notes under each scan.
+
+**Tests:** 47 new `NS` cases (1,391 in all), from made files: each reason in the report
+and the status bar, none of it with an image (a cut-short scan too), the title, the
+scrolling, logs, and Extract All. On the previous build 40 of them fail. 19 deliberate
+breaks each fail their own cases; one more showed that keeping the reason out of the
+status bar during Extract All did nothing (the file is analyzed again after), and that
+was removed.
+
+### The file's dates and hashes
+
+Asked for: after Filename and Filesize, a report's intro now has Created and Modified,
+and SHA-512, SHA-256, SHA-1, MD5 and CRC32 (`filefacts.cpp`). Batch and command-line logs
+have them too.
+- **The times** are the file system's, in UTC as "2026-11-06T09:54:46.123Z", cut short to
+  the millisecond. Where the disk keeps no created time it says "not available".
+- **The hashes** are lower case, as the standard tools print them, and of the file on the
+  disk: a File Overlay doesn't change them. They are read through the handle that is
+  analyzed, all five at once, at MD5's speed: 1 GB in 2.6 seconds on an M2. The status
+  bar gives the percent meanwhile.
+- **They are kept while the file is the same** (its identity, size, modified and change
+  times), so Reprocess, Image Search and Extract All don't read a large video again.
+  Not if it changed within 3 seconds of being hashed, which its times might not show.
+- **No hash, and why, in each line** when the file changed while it was read, couldn't
+  all be read, or is 4 GiB or larger (as on Windows it isn't analyzed, and at some 2.5
+  seconds a GiB a large one would take minutes): an option now, see the next section.
+
+**Tests:** 56 new `FF` cases (1,447 in all): times at the ends of seconds and days, before
+1970 and not kept; published check values; hashes at each tail length and around the
+thread and chunk sizes, against Python's; logs; and files changed before and while they
+are read. 24 deliberate breaks each fail their own cases. A 1 GB file's hashes also match
+`shasum`, `md5`, and zlib's and gzip's CRC32. Five Find cases name the line a match is
+on, which is now 7 further down.
+
+**Checks,** for this section and "Why an image isn't shown":
+- **All 1,447 pass:** a plain run of all of them, in which those five failed, then the
+  Find and `FF` groups again with the five moved (no app code changed between).
+- **The `FF` and `NS` groups** also pass with ASan/UBSan. The other groups weren't rerun
+  with it, or with the printers hidden, which neither change touches.
+- **cppcheck 2.22** finds nothing new in the changed files.
+- **Not checked:** the intro and the status bar's percent in the app's own window.
+
+### Options > Skip Hashes on 4 GiB or Larger Files
+
+Asked for, on by default. It is in Options after Relaxed Parsing and is saved
+(`General\SkipLargeHashes`); settings saved before it existed have it on.
+- **On,** a file of 4 GiB (2^32 bytes) or larger gets its dates, and "not calculated: the
+  file is 4 GiB or larger (see Options)" for each hash.
+- **Off,** it is hashed. A dialog counts the percent and has Cancel (also its close, and
+  quitting the app), after which each line says "not calculated: canceled"; a file sent
+  from Finder waits meanwhile. In a batch, the batch's progress counts it, and its
+  Cancel stops the hashes too.
+- **Either way** it isn't analyzed: that limit is Windows' (32-bit file positions).
+- **The command line** goes by the saved setting, and has no Cancel.
+- **A change** shows in the open file's report at the next Reprocess (at once with
+  auto-reprocessing on).
+
+**Tests:** 37 new `SF` cases (1,484 in all): the menu and its check mark, saving, the
+boundary (a byte under 4 GiB, at it, 5 GiB), all of 4 GiB of zeros against `md5`'s and
+zlib's results, the dialog and each way out of it, and batches and logs. The large
+files are sparse. 19 deliberate breaks each fail the cases aimed at them.
+
+**Checks:**
+- **The groups it can affect pass** (280 cases: `SF`, `FF`, `RM`, the settings, batches
+  and the command line's files, batches and options). The whole suite wasn't rerun.
+- **35 of the `SF` cases pass with ASan/UBSan:** all but the two that read all 4 GiB.
+- **cppcheck 2.22** finds nothing new in the files this changes.
+- **Not checked:** the dialog and the menu item in the app's own window, and a file of
+  4 GiB or more that isn't sparse.
 
 ## How this was reviewed
 

@@ -16,6 +16,7 @@ import os
 import random
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 from PIL import Image
@@ -1609,11 +1610,11 @@ find_case("FN_next_off_until_search", "find,what:Precision",
 # The first search goes on from the top when nothing follows the caret (at the
 # report's end after loading), without a message
 find_case("FN_first_search_wraps", "find,what:Precision,next",
-          'harness: find next: find=1 findnext=1 dialog=active .* sel=L25\\+9 "Precision" match=1/3 ',
+          'harness: find next: find=1 findnext=1 dialog=active .* sel=L32\\+9 "Precision" match=1/3 ',
           forbid=FIND_MSG)
 find_case("FN_return_finds", "find,what:Precision,return", 'harness: find return: .* match=1/3 ')
 find_case("FN_next_goes_on", "line:1,find,what:Precision,next,next,next",
-          'harness: find next: .* sel=L57\\+9 "Precision" match=3/3 ', forbid=FIND_MSG)
+          'harness: find next: .* sel=L64\\+9 "Precision" match=3/3 ', forbid=FIND_MSG)
 # After the last match the search stops once, with a beep and a message, and
 # the next one goes on from the top (Windows only beeps)
 find_case("FN_end_stops", "line:1,find,what:Precision,next,next,next,next",
@@ -1630,15 +1631,15 @@ find_case("FN_up_then_bottom", "line:end,find,what:Precision,up,next,next,next,n
           'harness: find next: .* match=3/3 dialog-at=[a-z]+ status=""$')
 find_case("FN_not_found", "find,what:nosuchtext,next",
           'harness: find next: .* sel=none match=0/0 dialog-at=- status="Cannot find "nosuchtext""$')
-find_case("FN_ignores_case", "find,what:precision,next", 'harness: find next: .* sel=L25\\+9 "Precision" match=1/3 ')
+find_case("FN_ignores_case", "find,what:precision,next", 'harness: find next: .* sel=L32\\+9 "Precision" match=1/3 ')
 find_case("FN_match_case", "find,what:precision,case,next", 'harness: find next: .* status="Cannot find "precision""$')
-find_case("FN_part_of_word", "find,what:SOF,next", 'harness: find next: .* sel=L54\\+3 "SOF" match=1/4 ')
+find_case("FN_part_of_word", "find,what:SOF,next", 'harness: find next: .* sel=L61\\+3 "SOF" match=1/4 ')
 find_case("FN_whole_word", "find,what:SOF,word,next", 'harness: find next: .* status="Cannot find "SOF""$')
 # A search starts after the selection's start, or at the caret
 find_case("FN_from_selection", "select:Precision,find,next", 'harness: find next: .* match=2/3 ', forbid=FIND_MSG)
 find_case("FN_from_caret", "line:40,find,what:Precision,next", 'harness: find next: .* match=2/3 ', forbid=FIND_MSG)
 # With one match, selected, a new search finds it again rather than nothing
-find_case("FN_only_match_again", "select:SOF0,find,next", 'harness: find next: .* sel=L54\\+4 "SOF0" match=1/1 ',
+find_case("FN_only_match_again", "select:SOF0,find,next", 'harness: find next: .* sel=L61\\+4 "SOF0" match=1/1 ',
           forbid=FIND_MSG)
 # Edit > Find Next (and Cmd+G) repeats the last search, from the selection
 find_case("FN_menu_find_next", "find,what:Precision,next,cancel,activate,findnext",
@@ -3240,7 +3241,7 @@ write("mg_white_422.jpg", jpeg(WHITE, quality=95, subsampling=1))
 write("mg_white_gray.jpg", jpeg(WHITE.convert("L"), quality=95))
 write("mg_white_odd.jpg", jpeg(Image.new("RGB", (40, 20), (255, 255, 255)), quality=95, subsampling=2))
 # Larger than the image window at 100%, to scroll
-write("mg_white_big.jpg", jpeg(Image.new("RGB", (1024, 1024), (255, 255, 255)), quality=95, subsampling=2))
+write("mg_white_big.jpg", jpeg(Image.new("RGB", (2048, 2048), (255, 255, 255)), quality=95, subsampling=2))
 
 
 def mcu_grid_case(cid, names, steps, expect, extra="", forbid="-"):
@@ -3327,17 +3328,21 @@ def mg_buffer(scroll, window, dots="[1-9][0-9]*"):
             " changed by painting it all=0$")
 
 
-mcu_grid_case("MG_scroll", MG_BIG, MG_ON + ",scroll=7;5,buffer", mg_buffer("7,5", "400x400"))
-mcu_grid_case("MG_scroll_again", MG_BIG, MG_ON + ",scroll=7;5,scroll=40;33,buffer", mg_buffer("40,33", "400x400"))
-mcu_grid_case("MG_scroll_back", MG_BIG, MG_ON + ",scroll=40;33,scroll=12;30,buffer", mg_buffer("12,30", "400x400"))
-mcu_grid_case("MG_scroll_150", MG_BIG, MG_ON + ",zoom=150,scroll=101;77,buffer", mg_buffer("101,77", "400x400"))
-mcu_grid_case("MG_scroll_50", MG_BIG, MG_ON + ",zoom=50,scroll=13;9,buffer", mg_buffer("13,9", "400x400"))
-mcu_grid_case("MG_scroll_retina", MG_BIG, MG_ON + ",scroll=1;1,scroll=2;2,buffer", mg_buffer("2,2", "400x400"),
+# The window is given its size first, wider than the indicators need and
+# narrower than the image at 50%, and at 100% on a Retina screen
+MG_SIZED = MG_ON + ",size=800;400"
+mcu_grid_case("MG_scroll", MG_BIG, MG_SIZED + ",scroll=7;5,buffer", mg_buffer("7,5", "800x400"))
+mcu_grid_case("MG_scroll_again", MG_BIG, MG_SIZED + ",scroll=7;5,scroll=40;33,buffer", mg_buffer("40,33", "800x400"))
+mcu_grid_case("MG_scroll_back", MG_BIG, MG_SIZED + ",scroll=40;33,scroll=12;30,buffer", mg_buffer("12,30", "800x400"))
+mcu_grid_case("MG_scroll_150", MG_BIG, MG_SIZED + ",zoom=150,scroll=101;77,buffer", mg_buffer("101,77", "800x400"))
+mcu_grid_case("MG_scroll_50", MG_BIG, MG_SIZED + ",zoom=50,scroll=13;9,buffer", mg_buffer("13,9", "800x400"))
+mcu_grid_case("MG_scroll_retina", MG_BIG, MG_SIZED + ",scroll=1;1,scroll=2;2,buffer", mg_buffer("2,2", "800x400"),
               extra="--scale 2")
-mcu_grid_case("MG_scroll_retina_more", MG_BIG, MG_ON + ",scroll=2;2,scroll=7;5,buffer", mg_buffer("7,5", "400x400"),
+mcu_grid_case("MG_scroll_retina_more", MG_BIG, MG_SIZED + ",scroll=2;2,scroll=7;5,buffer", mg_buffer("7,5", "800x400"),
               extra="--scale 2")
-mcu_grid_case("MG_resize", MG_BIG, MG_ON + ",scroll=40;33,size=600;600,buffer", mg_buffer("40,33", "600x600"))
-mcu_grid_case("MG_scroll_grid_off", MG_BIG, "zoom=100,scroll=7;5,buffer", mg_buffer("7,5", "400x400", dots="0"))
+mcu_grid_case("MG_resize", MG_BIG, MG_SIZED + ",scroll=40;33,size=900;600,buffer", mg_buffer("40,33", "900x600"))
+mcu_grid_case("MG_scroll_grid_off", MG_BIG, "zoom=100,size=800;400,scroll=7;5,buffer",
+              mg_buffer("7,5", "800x400", dots="0"))
 
 
 # --- The red line where the image ends inside its MCUs --------------------------
@@ -3424,24 +3429,31 @@ end_case("IE_after_psd", IE_FILES, "zoom=100", ie_line("file 4", 1, "64x48", (61
 # Scrolled into view (only what comes into view is painted) or shown by
 # making the window larger: as painting it all again draws it
 IE_BIG = ("ie_big.jpg",)
-IE_BUFFER = "harness: image-end buffer: red pixels=[1-9][0-9]*$"
 IE_REPAINTED = "changed by painting it all=([1-9]|-)"
 end_case("IE_big", IE_BIG, "zoom=100", ie_line("file 1", 1, "1024x1024", (1021, 0, 1018), (1019, 0, 1020),
                                                red=681, white=1359))
-end_case("IE_scroll", IE_BIG, "zoom=100,scroll=640;640,scroll=9999;9999,buffer", IE_BUFFER, forbid=IE_REPAINTED)
-end_case("IE_scroll_150", IE_BIG, "zoom=150,scroll=1100;1100,scroll=9999;9999,buffer", IE_BUFFER,
-         forbid=IE_REPAINTED)
-end_case("IE_scroll_50", IE_BIG, "zoom=50,scroll=100;100,scroll=9999;9999,buffer", IE_BUFFER, forbid=IE_REPAINTED)
-end_case("IE_scroll_grid", IE_BIG, "zoom=100,toggle,scroll=640;640,scroll=9999;9999,buffer", IE_BUFFER,
-         forbid=IE_REPAINTED)
-end_case("IE_resize", IE_BIG, "zoom=100,scroll=9999;9999,size=600;600,buffer", IE_BUFFER, forbid=IE_REPAINTED)
+# In a window given its size, wider than the indicators need, an image twice as
+# large leaves room to scroll both ways at every zoom
+write("ie_scroll.jpg", jpeg(Image.new("RGB", (2045, 2043), BLACK), quality=95, subsampling=2))
+IE_SCROLL = ("ie_scroll.jpg",)
+
+
+def end_scroll_case(cid, steps, scroll):
+    end_case(cid, IE_SCROLL, steps + ",buffer",
+             rx(f"harness: image-end buffer: scroll={scroll} red pixels=") + "[1-9][0-9]*$", forbid=IE_REPAINTED)
+
+
+IE_100, IE_150, IE_50 = "zoom=100,size=800;400", "zoom=150,size=800;400", "zoom=50,size=800;400"
+end_scroll_case("IE_scroll", IE_100 + ",scroll=1264;1664,scroll=9999;9999", "1268,1700")
+end_scroll_case("IE_scroll_150", IE_150 + ",scroll=2236;2636,scroll=9999;9999", "2292,2724")
+end_scroll_case("IE_scroll_50", IE_50 + ",scroll=212;612,scroll=9999;9999", "244,676")
+end_scroll_case("IE_scroll_grid", IE_100 + ",toggle,scroll=1264;1664,scroll=9999;9999", "1268,1700")
+end_scroll_case("IE_resize", IE_100 + ",scroll=9999;9999,size=1000;600", "1068,1500")
 # Scrolled back a little with it in view: the dots copied must fall where the
 # ones painted next to them do
-end_case("IE_scroll_back", IE_BIG, "zoom=100,scroll=9999;9999,scroll=642;653,buffer", IE_BUFFER, forbid=IE_REPAINTED)
-end_case("IE_scroll_back_grid", IE_BIG, "zoom=100,toggle,scroll=9999;9999,scroll=642;653,buffer", IE_BUFFER,
-         forbid=IE_REPAINTED)
-end_case("IE_scroll_back_150", IE_BIG, "zoom=150,scroll=9999;9999,scroll=1154;1186,buffer", IE_BUFFER,
-         forbid=IE_REPAINTED)
+end_scroll_case("IE_scroll_back", IE_100 + ",scroll=9999;9999,scroll=1266;1677", "1266,1677")
+end_scroll_case("IE_scroll_back_grid", IE_100 + ",toggle,scroll=9999;9999,scroll=1266;1677", "1266,1677")
+end_scroll_case("IE_scroll_back_150", IE_150 + ",scroll=9999;9999,scroll=2290;2722", "2290,2722")
 
 
 # --- View > Toolbar and Status Bar ----------------------------------------------
@@ -3947,7 +3959,7 @@ removed_case("RM_view_menu", "gui", ["ok_444.jpg"], "--menus",
              rx("harness: menu &View: Image Chan|Image Zoom|Overlays|-|&Toolbar|&Status Bar") + "$")
 removed_case("RM_options_menu", "gui", ["ok_444.jpg"], "--menus",
              rx("harness: menu &Options: DHT Expand|Hide Unknown EXIF Tags|Maker Notes|Signature Search|Relaxed Parsing|"
-                "-|Scan Segment|-|Configuration...") + "$")
+                "Skip Hashes on 4 GiB or Larger Files|-|Scan Segment|-|Configuration...") + "$")
 removed_case("RM_no_items", "gui", ["ok_444.jpg"], "--menus", "^harness: menu &Help: ",
              forbid="^harness: menu .*(Undo|Adjust|Check for Updates)")
 removed_case("RM_config_dialog", "settings", "-", "-",
@@ -4334,6 +4346,522 @@ open_case("OD_cancel", "cancel", "^" + rx("harness: open cancel: report file=ok_
 open_case("OD_avi", "e_mjpeg.avi", "^" + rx("harness: open e_mjpeg.avi: report file=e_mjpeg.avi avi=1") + "$")
 open_case("OD_avi_before_file", "e_mjpeg.avi",
           "^" + rx("harness: open e_mjpeg.avi: report file=e_mjpeg.avi avi=1") + "$", extra="--open-at 0")
+
+
+# --- The image window's indicators with no pixel under the mouse --------------------
+# MCU N/A, File N/A and YCC N/A, where Windows' panes were blank (and here, empty
+# frames that looked like buttons): at the start, off the image, off the preview,
+# over a Photoshop file's image, and once the image they were for has gone.
+def pos_case(cid, extra, expect, names=("lm_444.jpg",)):
+    case(cid, "PI", "gui", list(names), extra, timeout=30, expect=expect)
+
+
+def pos_hover(cid, points, expect, names=("lm_444.jpg",)):
+    pos_case(cid, f"--lookup close --hover {points}", expect, names)
+
+
+PI_NONE = rx('"MCU N/A" "File N/A" "YCC N/A"') + "$"
+PI_BAR = ("^harness: bars widgets: .* image=" +
+          rx('mcuLabel="MCU N/A"|fileLabel="File N/A"|yccLabel="YCC N/A"') + "$")
+pos_case("PI_start", "--bars widgets --bars-at 0", PI_BAR)
+pos_case("PI_untouched", "--bars widgets", PI_BAR)
+for pi_side, pi_point in (("left", "-1,10"), ("above", "13,-1"), ("right", "999,10"), ("below", "13,999")):
+    pos_hover(f"PI_off_{pi_side}", f"13,10/{pi_point}", f"^harness: hover {pi_point}: " + PI_NONE)
+pos_hover("PI_leave", "13,10/leave", "^harness: hover leave: " + PI_NONE)
+pos_hover("PI_back_on", "leave/13,10",
+          '^harness: hover 13,10: "MCU \\[0001,0001\\]" "File 0x[0-9a-f]{8}:[0-7]" "YCC DC=\\[[-0-9,]+\\]"$')
+pos_hover("PI_psd", "3,3", "^harness: hover 3,3: " + PI_NONE, names=("psd_rgb_raw.psd",))
+# The image gone: they kept its values until the mouse next moved
+PI_THEN = "--lookup close --hover 13,10 --bars widgets"
+pos_case("PI_next_file", PI_THEN + " --bars-at 2", PI_BAR, names=("lm_444.jpg", "ok_420.jpg"))
+pos_case("PI_next_no_image", PI_THEN + " --bars-at 2", PI_BAR, names=("lm_444.jpg", "ok_progressive.jpg"))
+pos_case("PI_new", PI_THEN + " --new button", PI_BAR)
+
+
+# --- The low-resolution notice when a file opens ------------------------------------
+# Windows opened a file through Reprocess, so the notice showed then, over an empty
+# window, until turned off (its checkbox is ticked at first). gui --note answers it.
+def note_case(cid, answer, expect, names=("ok_420.jpg",), extra=""):
+    case(cid, "RN", "gui", list(names), f"--note {answer} {extra}".strip(), timeout=30, expect=expect)
+
+
+def note_end(shown, saved):
+    return f"^harness: notes shown={shown} saved={saved}$"
+
+
+RN_TWO = ("ok_420.jpg", "ok_444.jpg")
+RN_EMPTY = "^harness: note {}: checked=1 report=empty preview=empty text="
+note_case("RN_open", "ok", RN_EMPTY.format(1) + rx('"Currently only decoding low-res view (DC-only). '))
+note_case("RN_full", "ok", RN_EMPTY.format(1) + rx('"Currently decoding high-res view (AC+DC), '),
+          extra="--full-idct")
+note_case("RN_then_analyzed", "ok", "^harness: file=ok_420\\.jpg scan=1$")
+note_case("RN_once", "ok", note_end(1, 0), RN_TWO)
+note_case("RN_escape", "escape", note_end(1, 0), RN_TWO)
+note_case("RN_kept", "keep", note_end(2, 1), RN_TWO)
+note_case("RN_kept_empty_behind", "keep", RN_EMPTY.format(2), RN_TWO)
+note_case("RN_saved_before", "ok", note_end(1, 0), extra="--settings-saved")
+note_case("RN_saved_before_reprocess", "ok", note_end(1, 0), extra="--settings-saved --image-window reprocess")
+note_case("RN_reprocess", "keep", "^harness: note 2: checked=1 report=shown preview=shown ",
+          extra="--image-window reprocess")
+note_case("RN_file_open", "keep", note_end(2, 1), extra="--open e_mjpeg.avi")
+note_case("RN_recent", "keep", note_end(2, 1), extra="--recent choose=1")
+note_case("RN_argument", "keep", note_end(2, 1), extra="--outside args=ok_444.jpg --outside-at 0")
+note_case("RN_drop", "keep", note_end(2, 1), extra="--outside drop=ok_444.jpg")
+note_case("RN_finder_waits", "finder=ok_444.jpg", "^harness: note waited: report=empty preview=empty$")
+note_case("RN_finder_after", "finder=ok_444.jpg", "^harness: note finder: report file=ok_444\\.jpg$")
+note_case("RN_finder_one", "finder=ok_444.jpg", note_end(1, 0))
+note_case("RN_no_decode_image", "ok", note_end(0, 1), extra="--no-decode-image")
+note_case("RN_missing_file", "ok", note_end(0, 1), names=("nosuch.jpg",))
+note_case("RN_empty_file", "ok", note_end(0, 1), names=("f4_empty.jpg",))
+
+
+# --- The image window's title and width ---------------------------------------------
+# "Image (RGB, DC)", as on Windows: how the image shown was decoded, which changing
+# the option doesn't change until the file is reprocessed. The window is as wide from
+# the start as the indicators' widest values need.
+def title_case(cid, steps, step, title, names=("ok_420.jpg",), extra=""):
+    expect = rx(f'harness: image window {step}: title="{title}" ').replace("FITTED", "Fit \\([0-9]+%\\)")
+    case(cid, "IT", "gui", list(names), f"--image-window {steps} {extra}".strip(), timeout=30, expect="^" + expect)
+
+
+title_case("IT_dc", "show", "file 1", "Image (RGB, DC) @ FITTED")
+title_case("IT_full_saved", "show", "file 1", "Image (RGB, DC+AC) @ FITTED", extra="--full-idct")
+title_case("IT_channel", "chan=YCC", "chan=YCC", "Image (YCC, DC) @ FITTED")
+title_case("IT_zoom", "zoom=100", "zoom=100", "Image (RGB, DC) @ 100%")
+title_case("IT_option_only", "idct=full,zoom=50", "zoom=50", "Image (RGB, DC) @ 50%")
+title_case("IT_reprocessed", "idct=full,reprocess", "reprocess", "Image (RGB, DC+AC) @ FITTED")
+title_case("IT_back", "idct=none,zoom=25", "zoom=25", "Image (RGB, DC+AC) @ 25%", extra="--full-idct")
+title_case("IT_back_reprocessed", "idct=none,reprocess", "reprocess", "Image (RGB, DC) @ FITTED", extra="--full-idct")
+title_case("IT_psd", "show", "file 2", "Image @ FITTED", names=("ok_420.jpg", "psd_rgb_raw.psd"))
+title_case("IT_next_file", "show", "file 2", "Image (RGB, DC) @ FITTED", names=("ok_420.jpg", "ok_444.jpg"))
+
+
+def width_case(cid, steps, step, names=("lm_444.jpg",)):
+    case(cid, "IW", "gui", list(names), f"--image-window {steps}", timeout=30,
+         expect=f"^harness: image window {rx(step)}: .* widened=0 clipped=0 width=[0-9]+$")
+
+
+width_case("IW_hover", "hover=13:10", "hover=13:10")
+width_case("IW_not_decoded", "hover=27:13", "hover=27:13", names=("lm_trunc.jpg",))
+width_case("IW_widest", "widest", "widest")
+width_case("IW_start", "show", "show")
+
+
+# --- One settings file, named as the bundle ID --------------------------------------
+# The app's domain had a "www.", so its settings weren't under the bundle ID, where
+# macOS keeps the app's own. settings-name only reads the names.
+case("SM_name", "SM", "settings-name", "-",
+     expect="^" + rx("harness: settings name=com.impulseadventure.JPEGsnoopQt.plist "
+                     "bundle=com.impulseadventure.JPEGsnoopQt same=1 app-domain=1 app-www-domain=0") + "$")
+
+
+# --- The zoom menu: Zoom to Fit Window (the default), up to 6400% --------------------
+# gui --image-window's view, sweep and menu steps. Fitted, all of the image shows,
+# shrunk or enlarged, with no scroll bars, and follows the window; otherwise zooming
+# keeps the middle of the view. (ok_ files are small, mg_white_big.jpg 2048x2048.)
+zm_rand = random.Random(7)
+zm_small = Image.new("RGB", (256, 256))
+zm_small.putdata([(zm_rand.randrange(256), zm_rand.randrange(256), zm_rand.randrange(256))
+                  for _ in range(256 * 256)])
+write("zm_detail.jpg", jpeg(zm_small.resize((2048, 2048), Image.NEAREST), quality=90))
+write("zm_tiny.jpg", jpeg(Image.new("RGB", (8, 8), (200, 20, 20)), quality=95, subsampling=0))
+write("zm_wide.jpg", jpeg(Image.new("RGB", (12000, 64), (90, 120, 150)), quality=75))
+
+
+def zoom_case(cid, steps, expect, names=("mg_white_big.jpg",), extra=""):
+    case(cid, "ZM", "gui", list(names), f"--image-window {steps} {extra}".strip(), timeout=60, expect="^" + expect)
+
+
+ZM_VIEW = rx("harness: image view: checked=")
+ZM_FIT = ZM_VIEW + "Zoom to Fit Window .* inside=1 full=1 centred=1 bars=0,0 "
+ZM_OK = ("ok_420.jpg",)
+
+
+def zm_at(percent):
+    zoom = f"{percent / 100:g}"
+    return ZM_VIEW + rx(f"{percent:g}% zoom={zoom} ")
+
+
+zoom_case("ZM_menu", "menu",
+          rx("harness: image zoom menu: Zoom In[Ctrl++]|Zoom Out[Ctrl+-]|-|Zoom to Fit Window[Ctrl+0]|-|12.5%|25%|50%|"
+             "100%|150%|200%|300%|400%|800%|1600%|3200%|6400%") + "$")
+# The default, shrinking and enlarging
+zoom_case("ZM_default_shrinks", "view", ZM_FIT + ".* smooth=1$")
+zoom_case("ZM_default_enlarges", "view", ZM_FIT + ".* smooth=-$", names=ZM_OK)
+zoom_case("ZM_default_psd", "view", ZM_FIT, names=("psd_rgb_raw.psd",))
+zoom_case("ZM_preview_shrinks", "show", "harness: preview zoom=0\\.[0-9]+ .*: ok$", extra="--check-preview")
+zoom_case("ZM_preview_enlarges", "show", "harness: preview zoom=[0-9.]+ .*: ok$", names=ZM_OK, extra="--check-preview")
+zoom_case("ZM_preview_retina", "show", "harness: preview zoom=[0-9.]+ scale=2 .*: ok$", names=ZM_OK,
+          extra="--check-preview --scale 2")
+zoom_case("ZM_fit_capped", "size=1000:900,view", ZM_VIEW + "Zoom to Fit Window zoom=64 inside=1 full=0 centred=1 ",
+          names=("zm_tiny.jpg",))
+zoom_case("ZM_title_capped", "size=1000:900,show",
+          rx('harness: image window show: title="Image (RGB, DC) @ Fit (6400%)" '), names=("zm_tiny.jpg",))
+zoom_case("ZM_title_small", "show", 'harness: image window file 1: title="[^"]*@ Fit \\([0-9]\\.[0-9]%\\)" ',
+          names=("zm_wide.jpg",))
+# It follows the window, the status bar, the next file, Reprocess and New
+zoom_case("ZM_resize_wide", "size=1200:350,view", ZM_FIT)
+zoom_case("ZM_resize_tall", "size=700:800,view", ZM_FIT)
+zoom_case("ZM_resize_enlarged", "size=1000:700,view", ZM_FIT, names=ZM_OK)
+zoom_case("ZM_resize_retina", "size=700:800,view", ZM_FIT, extra="--scale 2")
+zoom_case("ZM_resize_title", "size=1600:1300,show",
+          'harness: image window show: title="[^"]*@ Fit \\([5-9][0-9]%\\)" ')
+zoom_case("ZM_status_bar", "view", ZM_FIT, extra="--bars statusbar")
+zoom_case("ZM_resize_quick", "size=1100:800,view", ZM_FIT + ".* smooth=0$", names=("zm_detail.jpg",))
+zoom_case("ZM_resize_then_smooth", "size=1100:800,wait,view", ZM_FIT + ".* smooth=1$", names=("zm_detail.jpg",))
+zoom_case("ZM_reprocess", "reprocess,view", ZM_FIT)
+zoom_case("ZM_next_file", "show", 'harness: image window file 2: title="[^"]*@ Fit \\([0-9]{2}%\\)" ',
+          names=("ok_420.jpg", "mg_white_big.jpg"))
+zoom_case("ZM_next_file_preset", "zoom=100", 'harness: image window file 2: title="[^"]*@ 100%" ',
+          names=("ok_420.jpg", "mg_white_big.jpg"))
+zoom_case("ZM_after_new", "new", 'harness: image window file 2: title="[^"]*@ Fit \\([0-9]{2}%\\)" ',
+          names=("ok_420.jpg", "mg_white_big.jpg"))
+zoom_case("ZM_back_to_fit", "zoom=800,scroll=mid,zoom=fit,view", ZM_FIT)
+# Each size fits, and enlarged, each screen pixel is right, the grid and the line too
+for zm_id, zm_name, zm_mcu, zm_extra in (("420", "mg_white_420.jpg", 16, ""), ("444", "mg_white_444.jpg", 8, ""),
+                                         ("padded", "ie_420.jpg", 16, ""), ("right", "ie_right.jpg", 8, ""),
+                                         ("bottom", "ie_bottom.jpg", 8, ""), ("retina", "ie_420.jpg", 16, "--scale 2"),
+                                         ("uneven", "ie_444.jpg", 8, "--scale 1.5")):
+    zoom_case(f"ZM_sweep_{zm_id}", f"grid,sweep={zm_mcu}",
+              rx("harness: image sweep: sizes=24 misfit=0 bars-shown=0 enlarged=24 wrong=0") + "$", names=(zm_name,), extra=zm_extra)
+zoom_case("ZM_sweep_no_grid", "sweep=8", rx("harness: image sweep: sizes=24 misfit=0 bars-shown=0 enlarged=24 wrong=0") + "$",
+          names=("ie_full.jpg",))
+for zm_id, zm_extra in (("reduced", ""), ("reduced_retina", "--scale 2"), ("reduced_uneven", "--scale 1.5")):
+    zoom_case(f"ZM_sweep_{zm_id}", "sweep=16", rx("harness: image sweep: sizes=24 misfit=0 bars-shown=0 enlarged=0 wrong=0") + "$",
+              extra=zm_extra)
+# Sizes that aren't powers of two round; a detailed image shows a block or a smoothing amiss
+write("zm_rect.jpg", jpeg(Image.new("RGB", (1504, 992), BLACK), quality=90))
+write("zm_mid.jpg", jpeg(zm_small.crop((0, 0, 38, 26)).resize((304, 208), Image.NEAREST), quality=90, subsampling=0))
+zoom_case("ZM_default_smooth", "view", ZM_FIT + ".* smooth=1$", names=("zm_detail.jpg",))
+zoom_case("ZM_sweep_rect", "sweep=16", rx("harness: image sweep: sizes=24 misfit=0 bars-shown=0 enlarged=0 wrong=0") + "$",
+          names=("zm_rect.jpg",))
+zoom_case("ZM_sweep_mid", "grid,sweep=8", rx("harness: image sweep: sizes=24 misfit=0 bars-shown=0 enlarged=24 wrong=0")
+          + "$", names=("zm_mid.jpg",))
+zoom_case("ZM_sweep_after_zoom", "zoom=100,zoom=fit,sweep=8",
+          rx("harness: image sweep: sizes=24 misfit=0 bars-shown=0 enlarged=24 wrong=0") + "$", names=("zm_mid.jpg",))
+# Each zoom, and the new ones drawn right
+for zm_pct in (12.5, 25, 50, 100, 150, 200, 300, 400, 800, 1600, 3200, 6400):
+    zoom_case("ZM_zoom_" + f"{zm_pct:g}".replace(".5", ""), f"zoom={zm_pct:g},view", zm_at(zm_pct))
+for zm_pct, zm_scale in ((1600, 1), (3200, 2), (6400, 1), (6400, 2)):
+    zoom_case(f"ZM_preview_{zm_pct}_{zm_scale}", "show", f"harness: preview zoom={zm_pct // 100} .*: ok$",
+              extra=f"--zoom {zm_pct} --check-preview --scale {zm_scale}")
+zoom_case("ZM_far_end", "zoom=6400,scroll=999999:999999,view", zm_at(6400) + ".* middle=20[0-9][0-9],20[0-9][0-9] ")
+# Zoom In and Out: to the next from what is shown, and the check mark follows
+zoom_case("ZM_in_from_fit", "size=700:420,zoom=in,view", zm_at(25))
+zoom_case("ZM_out_from_fit", "size=700:420,zoom=out,view", zm_at(12.5))
+zoom_case("ZM_in_from_fit_enlarged", "size=700:400,zoom=in,view", zm_at(800), names=ZM_OK)
+zoom_case("ZM_out_from_fit_enlarged", "size=700:400,zoom=out,view", zm_at(400), names=ZM_OK)
+zoom_case("ZM_in_steps", "zoom=800,zoom=in,zoom=in,view", zm_at(3200))
+zoom_case("ZM_out_steps", "zoom=150,zoom=out,zoom=out,view", zm_at(50))
+zoom_case("ZM_in_top", "zoom=6400,zoom=in,view", zm_at(6400))
+zoom_case("ZM_out_bottom", "zoom=12.5,zoom=out,view", zm_at(12.5))
+zoom_case("ZM_out_below", "zoom=out,view", ZM_FIT, names=("zm_wide.jpg",))
+zoom_case("ZM_in_capped", "size=1000:900,zoom=in,view", ZM_VIEW + "Zoom to Fit Window zoom=64 ", names=("zm_tiny.jpg",))
+# Their shortcuts, in the main and the image window
+zoom_case("ZM_key_in", "size=700:420,key=in,view", zm_at(25))
+zoom_case("ZM_key_fit", "zoom=400,key=fit,view", ZM_FIT)
+zoom_case("ZM_key_image_in", "size=700:420,key-image=in,view", zm_at(25))
+zoom_case("ZM_key_image_out", "zoom=400,key-image=out,view", zm_at(300))
+zoom_case("ZM_key_image_fit", "zoom=400,key-image=fit,view", ZM_FIT)
+# The middle of the view stays there
+ZM_MID = " .* middle=102[345],102[345] "
+zoom_case("ZM_middle_from_fit", "size=900:600,zoom=100,view", ZM_VIEW + "100%" + ZM_MID)
+zoom_case("ZM_middle_bars_come", "size=900:600,zoom=12.5,zoom=50,view", ZM_VIEW + "50%" + ZM_MID)
+zoom_case("ZM_middle_top", "zoom=400,scroll=mid,zoom=6400,view", ZM_VIEW + "6400%" + ZM_MID)
+zoom_case("ZM_middle_retina", "zoom=100,zoom=800,view", ZM_VIEW + "800%" + ZM_MID, extra="--scale 2")
+zoom_case("ZM_middle_kept", "size=800:500,zoom=400,scroll=1010:3010,zoom=3200,zoom=200,zoom=400,view",
+          ZM_VIEW + "400% .* middle=3[45][0-9],8[01][0-9] ")
+
+
+# --- Why an image isn't shown ----------------------------------------------------------
+# Said at the end of the report, in the status bar and in the image window's title.
+# Windows had only a note under each scan, or nothing. All of these files are made.
+NS_HDR = "^" + rx("*** Image Not Shown ***") + "$"
+
+
+def ns_kind(cid, name, short, why, extra=""):
+    case(f"NS_{cid}", "NS", "gui", [name], ("--image-window report " + extra).strip(), timeout=30,
+         expect="^" + rx("harness: image report: at=") + "(end|all) "
+         + rx(f'status="Done. Image not shown: {short}" last="{why}"') + "$")
+
+
+ns_base = jpeg(Image.open(io.BytesIO(c420)), quality=85, subsampling=2)
+ns_sof = ns_base.index(b"\xff\xc0")
+
+
+def ns_patch(offset, value):
+    return ns_base[:ns_sof + offset] + value + ns_base[ns_sof + offset + len(value):]
+
+
+def ns_without(marker):
+    data = ns_base
+    while marker in data[:data.index(b"\xff\xda")]:
+        at = data.index(marker)
+        data = data[:at] + data[at + 2 + struct.unpack(">H", data[at + 2:at + 4])[0]:]
+    return data
+
+
+NS_ONLY = "only baseline and extended sequential JPEGs (SOF0 and SOF1)."
+NS_PROGRESSIVE = "The rest of this report still applies, but there's no image, MCU map or Detailed Decode."
+ns_kind("progressive", "ok_progressive.jpg", "progressive JPEG", NS_PROGRESSIVE)
+for ns_mode, ns_word in ((3, "lossless"), (5, "hierarchical"), (6, "hierarchical"), (7, "hierarchical"),
+                         (9, "arithmetic-coded"), (10, "arithmetic-coded progressive"),
+                         (11, "arithmetic-coded lossless"), (13, "hierarchical")):
+    ns_kind(f"sof{ns_mode}", write(f"ns_sof{ns_mode}.jpg", ns_patch(1, bytes([0xC0 + ns_mode]))), f"{ns_word} JPEG",
+            NS_ONLY)
+    ns_article = "an" if ns_word[0] in "aeiou" else "a"
+    case(f"NS_sof{ns_mode}_named", "NS", "decode", f"ns_sof{ns_mode}.jpg",
+         expect="^" + rx(f"  This is {ns_article} {ns_word} JPEG (SOF{ns_mode}), which JPEGsnoop can't decode. ")
+         + "It decodes$")
+case("NS_progressive_named", "NS", "decode", "ok_progressive.jpg",
+     expect="^" + rx("  This is a progressive JPEG (SOF2), which JPEGsnoop can't decode. It decodes") + "$")
+case("NS_progressive_fine", "NS", "decode", "ok_progressive.jpg",
+     expect="^" + rx("  That doesn't mean the file is damaged: other viewers show progressive JPEGs.") + "$")
+ns_kind("cmyk", "ok_cmyk.jpg", "CMYK JPEG", "This is a CMYK or YCCK JPEG (4 components), which JPEGsnoop can't decode.")
+ns_kind("components", write("ns_comps.jpg", ns_patch(9, b"\x02")), "2 color components",
+        "It has 2 color components. JPEGsnoop decodes only images with 1 or 3.")
+ns_kind("bad_frame", write("ns_badsof.jpg", ns_patch(11, b"\x00")), "invalid frame header",
+        "The frame header (SOF) isn't valid: the errors above say how.")
+ns_kind("no_height", write("ns_height0.jpg", ns_patch(5, b"\x00\x00")), "size of 0",
+        "Either it's damaged, or the height comes after the scan (DNL), which isn't supported.")
+ns_kind("too_large", write("ns_huge.jpg", ns_patch(5, b"\xff\xff\xff\xff")), "too large",
+        "At 65535 x 65535 it is too large to decode: the most is 268 million pixels.")
+ns_kind("no_dqt", write("ns_nodqt.jpg", ns_without(b"\xff\xdb")), "no quantization tables",
+        "It has no valid quantization tables (DQT), which are needed to decode it.")
+ns_kind("no_dht", write("ns_nodht.jpg", ns_without(b"\xff\xc4")), "no Huffman tables",
+        "It has no valid Huffman tables (DHT), which are needed to decode it.")
+ns_kind("no_sof", write("ns_nosof.jpg", ns_without(b"\xff\xc0")), "no frame header",
+        "The JPEG has no frame header (SOF) that JPEGsnoop knows, which gives an image's size and type.")
+ns_kind("soi_only", write("ns_soi.jpg", b"\xff\xd8\xff\xd9"), "no frame header",
+        "The JPEG has no frame header (SOF) that JPEGsnoop knows, which gives an image's size and type.")
+ns_kind("no_sos", write("ns_nosos.jpg", ns_base[:ns_base.index(b"\xff\xda")]), "no image data",
+        "No scan (SOS), which holds the image, was found: the file may be cut short or damaged.")
+ns_kind("no_jpeg", write("ns_text.jpg", b"This is not a JPEG at all.\n" * 20), "no JPEG found",
+        "For one inside another file, such as a video or RAW file, use [Tools->Image Search Fwd].")
+ns_kind("psd", "psd_gray16.psd", "Photoshop image that can't be drawn",
+        "Its Photoshop image can't be drawn: the Photoshop section above says why.")
+ns_kind("decode_off", "ok_420.jpg", "Decode Image is off",
+        "[Options->Scan Segment->Decode Image] is off. Turn it on, then use [File->Reprocess File].",
+        extra="--no-decode-image")
+ns_kind("decode_off_progressive", "ok_progressive.jpg", "progressive JPEG", NS_PROGRESSIVE, extra="--no-decode-image")
+# A long report is scrolled to it too
+write("ns_long.jpg", jpeg(Image.open(io.BytesIO(c420)).convert("CMYK"), progressive=True))
+ns_kind("long_report", "ns_long.jpg", "progressive JPEG", NS_PROGRESSIVE)
+# None of it with an image, a partly decoded one too
+write("ns_12bit.jpg", ns_patch(4, b"\x0c"))
+write("ns_cut.jpg", ns_base[:-40])
+for ns_id, ns_name in (("jpeg", "ok_420.jpg"), ("gray", "ok_gray.jpg"), ("12bit", "ns_12bit.jpg"),
+                       ("cut_scan", "ns_cut.jpg"), ("psd", "psd_rgb_raw.psd")):
+    case(f"NS_shown_{ns_id}", "NS", "gui", [ns_name], "--log --image-window report", timeout=30,
+         expect='^harness: image report: .* status="Done" ', forbid=NS_HDR)
+# The image window's title: not the last image's
+for ns_id, ns_name, ns_short in (("title", "ok_progressive.jpg", "progressive JPEG"),
+                                 ("title_psd", "psd_gray16.psd", "Photoshop image that can't be drawn"),
+                                 ("title_silent", "ns_height0.jpg", "size of 0")):
+    case(f"NS_{ns_id}", "NS", "gui", ["ok_420.jpg", ns_name], "--image-window show", timeout=30,
+         expect="^" + rx(f'harness: image window file 2: title="Image not shown: {ns_short}" '))
+case("NS_title_empty_file", "NS", "gui", ["ok_420.jpg", "f4_empty.jpg"], "--image-window show", timeout=30,
+     expect="^" + rx('harness: image window file 2: title="Image" '))
+case("NS_title_after", "NS", "gui", ["ok_progressive.jpg", "ok_420.jpg"], "--image-window show", timeout=30,
+     expect='^harness: image window file 2: title="Image \\(RGB, DC\\) @ Fit ')
+# Extract All looks at places with no image: none of their reasons is left showing
+case("NS_extract_all", "NS", "gui", [write("ns_two.jpg", c420 + progressive)], "--export-menus-all --image-window report",
+     timeout=60,
+     expect='^harness: image report: .* status="', forbid='^harness: image report: .*Image not shown')
+# Logs say it too, and a batch's next file doesn't take it from the one before
+case("NS_cmdline", "NS", "cmdline", ["ok_progressive.jpg"], "-- -i ok_progressive.jpg -o log.txt", timeout=60,
+     expect=cl_log("log.txt", rx("*** Image Not Shown ***")))
+case("NS_batch_second", "NS", "cmdline", ["ok_420.jpg"], "--put zz.jpg=ok_progressive.jpg -- -b .", timeout=60,
+     expect=cl_log("zz.jpg.txt", rx("*** Image Not Shown ***")),
+     forbid="^" + rx("harness: cmdline log ok_420.jpg.txt: *** Image Not Shown ***"))
+
+
+# --- The file's dates and hashes in the report's intro ------------------------------------
+# Created and Modified in UTC to the millisecond (cut short, not rounded), then five
+# hashes, here worked out by Python's hashlib and zlib. (An older modified time takes
+# the created time back with it on APFS.)
+def ff_hashes(data):
+    return [f"  SHA-512: [{hashlib.sha512(data).hexdigest()}]", f"  SHA-256: [{hashlib.sha256(data).hexdigest()}]",
+            f"  SHA-1: [{hashlib.sha1(data).hexdigest()}]", f"  MD5: [{hashlib.md5(data).hexdigest()}]",
+            f"  CRC32: [{zlib.crc32(data):08x}]"]
+
+
+def ff_case(cid, name, expect, extra="", forbid="-"):
+    case(f"FF_{cid}", "FF", "gui", [name], ("--image-window intro " + extra).strip(), timeout=60, expect=expect,
+         forbid=forbid)
+
+
+def ff_timed(name, data, *times):
+    write(name, data)
+    for ns in times:
+        os.utime(files_dir / name, ns=(ns, ns))
+    return name
+
+
+ff_name = ff_timed("ff_times.jpg", c420, 981173106789999999, 1719806399009999999)
+ff_case("intro", ff_name,
+        "^" + rx("|".join(["harness: image intro:   Filename: [...]", f"  Filesize: [{len(c420)}] bytes",
+                           "  Created: [2001-02-03T04:05:06.789Z]", "  Modified: [2024-07-01T03:59:59.009Z]"]
+                          + ff_hashes(c420))) + "$")
+ff_case("time_second_end", ff_timed("ff_rollover.jpg", c420, 981173106789999999, 1735689599999999999),
+        rx("|  Modified: [2024-12-31T23:59:59.999Z]|"))
+ff_case("time_whole_second", ff_timed("ff_second.jpg", c420, 1709164800000000000),
+        rx("|  Created: [2024-02-29T00:00:00.000Z]|  Modified: [2024-02-29T00:00:00.000Z]|"))
+ff_case("time_before_1970", ff_timed("ff_old.jpg", c420, -500000000), rx("|  Modified: [1969-12-31T23:59:59.500Z]|"))
+ff_case("time_none", ff_timed("ff_zero.jpg", c420, 0),
+        rx("|  Created: [not available]|  Modified: [1970-01-01T00:00:00.000Z]|"))
+# Published check values, not worked out here
+write("ff_abc.bin", b"abc")
+for ff_id, ff_line in (
+        ("sha512", ("SHA-512: [ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a"
+                    "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f]")),
+        ("sha256", "SHA-256: [ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad]"),
+        ("sha1", "SHA-1: [a9993e364706816aba3e25717850c26c9cd0d89d]"),
+        ("md5", "MD5: [900150983cd24fb0d6963f7d28e17f72]"),
+        ("crc32", "CRC32: [352441c2]")):
+    ff_case(f"abc_{ff_id}", "ff_abc.bin", rx("|  " + ff_line) + "(\\||$)")
+ff_case("crc32_check_value", write("ff_check.bin", b"123456789"), rx("|  CRC32: [cbf43926]") + "$")
+# Each tail after the CRC's eights, a leading 0, and around where threads and chunks begin
+ff_rand = random.Random(11)
+ff_bytes = ff_rand.randbytes(16)
+for ff_len in (1, 2, 3, 4, 5, 6, 7, 8, 15, 16):
+    ff_data = ff_bytes[:ff_len]
+    ff_case(f"len_{ff_len}", write(f"ff_len{ff_len}.bin", ff_data), rx("|" + "|".join(ff_hashes(ff_data))) + "$")
+ff_zero_lead = next(str(i).encode() for i in range(100000) if zlib.crc32(str(i).encode()) < 0x01000000)
+ff_case("leading_zero", write("ff_lead0.bin", ff_zero_lead), rx("|" + "|".join(ff_hashes(ff_zero_lead))) + "$")
+for ff_id, ff_len in (("below_threads", (1 << 20) - 1), ("threads", 1 << 20), ("one_chunk", 4 << 20),
+                      ("chunk_over", (4 << 20) + 1), ("chunks", (9 << 20) + 5)):
+    ff_data = ff_rand.randbytes(ff_len)
+    ff_case(f"size_{ff_id}", write(f"ff_{ff_id}.bin", ff_data), rx("|" + "|".join(ff_hashes(ff_data))) + "$")
+# The hashing leaves the decode as it was, also of a JPEG with much after it
+ff_tail = write("ff_tail.jpg", c420 + bytes((5 << 20) + 3))
+case("FF_then_decodes", "FF", "gui", [ff_tail], "--image-window show", timeout=60,
+     expect='^harness: image window file 1: title="Image \\(RGB, DC\\) ')
+case("FF_then_status", "FF", "gui", [ff_tail], "--image-window report", timeout=60,
+     expect='^harness: image report: .* status="Done" ')
+# As it is on the disk: not with a File Overlay. Reprocess and Photoshop files too.
+write("ff_overlay.jpg", c420)
+case("FF_overlay", "FF", "gui", ["ff_overlay.jpg"],
+     "--overlay on,offset=0B,value=0102,ok --image-window intro", timeout=30,
+     expect=rx("|" + "|".join(ff_hashes(c420)) + "|  Overlay:"))
+case("FF_reprocess", "FF", "gui", [ff_name], "--image-window reprocess,intro", timeout=30,
+     expect=rx("|" + "|".join(ff_hashes(c420))) + "$")
+case("FF_next_file", "FF", "gui", ["ok_gray.jpg", "ff_abc.bin"], "--log", timeout=30,
+     expect="^" + rx("  MD5: [900150983cd24fb0d6963f7d28e17f72]") + "$")
+ff_case("psd", "psd_rgb_raw.psd", rx("|" + "|".join(ff_hashes((files_dir / "psd_rgb_raw.psd").read_bytes()))) + "$")
+ff_case("progressive", "ok_progressive.jpg", rx("|" + "|".join(ff_hashes(progressive))) + "$")
+# Logs
+ff_two = (files_dir / "fo_start_two.jpg").read_bytes()
+for ff_at, ff_key in enumerate(("sha512", "sha256", "sha1", "md5", "crc32")):
+    cl_case(f"FF_log_{ff_key}", CL_OK, CL_I, cl_log("log.txt", rx(ff_hashes(c420)[ff_at])))
+cl_case("FF_log_created", CL_OK, CL_I,
+        cl_log("log.txt", "  Created: \\[[0-9]{4}-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z\\]"))
+cl_case("FF_log_modified", CL_OK, CL_I,
+        cl_log("log.txt", "  Modified: \\[[0-9]{4}-[01][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z\\]"))
+cl_case("FF_log_batch", CL_OK, "-b .", cl_log("ok_420.jpg.txt", rx(ff_hashes(c420)[1])))
+cl_case("FF_log_searched", ["fo_start_two.jpg"], "-i fo_start_two.jpg -o log.txt -offset_srch2",
+        cl_log("log.txt", rx(ff_hashes(ff_two)[1])))
+# A file that changes: kept only while it can't have
+for ff_what, ff_expect in (
+        ("fresh", "hashed=2 differ=1 "), ("recent", "hashed=2 differ=0 "), ("kept", "hashed=1 differ=0 "), ("rewritten", "hashed=2 differ=1 "),
+        ("restored", "hashed=2 differ=1 "), ("replaced", "hashed=2 differ=1 "), ("other", "hashed=2 differ=1 "),
+        ("grown", 'hashed=1 last="CRC32: \\[not calculated: the file changed while it was read\\]" '),
+        ("shrunk", 'hashed=1 last="CRC32: \\[not calculated: the file changed while it was read\\]" '),
+        ("unreadable", 'hashed=1 last="CRC32: \\[not calculated: couldn.t read all of the file\\]" '),
+        ("closed", 'hashed=0 last="CRC32: \\[not calculated: couldn.t read the file\\]" '),
+        ("huge", 'hashed=0 last="CRC32: \\[not calculated: the file is 4 GiB or larger \\(see Options\\)\\]" '),
+        ("progress", "hashed=1 .* progress=44,88$")):
+    case(f"FF_file_{ff_what}", "FF", "file-facts", "-", ff_what, timeout=30,
+         expect=f"^harness: file facts {ff_what}: " + ff_expect)
+
+
+# --- Options > Skip Hashes on 4 GiB or Larger Files ----------------------------------------
+# On unless turned off, and saved. Off, a large file is hashed, with Cancel. The large
+# files take no room on the disk (dq_4gb.bin is 4 GiB and a byte).
+SF_SKIPPED = rx("[not calculated: the file is 4 GiB or larger (see Options)]")
+SF_CANCELED = rx("[not calculated: canceled]")
+SF_BIG = ["dq_4gb.bin"]
+
+
+def large_case(cid, flags, expect, names=("ok_420.jpg",), forbid="-"):
+    case(f"SF_{cid}", "SF", "gui", list(names), flags, timeout=60, expect=expect, forbid=forbid)
+
+
+large_case("on_at_first", "--image-window option", "^harness: image option: checkable=1 checked=1$")
+large_case("skips", "--image-window intro",
+           "^harness: image intro: .*" + "\\|".join(rx(f"  {name}: ") + SF_SKIPPED
+                                                   for name in ("SHA-512", "SHA-256", "SHA-1", "MD5", "CRC32")) + "$",
+           names=SF_BIG)
+large_case("skips_dates", "--image-window intro",
+           "^harness: image intro: .*Created: \\[[0-9T:.-]+Z\\]\\|  Modified: \\[[0-9T:.-]+Z\\]", names=SF_BIG)
+large_case("skips_error_kept", "--log",
+           "^" + rx("ERROR: File too large for this version of JPEGsnoop. [Size=0x100000001]") + "$", names=SF_BIG)
+large_case("skips_no_dialog", "--hash-dialog cancel", "^harness: hash dialogs shown=0 ", names=SF_BIG)
+large_case("turn_off", "--image-window skip-large", "^harness: image option: checkable=1 checked=0$")
+large_case("turn_on", "--hash-large --image-window skip-large", "^harness: image option: checkable=1 checked=1$")
+large_case("loaded_off", "--hash-large --image-window option", "^harness: image option: checkable=1 checked=0$")
+large_case("saved_off", "--image-window skip-large,saved", "^harness: image option saved=false$")
+large_case("saved_on", "--hash-large --image-window skip-large,saved", "^harness: image option saved=true$")
+large_case("saved_after_store", "--settings-saved --image-window skip-large,saved",
+           "^harness: image option saved=false$")
+large_case("off_small_hashed", "--hash-large --image-window intro", rx("|".join(ff_hashes(c420))) + "$")
+large_case("off_no_dialog_small", "--hash-large --hash-dialog cancel", "^harness: hash dialogs shown=0 ",
+           names=("ff_chunks.bin",))
+large_case("dialog", "--hash-large --hash-dialog cancel",
+           "^" + rx('harness: hash dialog: title="File Hashes" label="Calculating file hashes: / dq_4gb.bin" modal=app '
+                    'status="Calculating file hashes"') + "$", names=SF_BIG)
+large_case("dialog_cancel", "--hash-large --hash-dialog cancel --image-window intro",
+           "^harness: image intro: .*MD5: " + SF_CANCELED + rx("|  CRC32: ") + SF_CANCELED + "$", names=SF_BIG)
+large_case("dialog_close", "--hash-large --hash-dialog close --image-window intro",
+           "^harness: image intro: .*CRC32: " + SF_CANCELED + "$", names=SF_BIG)
+large_case("dialog_status", "--hash-large --hash-dialog cancel --image-window report",
+           '^harness: image report: .* status="Done" ', names=SF_BIG)
+large_case("dialog_quit", "--hash-large --hash-dialog quit",
+           "^harness: hash dialogs shown=1 report file=dq_4gb.bin window=closed$", names=SF_BIG)
+large_case("dialog_quit_stops", "--hash-large --hash-dialog quit --image-window intro",
+           "^harness: image intro: .*CRC32: " + SF_CANCELED + "$", names=SF_BIG)
+large_case("dialog_finder_waits", "--hash-large --hash-dialog finder=ok_420.jpg", "^harness: hash dialog waited=1$",
+           names=SF_BIG)
+large_case("dialog_finder_after", "--hash-large --hash-dialog finder=ok_420.jpg",
+           "^harness: hash dialogs shown=1 report file=ok_420\\.jpg ", names=SF_BIG)
+large_case("next_file", "--hash-large --hash-dialog cancel", "^harness: hash dialogs shown=1 report file=ok_420\\.jpg ",
+           names=("dq_4gb.bin", "ok_420.jpg"))
+# A change of it applies on Reprocess, or at once with Auto Reprocess
+large_case("off_then_reprocess", "--hash-dialog cancel --image-window skip-large,reprocess,intro",
+           "^harness: image intro: .*CRC32: " + SF_CANCELED + "$", names=SF_BIG)
+large_case("on_then_reprocess", "--hash-large --hash-dialog cancel --image-window skip-large,reprocess,intro",
+           "^harness: image intro: .*CRC32: " + SF_SKIPPED + "$", names=SF_BIG)
+large_case("auto_reprocess", "--auto-reprocess --hash-dialog cancel --image-window skip-large,intro",
+           "^harness: image intro: .*CRC32: " + SF_CANCELED + "$", names=SF_BIG)
+large_case("canceled_again", "--hash-large --hash-dialog cancel --image-window reprocess",
+           "^harness: hash dialogs shown=2 ", names=SF_BIG)
+# The boundary, and all of a large file
+for sf_what, sf_expect in (
+        ("limit", 'hashed=1 last="CRC32: ' + SF_CANCELED + '" '),
+        ("over", 'hashed=0 last="CRC32: ' + SF_SKIPPED + '" '),
+        ("large", 'hashed=1 last="CRC32: ' + SF_CANCELED + '" '),
+        ("large-all", 'hashed=1 last="CRC32: \\[d202ef8d\\]" '),
+        ("canceled", 'hashed=2 differ=1 last="CRC32: \\[[0-9a-f]{8}\\]" ')):
+    case(f"SF_file_{sf_what}", "SF", "file-facts", "-", sf_what, timeout=120,
+         expect=f"^harness: file facts {sf_what}: " + sf_expect)
+# The command line goes by the saved setting
+case("SF_log_skips", "SF", "cmdline", ["ok_420.jpg"], CL_BIG + " -- -i big.jpg -o log.txt", timeout=60,
+     expect=cl_log("log.txt", "  MD5: " + SF_SKIPPED))
+case("SF_log_off", "SF", "cmdline", ["ok_420.jpg"],
+     CL_BIG + " --setting General\\SkipLargeHashes=false -- -i big.jpg -o log.txt", timeout=120,
+     expect=cl_log("log.txt", rx("  MD5: [c9a5a6878d97b48cc965c1e41859f034]")))
+# A batch, whose Cancel also stops a large file's hashes
+tree("sf_batch", {"b.jpg": c420, "c.jpg": c444})
+SF_BATCH = f"--batch {BP_RUN} --batch-sparse a.jpg=4294967296"
+case("SF_batch_skips", "SF", "batch", ["sf_batch"], SF_BATCH + " --batch-cat out/a.jpg.txt", timeout=60,
+     expect="^harness: cat:   MD5: " + SF_SKIPPED + "$")
+SF_BATCH_OFF = SF_BATCH + " --hash-large --batch-cancel-hash"
+case("SF_batch_progress", "SF", "batch", ["sf_batch"], SF_BATCH_OFF, timeout=60,
+     expect="^harness: batch hash progress: Calculating file hashes: [0-9]+%$")
+case("SF_batch_cancel", "SF", "batch", ["sf_batch"], SF_BATCH_OFF + " --batch-cat out/a.jpg.txt", timeout=60,
+     expect="^harness: cat:   MD5: " + SF_CANCELED + "$")
+case("SF_batch_stops", "SF", "batch", ["sf_batch"], SF_BATCH_OFF, timeout=60,
+     expect="^  Batch processing stopped after 1 of 3 files$")
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

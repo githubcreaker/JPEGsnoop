@@ -28,23 +28,28 @@
 //-----------------------------------------------------------------------------
 // PreviewCanvas
 
-PreviewCanvas::PreviewCanvas(QWidget *_parent) : QWidget(_parent), m_dZoom(1.0)
+PreviewCanvas::PreviewCanvas(QWidget *_parent) :
+  QWidget(_parent), m_dZoom(1.0), m_bWhole(false), m_bQuick(false)
 {
   setMouseTracking(true);
 }
 
-void PreviewCanvas::setImage(const QImage &img, double dZoom)
+void PreviewCanvas::setImage(const QImage &img, double dZoom, bool bWhole)
 {
   m_img = img;
   m_dZoom = (dZoom > 0.0) ? dZoom : 1.0;
+  m_bWhole = bWhole;
+  m_bQuick = false;
   rebuild();
 }
 
-void PreviewCanvas::setZoom(double dZoom)
+void PreviewCanvas::setZoom(double dZoom, bool bWhole, bool bQuick)
 {
   if(dZoom > 0.0)
   {
     m_dZoom = dZoom;
+    m_bWhole = bWhole;
+    m_bQuick = bQuick;
     rebuild();
   }
 }
@@ -74,9 +79,40 @@ double PreviewCanvas::logicalPerImagePixel() const
   return m_dZoom / devicePixelRatioF();
 }
 
+// img as sharp blocks at dZoom, in nW x nH screen pixels: each has the colour
+// of the image pixel under its centre, as widgetToImage() finds it. (QPainter's
+// own enlarging can put an edge a screen pixel from there at an uneven zoom,
+// such as 137%, off the MCU grid.)
+static QImage enlarged(const QImage &img, int nW, int nH, double dZoom)
+{
+  const QImage imgSrc = img.convertToFormat(QImage::Format_RGB32);
+  QImage imgDst(nW, nH, QImage::Format_RGB32);
+  if(imgSrc.isNull() || imgDst.isNull())
+  {
+    return QImage();
+  }
+
+  QList<int> anSrcX(nW);
+  for(int nX = 0; nX < nW; nX++)
+  {
+    anSrcX[nX] = qMin(qFloor((nX + 0.5) / dZoom), imgSrc.width() - 1);
+  }
+  for(int nY = 0; nY < nH; nY++)
+  {
+    const int nSrcY = qMin(qFloor((nY + 0.5) / dZoom), imgSrc.height() - 1);
+    const QRgb *pSrc = reinterpret_cast<const QRgb *>(imgSrc.constScanLine(nSrcY));
+    QRgb *pDst = reinterpret_cast<QRgb *>(imgDst.scanLine(nY));
+    for(int nX = 0; nX < nW; nX++)
+    {
+      pDst[nX] = pSrc[anSrcX.at(nX)];
+    }
+  }
+  return imgDst;
+}
+
 void PreviewCanvas::rebuild()
 {
-  m_imgReduced = QImage();
+  m_imgScaled = QImage();
 
   if(m_img.isNull())
   {
@@ -85,19 +121,68 @@ void PreviewCanvas::rebuild()
     return;
   }
 
-  // Below 100%: one smoothly reduced copy at screen resolution, drawn 1:1
+  const double dDpr = devicePixelRatioF();
+  const int nW = qMax(1, qRound(m_img.width() * m_dZoom));
+  const int nH = qMax(1, qRound(m_img.height() * m_dZoom));
+
+  // Below 100%: one smoothly reduced copy at screen resolution, drawn 1:1. A
+  // whole image has a copy enlarged too: it's no larger than the window.
   if(m_dZoom < 1.0)
   {
-    const int nW = qMax(1, qRound(m_img.width() * m_dZoom));
-    const int nH = qMax(1, qRound(m_img.height() * m_dZoom));
-
-    m_imgReduced = m_img.scaled(nW, nH, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-    m_imgReduced.setDevicePixelRatio(devicePixelRatioF());
+    m_imgScaled = m_img.scaled(nW, nH, Qt::IgnoreAspectRatio,
+                               m_bQuick ? Qt::FastTransformation : Qt::SmoothTransformation);
+  }
+  else if(m_bWhole)
+  {
+    m_imgScaled = enlarged(m_img, nW, nH, m_dZoom);
+  }
+  if(!m_imgScaled.isNull())
+  {
+    m_imgScaled.setDevicePixelRatio(dDpr);
   }
 
-  const double dScale = logicalPerImagePixel();
-  setFixedSize(qCeil(m_img.width() * dScale), qCeil(m_img.height() * dScale));
+  if(m_bWhole)
+  {
+    // Just the copy's size: rounding up the exact size made about one fitted
+    // image in ten a point larger than the window
+    setFixedSize(qMax(1, qCeil(nW / dDpr)), qMax(1, qCeil(nH / dDpr)));
+  }
+  else
+  {
+    const double dScale = logicalPerImagePixel();
+    setFixedSize(qCeil(m_img.width() * dScale), qCeil(m_img.height() * dScale));
+  }
   update();
+}
+
+QSize PreviewCanvas::drawnSize() const
+{
+  if(!m_imgScaled.isNull())
+  {
+    return m_imgScaled.size();
+  }
+  return QSize(qCeil(m_img.width() * m_dZoom), qCeil(m_img.height() * m_dZoom));
+}
+
+// The first screen pixel of image pixel nPixel. Enlarged whole, that is the
+// first whose centre is in it (see enlarged()); the menu's zooms put every
+// MCU's edge on a whole screen pixel.
+int PreviewCanvas::screenEdge(int nPixel) const
+{
+  const double dAt = nPixel * m_dZoom;
+  return (m_bWhole && (m_dZoom >= 1.0)) ? qCeil(dAt - 0.5) : qRound(dAt);
+}
+
+// The screen pixel just past nEnd of the image's nFull: where the red line
+// goes, cut short to a whole pixel as on Windows, or enlarged whole, on the
+// padding's first. With no padding it is just off what is drawn (nDrawn).
+int PreviewCanvas::screenEnd(int nEnd, int nFull, int nDrawn) const
+{
+  if(nEnd >= nFull)
+  {
+    return nDrawn;
+  }
+  return (m_bWhole && (m_dZoom >= 1.0)) ? screenEdge(nEnd) : static_cast<int>(nEnd * m_dZoom);
 }
 
 bool PreviewCanvas::event(QEvent *pEvent)
@@ -121,9 +206,9 @@ void PreviewCanvas::paintEvent(QPaintEvent *pEvent)
 
   QPainter painter(this);
 
-  if(!m_imgReduced.isNull())
+  if(!m_imgScaled.isNull())
   {
-    painter.drawImage(QPointF(0, 0), m_imgReduced);
+    painter.drawImage(QPointF(0, 0), m_imgScaled);
   }
   else
   {
@@ -154,7 +239,7 @@ QRect PreviewCanvas::screenRect(const QRect &rectDirty) const
   const double dDpr = devicePixelRatioF();
   return QRectF(rectDirty.x() * dDpr, rectDirty.y() * dDpr, rectDirty.width() * dDpr, rectDirty.height() * dDpr)
            .toAlignedRect() &
-         QRect(0, 0, qCeil(m_img.width() * m_dZoom), qCeil(m_img.height() * m_dZoom));
+         QRect(QPoint(0, 0), drawnSize());
 }
 
 // The first pixel from nFrom on that a dotted line has a dot on: every third
@@ -186,8 +271,9 @@ void PreviewCanvas::paintImageEnd(QPainter &painter, const QRect &rectScreen)
     return;
   }
 
-  const int nEndX = static_cast<int>(m_sizeFrame.width() * m_dZoom);
-  const int nEndY = static_cast<int>(m_sizeFrame.height() * m_dZoom);
+  const QSize sizeDrawn = drawnSize();
+  const int nEndX = screenEnd(m_sizeFrame.width(), m_img.width(), sizeDrawn.width());
+  const int nEndY = screenEnd(m_sizeFrame.height(), m_img.height(), sizeDrawn.height());
   QList<QRect> aWhite;
   QList<QRect> aRed;
 
@@ -247,7 +333,7 @@ void PreviewCanvas::paintMcuGrid(QPainter &painter, const QRect &rectScreen)
   QList<QRect> aDots;
   for(int nX = 0; nX < m_img.width(); nX += m_sizeMcu.width())
   {
-    const int nDevX = qRound(nX * m_dZoom);
+    const int nDevX = screenEdge(nX);
     if((nDevX < rectScreen.left()) || (nDevX > rectScreen.right()))
       continue;
     for(int nDevY = firstDot(rectScreen.top()); nDevY <= rectScreen.bottom(); nDevY += 3)
@@ -255,7 +341,7 @@ void PreviewCanvas::paintMcuGrid(QPainter &painter, const QRect &rectScreen)
   }
   for(int nY = 0; nY < m_img.height(); nY += m_sizeMcu.height())
   {
-    const int nDevY = qRound(nY * m_dZoom);
+    const int nDevY = screenEdge(nY);
     if((nDevY < rectScreen.top()) || (nDevY > rectScreen.bottom()))
       continue;
     for(int nDevX = firstDot(rectScreen.left()); nDevX <= rectScreen.right(); nDevX += 3)
@@ -323,8 +409,39 @@ void PreviewCanvas::leaveEvent(QEvent *pEvent)
 //-----------------------------------------------------------------------------
 // Q_Viewer
 
+namespace
+{
+
+// The menu's zooms, PRV_ZOOM_12 to PRV_ZOOM_6400. The top is half what still
+// fits in a widget (2^24-1 points) at one pixel per point, for the widest
+// image decoded (65536 pixels).
+constexpr double kZooms[] = { 0.125, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 8.0, 16.0, 32.0, 64.0 };
+static_assert(sizeof(kZooms) / sizeof(kZooms[0]) == PRV_ZOOMEND - PRV_ZOOMBEGIN - 1, "a zoom for each mode");
+
+constexpr double kZoomMax = kZooms[PRV_ZOOMEND - PRV_ZOOMBEGIN - 2];
+constexpr int kSmoothDelayMs = 150;     // a resize has stopped
+
+double zoomOfMode(int nMode)
+{
+  return kZooms[qBound(0, nMode - (PRV_ZOOMBEGIN + 1), PRV_ZOOMEND - PRV_ZOOMBEGIN - 2)];
+}
+
+} // namespace
+
+// Keep pLabel as wide as the widest of astrTexts, in its font and frame
+static void reserveWidth(QLabel *pLabel, const QStringList &astrTexts)
+{
+  int nWidth = 0;
+  for(const QString &strText : astrTexts)
+  {
+    pLabel->setText(strText);
+    nWidth = qMax(nWidth, pLabel->sizeHint().width());
+  }
+  pLabel->setMinimumWidth(nWidth);
+}
+
 Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_parent, Qt::WindowFlags f) :
-  QWidget(_parent, f), m_pAppConfig(pAppConfig), m_pImgDecoder(pImgDecoder), canvas(nullptr), scrollArea(nullptr), scaleFactor(0.125), m_nZoomMode(PRV_ZOOM_12)
+  QWidget(_parent, f), m_pAppConfig(pAppConfig), m_pImgDecoder(pImgDecoder), canvas(nullptr), scrollArea(nullptr), scaleFactor(1.0), m_nZoomMode(PRV_ZOOM_FIT)
 {
   setGeometry(200, 50, 400, 400);
 
@@ -351,6 +468,14 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
   yccLabel->setFont(font);
   statusBar->addPermanentWidget(yccLabel);
 
+  // Room from the start for all they show, as Windows' panes had, or the
+  // window widened when the mouse was first over the image: up to 8192 MCUs
+  // each way, a 32-bit offset and 16-bit DC values (six characters with "-")
+  reserveWidth(mcuLabel, { "MCU [0000,0000]", "MCU N/A" });
+  reserveWidth(fileLabel, { "File 0x00000000:0", tr("File: not decoded"), tr("File N/A") });
+  reserveWidth(yccLabel, { "YCC DC=[-00000,-00000,-00000]", tr("YCC N/A") });
+  showNoPosition();
+
   // The canvas is the image's size at the current zoom (it used to be a label
   // stretched over the whole window, which also made 12.5% look blocky)
   canvas = new PreviewCanvas;
@@ -360,6 +485,12 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
   scrollArea->setWidgetResizable(false);
   scrollArea->setWidget(canvas);
   scrollArea->setVisible(false);
+  // As Zoom to Fit Window, the default, has it (see setZoomMode())
+  scrollArea->setAlignment(Qt::AlignCenter);
+  scrollArea->installEventFilter(this);
+
+  m_timerSmooth.setSingleShot(true);
+  connect(&m_timerSmooth, &QTimer::timeout, this, [this]() { canvas->setZoom(scaleFactor, true); });
 
   QGridLayout *loGrid = new QGridLayout(this);
   loGrid->addWidget(scrollArea, 0, 0);
@@ -367,15 +498,13 @@ Q_Viewer::Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *_
   loGrid->setContentsMargins(0, 0, 0, 0);
   setLayout(loGrid);
 
-  m_strPreview = "Image (RGB)";
-  setWindowTitle(m_strPreview + " " + m_strZoom);
-  m_strZoom = QString("@ %1%").arg(scaleFactor * 100.0);
+  m_strChannel = "RGB";
+  setWindowTitle("Image");
 
   setVisible(false);
 
   connect(canvas, &PreviewCanvas::released, this, &Q_Viewer::onCanvasReleased);
   connect(canvas, &PreviewCanvas::moved, this, &Q_Viewer::onCanvasMoved);
-  connect(m_pAppConfig, SIGNAL(scanImageAc(bool)), this, SLOT(scanImageAc(bool)));
 }
 
 // Does the decoder hold an image to show? (It may have been reset since the
@@ -413,9 +542,7 @@ void Q_Viewer::onCanvasMoved(QPoint ptImg, bool bInside)
 
   if(!bInside || !scanReady())
   {
-    mcuLabel->clear();
-    fileLabel->clear();
-    yccLabel->clear();
+    showNoPosition();
     return;
   }
 
@@ -444,6 +571,26 @@ void Q_Viewer::clearImage()
 {
   canvas->setImage(QImage(), scaleFactor);
   canvas->setFrameSize(QSize());
+  // Nor is the mouse on a pixel of it (they kept the previous image's until
+  // the mouse next moved)
+  showNoPosition();
+  // The title kept it too, over an empty window
+  setWindowTitle("Image");
+}
+
+void Q_Viewer::showNoImage(const QString &strWhy)
+{
+  setWindowTitle(strWhy.isEmpty() ? QString("Image not shown") : QString("Image not shown: %1").arg(strWhy));
+}
+
+// There is no image pixel under the mouse, or none of a JPEG scan. Windows
+// left the three panes blank, but here they are framed, and empty frames look
+// like buttons.
+void Q_Viewer::showNoPosition()
+{
+  mcuLabel->setText(tr("MCU N/A"));
+  fileLabel->setText(tr("File N/A"));
+  yccLabel->setText(tr("YCC N/A"));
 }
 
 void Q_Viewer::drawImage()
@@ -457,13 +604,18 @@ void Q_Viewer::drawImage()
       return;
   }
 
-  // Like the Windows version, a non-JPEG image (from a Photoshop file) is
-  // just "Image": it has no channel view or IDCT mode
-  if(m_pImgDecoder->IsPreviewReady())
-    setWindowTitle(m_strPreview + " " + m_strIdct + " " + m_strZoom);
-  else
-    setWindowTitle("Image " + m_strZoom);
-  canvas->setImage(*m_pImgDecoder->m_pDibTemp, scaleFactor);
+  // Shown first, which lays it out: fitting needs the room there is
+  scrollArea->setVisible(true);
+  setVisible(true);
+
+  const QImage &img = *m_pImgDecoder->m_pDibTemp;
+  const bool bFit = (m_nZoomMode == PRV_ZOOM_FIT);
+  if(bFit)
+  {
+    m_timerSmooth.stop();
+    scaleFactor = fitZoom(img.size());
+  }
+  canvas->setImage(img, scaleFactor, bFit);
   // A JPEG's own size, for the line where it ends inside its last MCUs (a
   // Photoshop file's image has no MCUs; on Windows its size was 0 for this)
   uint32_t nFrameX = 0;
@@ -471,8 +623,85 @@ void Q_Viewer::drawImage()
   const bool bFrame = m_pImgDecoder->IsPreviewReady() && m_pImgDecoder->GetFrameSize(nFrameX, nFrameY);
   canvas->setFrameSize(bFrame ? QSize(static_cast<int>(nFrameX), static_cast<int>(nFrameY)) : QSize());
   updateMcuGrid();
-  scrollArea->setVisible(true);
-  setVisible(true);
+  updateTitle();
+}
+
+// As on Windows, "Image (RGB, DC)": the channel, and how the image shown was
+// decoded. A non-JPEG image (from a Photoshop file) is just "Image": it has
+// no channel view or IDCT mode. Then the zoom, or "Fit" and what that comes to.
+void Q_Viewer::updateTitle()
+{
+  const double dPercent = scaleFactor * 100.0;
+  QString strZoom;
+  if(m_nZoomMode != PRV_ZOOM_FIT)
+    strZoom = QString("@ %1%").arg(dPercent);
+  else if(dPercent < 9.95)
+    strZoom = QString("@ Fit (%1%)").arg(dPercent, 0, 'f', 1);
+  else
+    strZoom = QString("@ Fit (%1%)").arg(qRound(dPercent));
+
+  if(m_pImgDecoder->IsPreviewReady())
+    setWindowTitle(QString("Image (%1, %2) %3")
+                   .arg(m_strChannel, m_pImgDecoder->IsPreviewAc() ? "DC+AC" : "DC", strZoom));
+  else
+    setWindowTitle("Image " + strZoom);
+}
+
+// The zoom that shows all of an image of sizeImg, as large as fits in the
+// window with no scroll bars, up to the menu's highest. Whole screen pixels:
+// a part of one would round up to a point too many.
+double Q_Viewer::fitZoom(const QSize &sizeImg) const
+{
+  if(sizeImg.isEmpty())
+  {
+    return 1.0;
+  }
+  const QSize sizeView = scrollArea->maximumViewportSize();
+  const double dDpr = canvas->devicePixelRatioF();
+  const int nRoomW = qMax(1, qFloor(sizeView.width() * dDpr));
+  const int nRoomH = qMax(1, qFloor(sizeView.height() * dDpr));
+  return qMin(qMin(static_cast<double>(nRoomW) / sizeImg.width(), static_cast<double>(nRoomH) / sizeImg.height()),
+              kZoomMax);
+}
+
+// Zoom to Fit Window follows the window's size. A large image is slow to
+// reduce smoothly (70 to 100 ms for the largest), so while the size changes it
+// is reduced quickly, then smoothly once that stops.
+void Q_Viewer::refit()
+{
+  if((m_nZoomMode != PRV_ZOOM_FIT) || canvas->image().isNull())
+  {
+    return;
+  }
+  const double dZoom = fitZoom(canvas->image().size());
+  if(qFuzzyCompare(dZoom, scaleFactor))
+  {
+    return;
+  }
+  scaleFactor = dZoom;
+  const bool bQuick = (dZoom < 1.0);
+  canvas->setZoom(dZoom, true, bQuick);
+  if(bQuick)
+    m_timerSmooth.start(kSmoothDelayMs);
+  else
+    m_timerSmooth.stop();
+  updateTitle();
+}
+
+bool Q_Viewer::eventFilter(QObject *pObj, QEvent *pEvent)
+{
+  if(pObj == scrollArea)
+  {
+    bool bRefit = (pEvent->type() == QEvent::Resize);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    bRefit = bRefit || (pEvent->type() == QEvent::DevicePixelRatioChange);
+#endif
+    if(bRefit)
+    {
+      refit();
+    }
+  }
+  return QWidget::eventFilter(pObj, pEvent);
 }
 
 // View > Status Bar: the MCU, file position and YCC under the mouse, which
@@ -492,130 +721,127 @@ void Q_Viewer::updateMcuGrid()
 
 void Q_Viewer::zoom(QAction* action)
 {
-  if(action->data().toInt() == PRV_ZOOM_IN)
+  int nMode = action->data().toInt();
+  if((nMode == PRV_ZOOM_IN) || (nMode == PRV_ZOOM_OUT))
   {
-    if(m_nZoomMode + 1 < PRV_ZOOMEND)
-    {
-      m_nZoomMode++;
-
-    }
+    nMode = nextZoomMode(nMode == PRV_ZOOM_IN);
   }
-  else if(action->data().toInt() == PRV_ZOOM_OUT)
+  setZoomMode(nMode);
+}
+
+// The menu's next zoom above or below what is shown, which Zoom to Fit Window
+// can put between two of them, or the mode as it is if there is none.
+int Q_Viewer::nextZoomMode(bool bIn) const
+{
+  constexpr double kSame = 1e-6;        // (a fitted zoom that is one of them)
+  if(bIn)
   {
-    if(m_nZoomMode - 1 > PRV_ZOOMBEGIN)
+    for(int nMode = PRV_ZOOMBEGIN + 1; nMode < PRV_ZOOMEND; nMode++)
     {
-      m_nZoomMode--;
+      if(zoomOfMode(nMode) > scaleFactor * (1.0 + kSame))
+        return nMode;
     }
   }
   else
   {
-    m_nZoomMode = action->data().toInt();
+    for(int nMode = PRV_ZOOMEND - 1; nMode > PRV_ZOOMBEGIN; nMode--)
+    {
+      if(zoomOfMode(nMode) < scaleFactor * (1.0 - kSame))
+        return nMode;
+    }
   }
+  return m_nZoomMode;
+}
 
-  switch(m_nZoomMode)
+void Q_Viewer::setZoomMode(int nMode)
+{
+  m_timerSmooth.stop();
+
+  // What is in the middle of the view, to keep it there (the middle of the
+  // image, across or down, where all of it shows). It stayed put at the top
+  // left, so the middle moved further away the higher the zoom.
+  const QSize sizeView = scrollArea->viewport()->size();
+  const double dDpr = canvas->devicePixelRatioF();
+  const double dPerPixel = canvas->zoom() / dDpr;
+  const QSize sizeImg = canvas->image().size();
+  const double dMidX = (canvas->width() <= sizeView.width())
+                         ? (sizeImg.width() / 2.0)
+                         : ((sizeView.width() / 2.0 - canvas->x()) / dPerPixel);
+  const double dMidY = (canvas->height() <= sizeView.height())
+                         ? (sizeImg.height() / 2.0)
+                         : ((sizeView.height() / 2.0 - canvas->y()) / dPerPixel);
+
+  m_nZoomMode = nMode;
+  emit zoomModeChanged(nMode);
+
+  // Fitted, the image is in the middle. (It needs no scroll bars: it is
+  // never larger than the view without them, which is what Qt goes by.)
+  const bool bFit = (nMode == PRV_ZOOM_FIT);
+  scrollArea->setAlignment(bFit ? Qt::AlignCenter : (Qt::AlignLeft | Qt::AlignTop));
+
+  if(!bFit)
+    scaleFactor = zoomOfMode(nMode);
+  if(canvas->image().isNull())
   {
-    case PRV_ZOOM_12:
-      scaleFactor = 0.125;
-      break;
-
-    case PRV_ZOOM_25:
-      scaleFactor = 0.25;
-      break;
-
-    case PRV_ZOOM_50:
-      scaleFactor = 0.5;
-      break;
-
-    case PRV_ZOOM_100:
-      scaleFactor = 1.0;
-      break;
-
-    case PRV_ZOOM_150:
-      scaleFactor = 1.5;
-      break;
-
-    case PRV_ZOOM_200:
-      scaleFactor = 2.0;
-      break;
-
-    case PRV_ZOOM_300:
-      scaleFactor = 3.0;
-      break;
-
-    case PRV_ZOOM_400:
-      scaleFactor = 4.0;
-      break;
-
-    case PRV_ZOOM_800:
-      scaleFactor = 8.0;
-      break;
-
-    default:
-      scaleFactor = 1.0;
-      break;
+    return;
   }
+  if(bFit)
+    scaleFactor = fitZoom(sizeImg);
+  canvas->setZoom(scaleFactor, bFit);
 
-  m_strZoom = QString("@ %1%").arg(scaleFactor * 100.0);
-  drawImage();
+  if(!bFit)
+  {
+    const double dNewPerPixel = scaleFactor / dDpr;
+    // Qt shows or hides the scroll bars later, by a queued call, and their
+    // room is then the view's no longer: have that done first, twice, as one
+    // bar appearing can make the other needed
+    for(int nRound = 0; nRound < 2; nRound++)
+      QCoreApplication::sendPostedEvents(scrollArea, QEvent::MetaCall);
+    const QSize sizeNow = scrollArea->viewport()->size();
+    scrollArea->horizontalScrollBar()->setValue(qRound(dMidX * dNewPerPixel - sizeNow.width() / 2.0));
+    scrollArea->verticalScrollBar()->setValue(qRound(dMidY * dNewPerPixel - sizeNow.height() / 2.0));
+  }
+  updateTitle();
 }
 
 void Q_Viewer::setPreviewTitle(QAction *action)
 {
-    // TODO: Alter title depending on whether non-JPEG image displayed (eg. PSD)
-    //       and indicate whether DC-only or DC+AC. See original CimgDecode::ViewOnDraw().
-
-    m_strPreview = "Image (";
   switch(action->data().toInt())
   {
     case PREVIEW_RGB:
-      m_strPreview += "RGB";
+      m_strChannel = "RGB";
       break;
 
     case PREVIEW_YCC:
-      m_strPreview += "YCC";
+      m_strChannel = "YCC";
       break;
 
     case PREVIEW_R:
-      m_strPreview += "R";
+      m_strChannel = "R";
       break;
 
     case PREVIEW_G:
-      m_strPreview += "G";
+      m_strChannel = "G";
       break;
 
     case PREVIEW_B:
-      m_strPreview += "B";
+      m_strChannel = "B";
       break;
 
     case PREVIEW_Y:
-      m_strPreview += "Y";
+      m_strChannel = "Y";
       break;
 
     case PREVIEW_CB:
-      m_strPreview += "Cb";
+      m_strChannel = "Cb";
       break;
 
     case PREVIEW_CR:
-      m_strPreview += "Cr";
+      m_strChannel = "Cr";
       break;
 
     default:
-      m_strPreview += "???";
+      m_strChannel = "???";
       break;
-  }
-  m_strPreview += ")";
-}
-
-void Q_Viewer::scanImageAc(bool b)
-{
-  qDebug() << "scanImageAc" << b;
-
-  if(b)
-  {
-    m_strIdct = "DC+AC";
-  }
-  else
-  {
-    m_strIdct = "DC";
   }
 }

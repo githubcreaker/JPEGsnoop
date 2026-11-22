@@ -38,6 +38,7 @@
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
 #include "WindowBuf.h"
+#include "filefacts.h"
 #include "snoop.h"
 
 #include "batchprocess.h"
@@ -209,7 +210,7 @@ ExtractAllResult extractAllJpegs(CwindowBuf *pWBuf, CjfifDecode *pJfifDec, CSnoo
 //-----------------------------------------------------------------------------
 // Batch Process
 
-void addReportHeader(CDocLog *pLog, const QString &strPath, qint64 nSize)
+void addReportHeader(CDocLog *pLog, const QString &strPath, qint64 nSize, const QStringList &astrFacts)
 {
   pLog->AddLine("");
   pLog->AddLine(QString("JPEGsnoop %1 by Calvin Hass").arg(QString(VERSION_STR)));
@@ -218,6 +219,8 @@ void addReportHeader(CDocLog *pLog, const QString &strPath, qint64 nSize)
   pLog->AddLine("");
   pLog->AddLine(QString("  Filename: [%1]").arg(strPath));
   pLog->AddLine(QString("  Filesize: [%1] bytes").arg(nSize));
+  for(const QString &strFact : astrFacts)
+    pLog->AddLine(strFact);
 }
 
 QString emptyFileError(const QString &strPath)
@@ -369,7 +372,8 @@ CBatchProcess::~CBatchProcess()
 // without the File Overlay, which this batch doesn't have. (Master wrote it
 // in the Windows code page, with characters it lacks changed to "?". The log
 // is UTF-8, as Save Log writes.)
-CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const BatchFileOptions &sOptions)
+CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const BatchFileOptions &sOptions,
+                                             const std::function<bool(int)> &fnHashProgress)
 {
   const uint32_t nStartSaved = m_pAppConfig->startPos();
   const bool bInteractiveSaved = m_pAppConfig->interactive();
@@ -403,6 +407,10 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const Batch
   }
 
   const qint64 nSize = bOpened ? file.size() : 0;
+  // Once, though a search can decode it twice
+  const QStringList astrFacts = (bOpened && (nSize > 0))
+                                  ? CFileFacts().lines(file, m_pAppConfig->skipLargeHashes(), fnHashProgress)
+                                  : QStringList();
   bool bAnalyzed = false;
 
   // The report of a decode from nPos, replacing any before it (as master's
@@ -411,7 +419,7 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const Batch
     emit ImgSrcChanged();
     m_pImgDec->ClearDecodedImage();
     m_pLog->Clear();
-    addReportHeader(m_pLog, sFile.strSrc, nSize);
+    addReportHeader(m_pLog, sFile.strSrc, nSize, astrFacts);
     m_pLog->AddLine("");
     m_pWBuf->BufLoadWindow(nPos);
     m_pAppConfig->setStartPos(nPos);
@@ -429,7 +437,7 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const Batch
   }
   else if(nSize > 0xFFFFFFFF)
   {
-    addReportHeader(m_pLog, sFile.strSrc, nSize);
+    addReportHeader(m_pLog, sFile.strSrc, nSize, astrFacts);
     m_pLog->AddLine("");
     sResult.strDecodeError = tooLargeError(nSize);
     m_pLog->AddLineErr(sResult.strDecodeError);
@@ -437,7 +445,7 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const Batch
   else if((sOptions.eOffset == DEC_OFFSET_POS) && (sOptions.nOffsetPos >= nSize))
   {
     // (Master decoded it as if 0x00 bytes were there, as File > Offset did)
-    addReportHeader(m_pLog, sFile.strSrc, nSize);
+    addReportHeader(m_pLog, sFile.strSrc, nSize, astrFacts);
     m_pLog->AddLine("");
     sResult.strDecodeError = QString("ERROR: The offset to decode from, %1 (0x%2), isn't in the file, which is %3 bytes")
                                .arg(sOptions.nOffsetPos)

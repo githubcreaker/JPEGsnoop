@@ -83,6 +83,7 @@ SOURCES += \
     $$PWD/source/cmdline.cpp \
     $$PWD/source/dbmanagedialog.cpp \
     $$PWD/source/dbsubmitdialog.cpp \
+    $$PWD/source/filefacts.cpp \
     $$PWD/source/finddialog.cpp \
     $$PWD/source/lookupdialog.cpp \
     $$PWD/source/offsetdialog.cpp \
@@ -115,6 +116,7 @@ HEADERS += \
     $$PWD/source/cmdline.h \
     $$PWD/source/dbmanagedialog.h \
     $$PWD/source/dbsubmitdialog.h \
+    $$PWD/source/filefacts.h \
     $$PWD/source/finddialog.h \
     $$PWD/source/lookupdialog.h \
     $$PWD/source/offsetdialog.h \

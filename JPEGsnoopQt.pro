@@ -18,8 +18,8 @@ win32{
 
 macx{
     # Bundle ID com.impulseadventure.JPEGsnoopQt: the same name macOS gives
-    # the app's settings (organisation domain impulseadventure.com, set in
-    # main.cpp), instead of qmake's placeholder com.yourcompany.
+    # the app's settings (from APP_ORG_DOMAIN and APP_NAME in source/snoop.h),
+    # instead of qmake's placeholder com.yourcompany.
     QMAKE_TARGET_BUNDLE_PREFIX = com.impulseadventure
 
     # Version for Finder and the bundle (CFBundleShortVersionString), taken

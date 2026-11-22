@@ -115,9 +115,9 @@ ExtractAllResult extractAllJpegs(CwindowBuf *pWBuf, CjfifDecode *pJfifDec, CSnoo
 //-----------------------------------------------------------------------------
 // Batch Process
 
-// The report's first lines for a file: the program, and the file's name and
-// size (also File > Open's)
-void addReportHeader(CDocLog *pLog, const QString &strPath, qint64 nSize);
+// The report's first lines for a file: the program, and the file's name, size,
+// dates and hashes (astrFacts, from CFileFacts::lines()) (also File > Open's)
+void addReportHeader(CDocLog *pLog, const QString &strPath, qint64 nSize, const QStringList &astrFacts);
 
 // The report's one line for a file of no length (also File > Open's)
 QString emptyFileError(const QString &strPath);
@@ -216,7 +216,9 @@ public:
   // Analyze the file (from its start, unless sOptions say otherwise), write
   // its report to its log, and with Extract All, export every JPEG in it
   // (each from the start). Message boxes are off meanwhile.
-  Result process(const BatchFile &sFile, const BatchFileOptions &sOptions);
+  // fnHashProgress: as CFileFacts::lines()'s
+  Result process(const BatchFile &sFile, const BatchFileOptions &sOptions,
+                 const std::function<bool(int)> &fnHashProgress = nullptr);
 
 signals:
   void ImgSrcChanged();

@@ -54,6 +54,23 @@ The Qt version of JPEGsnoop (this branch) builds on macOS with Qt 6.
   It runs without its window or a Dock icon, writes errors to the standard error, and exits
   with 0 if everything worked, 1 if not. Its reports and exports never replace a file it
   analyzes. The license terms must have been accepted in the app first.
+- Settings: `~/Library/Preferences/com.impulseadventure.JPEGsnoopQt.plist` (the bundle ID).
+  Builds from before 2026-11-22 used `com.impulseadventure.www.JPEGsnoopQt.plist`, which
+  isn't read: after such a build, accept the license and set the options again.
+- View > Image Zoom: Zoom to Fit Window (Cmd+0) is the default, and fits the image to the
+  window as it is resized, shrinking or enlarging it. The fixed zooms go from 12.5% to
+  6400%, where 100% is one image pixel per screen pixel.
+- Images shown: baseline and extended sequential JPEGs (SOF0 and SOF1), grayscale or with
+  three components, and Photoshop's 8-bit RGB and grayscale. Progressive, lossless,
+  arithmetic-coded and CMYK JPEGs are analyzed but not shown, and the end of the report
+  says why.
+- A report's intro gives the file's created and modified times in UTC (ISO 8601/RFC 3339,
+  to the millisecond) and its SHA-512, SHA-256, SHA-1, MD5 and CRC32, in lower case as
+  `shasum`, `md5` and `crc32` print them. They are of the file on the disk, without a
+  File Overlay. A file of 4 GiB or larger, which isn't analyzed, gets none while Options >
+  Skip Hashes on 4 GiB or Larger Files is on, as it is by default. With that off it is
+  hashed, at some 2.5 seconds a GiB on an M2, with Cancel in the window and in a batch.
+  The command line goes by the saved setting, and has no Cancel.
 - The app icon `images/jpegsnoop.icns` is made from `images/jpegsnoop.ico` by
   `scripts/make-macos-icon.py`; run it again only if the `.ico` changes.
 - With Homebrew's Qt, the app needs the macOS version Homebrew built its libraries for

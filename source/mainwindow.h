@@ -32,6 +32,7 @@
 
 #include "exportdialogs.h"
 #include "reportview.h"
+#include "filefacts.h"
 
 class QDialog;
 class QPrinter;
@@ -153,11 +154,14 @@ private:
   void searchDqt(const QString &strChosen);
   void clearImageViews();
   void AnalyzeFile();
+  bool idctNoteDue() const;
+  void showIdctNote();
   void addRecentFile(const QString &strPath);
   void removeRecentFile(const QString &strPath);
   void updateRecentMenu();
   bool AnalyzeOpen();
   void AnalyzeFileDo();
+  QStringList fileIntro();
   void AnalyzeClose();
   bool exportAllJpegs(const QString &strOut, const ExportJpegSettings &sSettings);
   bool detailRangeFromMarks(uint32_t &nMcuX, uint32_t &nMcuY, uint32_t &nMcuLen);
@@ -231,6 +235,10 @@ private:
   QAction *zoom300Act;
   QAction *zoom400Act;
   QAction *zoom500Act;
+  QAction *zoom1600Act;
+  QAction *zoom3200Act;
+  QAction *zoom6400Act;
+  QAction *zoomFitAct;
   QActionGroup *zoomGroup;
   QActionGroup *zoomInOutGroup;
 
@@ -254,6 +262,7 @@ private:
   QAction *makerNotesAct;
   QAction *sigSearchAct;
   QAction *relaxedParseAct;
+  QAction *skipLargeHashesAct;
   QAction *configAct;
 
   // Scan Segment menu
@@ -278,6 +287,7 @@ private:
   // Input JPEG file
   QFile *m_pFile;
   qint64 m_lFileSize = 0;
+  CFileFacts m_fileFacts;       // the dates and hashes in the report's intro
 
   bool m_bFileAnalyzed = false; // Have we opened and analyzed a file? (These three were never initialised)
   bool m_bFileOpened = false;   // Is a file currently opened?
@@ -304,6 +314,7 @@ private:
 
   // File > Batch Process's progress, while a batch runs
   QProgressDialog *m_pBatchProgress = nullptr;
+  QProgressDialog *m_pHashProgress = nullptr;   // a file of 4 GiB or more being hashed
 
   // A file handed to the app from outside it: dropped on the report, sent by
   // Finder (Open With, a drop on the Dock icon), or named when the app was

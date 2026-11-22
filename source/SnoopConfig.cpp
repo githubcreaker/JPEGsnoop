@@ -64,6 +64,7 @@ CSnoopConfig::CSnoopConfig(QObject *_parent) : QObject(_parent)
 
   bExifHideUnknown = true;      // Default to hiding unknown EXIF tags
   bRelaxedParsing = false;      // Normal parsing stops on bad marker
+  bSkipLargeHashes = true;      // They take minutes, and aren't analyzed
 
   nErrMaxDecodeScan = 20;
 
@@ -159,6 +160,7 @@ void CSnoopConfig::RegistryLoad(bool bForWindow)
 
   bExifHideUnknown = settings.value("General\\ExifHideUnk", bExifHideUnknown).toBool();
   bRelaxedParsing = settings.value("General\\RelaxedParsing", bRelaxedParsing).toBool();
+  bSkipLargeHashes = settings.value("General\\SkipLargeHashes", bSkipLargeHashes).toBool();
 
   // Stored under Report\ (as in master and RegistryStore)
   nErrMaxDecodeScan = settings.value("Report\\ErrMaxDecodeScan", nErrMaxDecodeScan).toInt();
@@ -258,6 +260,7 @@ void CSnoopConfig::RegistryStore()
 
     settings.setValue("General\\ExifHideUnk", bExifHideUnknown);
     settings.setValue("General\\RelaxedParsing", bRelaxedParsing);
+    settings.setValue("General\\SkipLargeHashes", bSkipLargeHashes);
 
     settings.setValue("Report\\ErrMaxDecodeScan", nErrMaxDecodeScan);
 
@@ -291,6 +294,7 @@ void CSnoopConfig::printSettings()
 
   qDebug() << "bExifHideUnknown" << bExifHideUnknown;
   qDebug() << "bRelaxedParsing" << bRelaxedParsing;
+  qDebug() << "bSkipLargeHashes" << bSkipLargeHashes;
 
   qDebug() << "nErrMaxDecodeScan" << nErrMaxDecodeScan;
 
@@ -710,6 +714,16 @@ void CSnoopConfig::onOptionsSignaturesearch()
 
 //-----------------------------------------------------------------------------
 
+void CSnoopConfig::onOptionsSkipLargeHashes()
+{
+  bSkipLargeHashes = !bSkipLargeHashes;
+
+  Dirty();
+  HandleAutoReprocess();
+}
+
+//-----------------------------------------------------------------------------
+
 void CSnoopConfig::onOptionsRelaxedparsing()
 {
   if(bRelaxedParsing)
@@ -751,7 +765,6 @@ void CSnoopConfig::onScansegmentNoidct()
     bDecodeScanImgAc = false;
   }
 
-  emit scanImageAc(bDecodeScanImgAc);
   Dirty();
   docImageDirty();
   HandleAutoReprocess();
@@ -766,7 +779,6 @@ void CSnoopConfig::onScansegmentFullidct()
     bDecodeScanImgAc = true;
   }
 
-  emit scanImageAc(bDecodeScanImgAc);
   Dirty();
   docImageDirty();
   HandleAutoReprocess();

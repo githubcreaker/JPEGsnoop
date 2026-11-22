@@ -21,6 +21,7 @@
 #include <utility>
 
 #include <QtWidgets>
+#include <memory>
 #include <QtPrintSupport/qtprintsupportglobal.h>
 #include <QPageSetupDialog>
 #include <QPrintDialog>
@@ -443,7 +444,6 @@ void MainWindow::createActions(void)
   zoom12_5Act = new QAction(tr("12.5%"), this);
   zoom12_5Act->setData(PRV_ZOOM_12);
   zoom12_5Act->setCheckable(true);
-  zoom12_5Act->setChecked(true);
 
   zoom25Act = new QAction(tr("25%"), this);
   zoom25Act->setData(PRV_ZOOM_25);
@@ -477,7 +477,27 @@ void MainWindow::createActions(void)
   zoom500Act->setData(PRV_ZOOM_800);
   zoom500Act->setCheckable(true);
 
+  zoom1600Act = new QAction(tr("1600%"), this);
+  zoom1600Act->setData(PRV_ZOOM_1600);
+  zoom1600Act->setCheckable(true);
+
+  zoom3200Act = new QAction(tr("3200%"), this);
+  zoom3200Act->setData(PRV_ZOOM_3200);
+  zoom3200Act->setCheckable(true);
+
+  zoom6400Act = new QAction(tr("6400%"), this);
+  zoom6400Act->setData(PRV_ZOOM_6400);
+  zoom6400Act->setCheckable(true);
+
+  // The default (Windows' was 12.5%, and it had no fitting)
+  zoomFitAct = new QAction(tr("Zoom to Fit Window"), this);
+  zoomFitAct->setData(PRV_ZOOM_FIT);
+  zoomFitAct->setShortcut(tr("Ctrl+0"));
+  zoomFitAct->setCheckable(true);
+  zoomFitAct->setChecked(true);
+
   zoomGroup = new QActionGroup(this);
+  zoomGroup->addAction(zoomFitAct);
   zoomGroup->addAction(zoom12_5Act);
   zoomGroup->addAction(zoom25Act);
   zoomGroup->addAction(zoom50Act);
@@ -487,7 +507,22 @@ void MainWindow::createActions(void)
   zoomGroup->addAction(zoom300Act);
   zoomGroup->addAction(zoom400Act);
   zoomGroup->addAction(zoom500Act);
+  zoomGroup->addAction(zoom1600Act);
+  zoomGroup->addAction(zoom3200Act);
+  zoomGroup->addAction(zoom6400Act);
   connect(zoomGroup, SIGNAL(triggered(QAction*)), imgWindow, SLOT(zoom(QAction*)));
+  // The check mark follows Zoom In and Out, as on Windows
+  connect(imgWindow, &Q_Viewer::zoomModeChanged, this, [this](int nMode) {
+    for(QAction *pAct : zoomGroup->actions())
+    {
+      if(pAct->data().toInt() == nMode)
+        pAct->setChecked(true);
+    }
+  });
+  // Their shortcuts work in the image window too
+  imgWindow->addAction(zoomInAct);
+  imgWindow->addAction(zoomOutAct);
+  imgWindow->addAction(zoomFitAct);
 
   // View > Overlays > MCU Grid (master's CJPEGsnoopDoc::OnOverlaysMcugrid):
   // checked while the image window draws the grid, which stays on from file
@@ -589,6 +624,12 @@ void MainWindow::createActions(void)
   relaxedParseAct->setCheckable(true);
   relaxedParseAct->setChecked(m_pAppConfig->relaxedParsing());
   connect(relaxedParseAct, SIGNAL(triggered()), m_pAppConfig, SLOT(onOptionsRelaxedparsing()));
+
+  // (Not on Windows, which had no hashes)
+  skipLargeHashesAct = new QAction(tr("Skip Hashes on 4 GiB or Larger Files"), this);
+  skipLargeHashesAct->setCheckable(true);
+  skipLargeHashesAct->setChecked(m_pAppConfig->skipLargeHashes());
+  connect(skipLargeHashesAct, &QAction::triggered, m_pAppConfig, &CSnoopConfig::onOptionsSkipLargeHashes);
 
   configAct = new QAction(tr("Configuration..."), this);
   // On macOS this is the app menu's Preferences item (Cmd+,), as Qt's text
@@ -730,6 +771,8 @@ void MainWindow::createMenus(void)
   imageZoomMenu->addAction(zoomInAct);
   imageZoomMenu->addAction(zoomOutAct);
   imageZoomMenu->addSeparator();
+  imageZoomMenu->addAction(zoomFitAct);
+  imageZoomMenu->addSeparator();
   imageZoomMenu->addAction(zoom12_5Act);
   imageZoomMenu->addAction(zoom25Act);
   imageZoomMenu->addAction(zoom50Act);
@@ -739,6 +782,9 @@ void MainWindow::createMenus(void)
   imageZoomMenu->addAction(zoom300Act);
   imageZoomMenu->addAction(zoom400Act);
   imageZoomMenu->addAction(zoom500Act);
+  imageZoomMenu->addAction(zoom1600Act);
+  imageZoomMenu->addAction(zoom3200Act);
+  imageZoomMenu->addAction(zoom6400Act);
 
   overlayMenu->addAction(mcuGridAct);
 
@@ -761,6 +807,7 @@ void MainWindow::createMenus(void)
   optionsMenu->addAction(makerNotesAct);
   optionsMenu->addAction(sigSearchAct);
   optionsMenu->addAction(relaxedParseAct);
+  optionsMenu->addAction(skipLargeHashesAct);
   optionsMenu->addSeparator();
   scanSegMenu = optionsMenu->addMenu(tr("Scan Segment"));
   optionsMenu->addSeparator();
@@ -831,6 +878,21 @@ bool MainWindow::openFile(const QString &strPath)
   // the previous file's state and skips decoding (master did this in
   // CJPEGsnoopDoc::Reset() on every open).
   emit ImgSrcChanged();
+
+  // Windows opened a file through its Reprocess(), so the low-resolution
+  // notice came first, with the previous file gone. There is none for a file
+  // that can't be analyzed (its error says why). A file sent meanwhile waits
+  // until the notice is closed (see openPending()).
+  if(idctNoteDue())
+  {
+    const QFileInfo info(strPath);
+    if(info.isFile() && info.isReadable() && (info.size() > 0))
+    {
+      clearImageViews();
+      m_pDocLog->Clear();
+      showIdctNote();
+    }
+  }
 
   AnalyzeFile();
 
@@ -1178,8 +1240,11 @@ void MainWindow::AnalyzeFileDo()
   // Clear the document log
   m_pDocLog->Clear();
 
+  // Before the decode, which then moves the file's position as it needs
+  const QStringList astrFacts = fileIntro();
+
   // (Shared with File > Batch Process, whose logs are this report)
-  addReportHeader(m_pDocLog, m_currentFile, m_lFileSize);
+  addReportHeader(m_pDocLog, m_currentFile, m_lFileSize, astrFacts);
 
   // A File Overlay changes what is decoded, so say so first. (Windows only
   // listed it in the scan section, which isn't there with Decode Image off.)
@@ -1229,10 +1294,65 @@ void MainWindow::AnalyzeFileDo()
     {
       imgWindow->drawImage();
     }
+    else
+    {
+      imgWindow->showNoImage(m_pJfifDec->GetNoImageReason());
+      // To where the report says why: a long one could stop short of its end
+      // (Once it is laid out: only then is its last line's place known)
+      QTimer::singleShot(0, textEdit, [this]() {
+        textEdit->verticalScrollBar()->setValue(textEdit->verticalScrollBar()->maximum());
+      });
+    }
 
     // Now indicate that the file has been processed
     m_bFileAnalyzed = true;
   }
+}
+
+//-----------------------------------------------------------------------------
+// The report's lines of the file's dates and hashes. Under 4 GiB they take up
+// to 10 seconds or so, counted in the status bar. A larger file's can take
+// minutes: a dialog with Cancel counts those, and keeps anything else from
+// starting meanwhile (a file sent from Finder waits, as for any dialog).
+QStringList MainWindow::fileIntro()
+{
+  const bool bLarge = (m_pFile->size() >= CFileFacts::kLargeFile);
+  std::unique_ptr<QProgressDialog> pProgress;
+  const auto clearProgress = qScopeGuard([this, &pProgress]() {
+    m_pHashProgress = nullptr;
+    // A file that large isn't analyzed, which would replace the percent
+    if(pProgress)
+      m_StatusBar->showMessage(tr("Done"));
+  });
+
+  return m_fileFacts.lines(*m_pFile, m_pAppConfig->skipLargeHashes(), [&](int nPercent) {
+    m_StatusBar->showMessage(tr("Calculating file hashes: %1%").arg(nPercent));
+    if(!bLarge)
+    {
+      return true;
+    }
+    if(!pProgress)
+    {
+      pProgress.reset(new QProgressDialog(this));
+      pProgress->setObjectName("hashProgress");
+      pProgress->setWindowTitle(tr("File Hashes"));
+      pProgress->setLabelText(tr("Calculating file hashes:\n%1").arg(QFileInfo(m_currentFile).fileName()));
+      pProgress->setCancelButtonText(tr("Cancel"));
+      pProgress->setRange(0, 100);
+      pProgress->setWindowModality(Qt::ApplicationModal);
+      pProgress->setAutoReset(false);
+      pProgress->setAutoClose(false);
+      pProgress->setMinimumDuration(0);
+      pProgress->setMinimumWidth(fontMetrics().horizontalAdvance(QLatin1Char('x')) * 50);
+      pProgress->show();
+      m_pHashProgress = pProgress.get();
+    }
+    pProgress->setValue(nPercent);
+    // setValue() lets Cancel be clicked only when the percent changes: a GiB
+    // apart in a file of 100
+    QCoreApplication::processEvents();
+    return !pProgress->wasCanceled();
+  });
 }
 
 //-----------------------------------------------------------------------------
@@ -1586,25 +1706,9 @@ void MainWindow::reprocess()
     return;
   }
 
-  // Show coach message once
-  if(m_pAppConfig->decodeImage() &&	m_pAppConfig->coachIdct())
+  if(idctNoteDue())
   {
-    // Show the coaching dialog
-    QString msg;
-
-    if(m_pAppConfig->decodeAc())
-    {
-      msg = strHiRes;
-    }
-    else
-    {
-      msg = strLoRes;
-    }
-
-    // On the stack: a new dialog per tip used to leak
-    Q_Note note(msg);
-    note.exec();
-    m_pAppConfig->setCoachIdct(!note.hideStatus());
+    showIdctNote();
   }
 
   emit ImgSrcChanged();
@@ -1613,6 +1717,28 @@ void MainWindow::reprocess()
   AnalyzeFile();
 
   // TODO: Handle AVI
+}
+
+//-----------------------------------------------------------------------------
+// The notice that the image is decoded in low or full resolution, shown when
+// a file is opened or reprocessed until it is turned off
+
+bool MainWindow::idctNoteDue() const
+{
+  return m_pAppConfig->decodeImage() && m_pAppConfig->coachIdct();
+}
+
+void MainWindow::showIdctNote()
+{
+  QString strMsg = m_pAppConfig->decodeAc() ? strHiRes : strLoRes;
+
+  // On the stack: a new dialog per tip used to leak
+  Q_Note note(strMsg);
+  note.exec();
+  m_pAppConfig->setCoachIdct(!note.hideStatus());
+  // As on Windows: else turning it off was lost if the settings had been
+  // saved earlier in the session (as they are when the license is accepted)
+  m_pAppConfig->Dirty();
 }
 
 //-----------------------------------------------------------------------------
@@ -2829,7 +2955,18 @@ void MainWindow::runBatch(const BatchSettings &sBatch, const BatchList &list)
         break;
       }
 
-      results << batch.process(files.at(nInd), sOptions);
+      // Cancel waits for the file it is on, but not for minutes of hashes
+      std::function<bool(int)> fnHashProgress;
+      if(QFileInfo(files.at(nInd).strSrc).size() >= CFileFacts::kLargeFile)
+      {
+        fnHashProgress = [&](int nPercent) {
+          progress.setLabelText(tr("Batch processing file %1 of %2:\n%3\nCalculating file hashes: %4%")
+                                  .arg(nInd + 1).arg(nFiles).arg(strName).arg(nPercent));
+          QCoreApplication::processEvents();
+          return !progress.wasCanceled();
+        };
+      }
+      results << batch.process(files.at(nInd), sOptions, fnHashProgress);
     }
 
     if(!progress.wasCanceled())
@@ -3043,6 +3180,12 @@ void MainWindow::closeEvent(QCloseEvent *pEvent)
 {
   // A batch in progress stops after the file it is on; the window stays open
   // to show what was done
+  // Quitting while a large file is hashed stops that
+  if(m_pHashProgress)
+  {
+    m_pHashProgress->cancel();
+  }
+
   if(m_pBatchProgress)
   {
     m_pBatchProgress->cancel();

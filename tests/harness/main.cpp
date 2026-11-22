@@ -222,8 +222,51 @@
 //
 // gui ... --hover X,Y[/X,Y...]
 //     With --lookup, after its steps, move the mouse over the image window's
-//     preview to each image pixel and print the window's status bar (the MCU,
-//     file offset and YCC labels).
+//     preview to each image pixel (which may be off the image), or off the
+//     preview altogether for "leave", and print the window's status bar (the
+//     MCU, file offset and YCC labels).
+//
+// gui ... --note ANSWER
+//     Start with the low-resolution notice on, as at a first start, and
+//     answer each note that shows: ok (its checkbox as it is), keep (untick
+//     "do not show this", then OK), escape, or finder=NAME (OK, with NAME
+//     sent as Finder does while it shows, percent-encoded, and the note left
+//     up long enough for that to open). Print each note's text and checkbox,
+//     and whether the report and the preview are empty behind it. At the end,
+//     close the window and print how many showed and the setting as saved.
+//     --settings-saved saves the settings as the window opens, as accepting
+//     the license terms does at a first start.
+//
+// gui ... --image-window STEP[,STEP...] [--full-idct]
+//     Print the image window's title and width after each file, with whether
+//     it is wider than it was first shown and whether any indicator's text is
+//     cut (wider than its label). After the first file, do each STEP
+//     and print the same: idct=full and idct=none (choose them under Options
+//     > Scan Segment), reprocess, chan=NAME and zoom=PCT (choose them in the
+//     View menu; PCT may also be fit, in or out), hover=X:Y (the mouse on
+//     that image pixel), widest (the widest values each indicator can show),
+//     show, report (whether the report is at its top or end, its last line
+//     and the status bar's message), intro (the report's lines about the
+//     file, joined by "|"), menu (View > Image Zoom's items, with their
+//     shortcuts), grid
+//     (View > Overlays > MCU Grid), new, size=W:H, scroll=X:Y or
+//     scroll=mid, wait (for a resize's smoothing), key=fit|in|out and
+//     key-image=... (that item's shortcut in the main or the image window),
+//     view (the zoom, the one checked, whether it fits, the image pixel in
+//     the middle, and whether a reduced image is smooth) and sweep=MCU (Zoom
+//     to Fit Window at 24 window sizes: that each fits with no scroll bar,
+//     and each screen pixel, whole or painted in part, with MCUs of that many
+//     pixels). --full-idct starts
+//     with Full IDCT saved.
+//
+// gui ... --hash-large, --hash-dialog ANSWER
+//     --hash-large starts with Options > Skip Hashes on 4 GiB or Larger Files
+//     off. --hash-dialog answers a large file's hashing progress: cancel (its
+//     button), close (the dialog), quit (close the main window, as Quit does)
+//     or finder=NAME (Cancel, once NAME was sent as Finder does and given
+//     time to open). Print the dialog when it shows, and at the end how many
+//     showed. --image-window's steps skip-large (choose the item), option
+//     (its check mark) and saved (close the window, print what it saved).
 //
 // gui ... --dqt CHOICE[+CHOICE...]
 //     After the first file (or file N with --dqt-at N; 0 is before any file),
@@ -415,6 +458,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QCoreApplication>
 #include <QDate>
@@ -493,6 +537,7 @@
 #include "DocLog.h"
 #include "FileTiff.h"
 #include "exportdialogs.h"
+#include "filefacts.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
@@ -502,6 +547,8 @@
 #include "cmdline.h"
 #include "eula.h"
 #include "mainwindow.h"
+#include "note.h"
+#include "snoop.h"
 #include "q_decodedetaildlg.h"
 #include "snoopconfigdialog.h"
 
@@ -533,7 +580,13 @@ static void usage()
           "                         [--new STEP[,STEP...] [--new-at N]]\n"
           "                         [--outside STEP[,STEP...] [--outside-at N]]\n"
           "                         [--open CHOICE[+CHOICE...] [--open-at N]]\n"
+          "                         [--note ok|keep|escape|finder=NAME] [--settings-saved]\n"
+          "                         [--hash-large] [--hash-dialog cancel|close|quit|finder=NAME]\n"
+          "                         [--image-window STEP[,STEP...]] [--full-idct]\n"
           "       jpegsnoop-harness settings\n"
+          "       jpegsnoop-harness settings-name\n"
+          "       jpegsnoop-harness file-facts limit|over|large|large-all|canceled|fresh|recent|kept|rewritten|restored|replaced|other|grown|shrunk|unreadable|"
+          "closed|huge|progress\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
           "                         [--out-same-case] [--src-link]\n"
@@ -546,6 +599,7 @@ static void usage()
           "                         [--batch-unreadable REL]... [--batch-mode OCTAL:REL]...\n"
           "                         [--batch-link sym|hard:NAME=TARGET]... [--batch-compare] [--batch-open-missing]\n"
           "                         [--batch-cancel-after N] [--batch-close-after N] [--replace]\n"
+          "                         [--batch-sparse REL=SIZE]... [--batch-cancel-hash] [--hash-large]\n"
           "                         [--no-decode-image] [--overlay STEPS] [--offset STEPS]\n"
           "       any mode: [--scale F]\n");
 }
@@ -1017,8 +1071,23 @@ static bool imageEndPixel(const PreviewCanvas *pCanvas, int nDevX, int nDevY, QR
   const QSize &sizeFrame = pCanvas->frameSize();
   if(sizeFrame.isEmpty())
     return false;
-  const int nEndX = static_cast<int>(sizeFrame.width() * pCanvas->zoom());
-  const int nEndY = static_cast<int>(sizeFrame.height() * pCanvas->zoom());
+  // Fitted, an image with no padding has no line however its size rounds;
+  // enlarged, the line is on the first screen pixel centred in the padding
+  const double dZoom = pCanvas->zoom();
+  const auto fnEnd = [pCanvas, dZoom](int nEnd, int nFull) {
+    if(!pCanvas->whole())
+      return static_cast<int>(nEnd * dZoom);
+    if(nEnd >= nFull)
+      return qMax(1, qRound(nFull * dZoom));
+    if(dZoom < 1.0)
+      return static_cast<int>(nEnd * dZoom);
+    int nAt = qMax(0, static_cast<int>(nEnd * dZoom) - 1);
+    while(qFloor((nAt + 0.5) / dZoom) < nEnd)
+      nAt++;
+    return nAt;
+  };
+  const int nEndX = fnEnd(sizeFrame.width(), pCanvas->image().width());
+  const int nEndY = fnEnd(sizeFrame.height(), pCanvas->image().height());
   int nAlong;
   if((nDevX == nEndX) && (nDevY >= 0) && (nDevY < nEndY))
     nAlong = nDevY;
@@ -1052,7 +1121,11 @@ static void checkPreview(QTextStream &out, const QString &strWhat = QStringLiter
   const double dScale = dZoom / dDpr;               // points per image pixel
   QStringList errors;
 
-  const QSize sizeWant(qCeil(img.width() * dScale), qCeil(img.height() * dScale));
+  // (Fitted, the size of the copy drawn, which is whole screen pixels)
+  const QSize sizeWant = pCanvas->whole()
+                           ? QSize(qCeil(qMax(1, qRound(img.width() * dZoom)) / dDpr),
+                                   qCeil(qMax(1, qRound(img.height() * dZoom)) / dDpr))
+                           : QSize(qCeil(img.width() * dScale), qCeil(img.height() * dScale));
   if(pCanvas->size() != sizeWant)
   {
     errors << QString("canvas %1x%2, want %3x%4")
@@ -1148,10 +1221,11 @@ static void checkPreview(QTextStream &out, const QString &strWhat = QStringLiter
 static void zoomPreview(MainWindow &window, const QString &strZoom, int nMaxMb, QTextStream &out)
 {
   QAction *pZoom = nullptr;
+  const QString strText = (strZoom == "fit") ? QStringLiteral("Zoom to Fit Window") : strZoom + "%";
   const QList<QAction *> actions = window.findChildren<QAction *>();
   for(QAction *pAction : actions)
   {
-    if(pAction->text() == strZoom + "%")
+    if(pAction->text() == strText)
     {
       pZoom = pAction;
       break;
@@ -1347,6 +1421,12 @@ struct GuiOptions
   int nOutsideAt = 1;             // --outside-at N
   QString strOpen;                // --open CHOICE[+CHOICE...]
   int nOpenAt = 1;                // --open-at N
+  QString strNote;                // --note ANSWER
+  QString strImageWindow;         // --image-window STEP[,STEP...]
+  bool bFullIdct = false;         // --full-idct
+  bool bHashLarge = false;        // --hash-large
+  QString strHashDialog;          // --hash-dialog ANSWER
+  bool bSettingsSaved = false;    // --settings-saved
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -1393,7 +1473,11 @@ static void useGuiSettings(const QString &strSettingsDir, const GuiOptions &opts
   useTestSettings(strSettingsDir);
   QSettings settings;
   settings.setValue("Coach\\ReprocessAuto", false);
-  settings.setValue("Coach\\DecodeIdct", false);
+  settings.setValue("Coach\\DecodeIdct", !opts.strNote.isEmpty());
+  if(opts.bFullIdct)
+    settings.setValue("General\\DecScanImgAc", true);
+  if(opts.bHashLarge)
+    settings.setValue("General\\SkipLargeHashes", false);
   if(opts.bHisto)
   {
     settings.setValue("General\\DecScanHisto", true);
@@ -1563,7 +1647,7 @@ static void markPositions(const QString &strMarks, QTextStream &out)
     return;
   }
 
-  const double dScale = static_cast<double>(pCanvas->width()) / pCanvas->image().width();
+  const double dScale = pCanvas->zoom() / pCanvas->devicePixelRatioF();
   int nMarked = 0;
   const QStringList astrPoints = strMarks.split('/', Qt::SkipEmptyParts);
   for(const QString &strPoint : astrPoints)
@@ -2263,15 +2347,23 @@ static void hoverPositions(const QString &strPoints, QTextStream &out)
     return;
   }
 
-  const double dScale = static_cast<double>(pCanvas->width()) / pCanvas->image().width();
+  const double dScale = pCanvas->zoom() / pCanvas->devicePixelRatioF();
   const QStringList astrPoints = strPoints.split('/', Qt::SkipEmptyParts);
   for(const QString &strPoint : astrPoints)
   {
     const QStringList astrXy = strPoint.split(',');
-    if(astrXy.size() != 2)
+    if(strPoint == QLatin1String("leave"))
+    {
+      QEvent leave(QEvent::Leave);
+      QCoreApplication::sendEvent(pCanvas, &leave);
+    }
+    else if(astrXy.size() == 2)
+    {
+      const QPointF pt((astrXy.at(0).toInt() + 0.5) * dScale, (astrXy.at(1).toInt() + 0.5) * dScale);
+      sendMouse(pCanvas, QEvent::MouseMove, pt);
+    }
+    else
       continue;
-    const QPointF pt((astrXy.at(0).toInt() + 0.5) * dScale, (astrXy.at(1).toInt() + 0.5) * dScale);
-    sendMouse(pCanvas, QEvent::MouseMove, pt);
     QCoreApplication::processEvents();
     out << "harness: hover " << strPoint << ": \"" << pMcu->text() << "\" \"" << pFile->text() << "\" \""
         << pYcc->text() << "\"\n";
@@ -3369,7 +3461,9 @@ static void mcuGridMenu(MainWindow &window, const QString &strSteps, QTextStream
                .arg(imgShown.height())
                .arg(nDots)
                .arg(nDiff);
-      out << "harness: image-end buffer: red pixels=" << nRed << "\n";
+      // (With where it scrolled to: a wider window can leave nowhere to)
+      out << "harness: image-end buffer: scroll=" << pScroll->horizontalScrollBar()->value() << ","
+          << pScroll->verticalScrollBar()->value() << " red pixels=" << nRed << "\n";
       continue;
     }
     else
@@ -4928,6 +5022,517 @@ static void editSteps(MainWindow &window, const QString &strSteps, QTextStream &
   out.flush();
 }
 
+// JPEGsnoop's notes as they show, answered as --note says (see above)
+static void answerNotes(QTimer &timer, MainWindow &window, const GuiOptions &opts, int &nNotes, QTextStream &out)
+{
+  constexpr int kTicksWaited = 15;      // longer than a waiting file's retry
+  QObject::connect(&timer, &QTimer::timeout,
+                   [&window, &opts, &nNotes, &out, nTicks = 0]() mutable {
+    Q_Note *pNote = qobject_cast<Q_Note *>(QApplication::activeModalWidget());
+    if(!pNote)
+      return;
+    const QLabel *pText = pNote->findChild<QLabel *>("lbCoachMsg");
+    QCheckBox *pOff = pNote->findChild<QCheckBox *>("cbHideMsg");
+    if(!pText || !pOff)
+      return;
+    const auto fnBehind = [&window]() {
+      const Q_Viewer *pViewer = findViewer();
+      const PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+      return QString("report=%1 preview=%2")
+               .arg(window.textEdit->toPlainText().trimmed().isEmpty() ? "empty" : "shown")
+               .arg((!pCanvas || pCanvas->image().isNull()) ? "empty" : "shown");
+    };
+    if(nTicks == 0)
+    {
+      nNotes++;
+      out << "harness: note " << nNotes << ": checked=" << (pOff->isChecked() ? 1 : 0) << " " << fnBehind()
+          << " text=\"" << pText->text() << "\"\n";
+      if(opts.strNote.startsWith("finder="))
+      {
+        const QString strName = QUrl::fromPercentEncoding(opts.strNote.mid(7).toUtf8());
+        QWindowSystemInterface::handleFileOpenEvent(QDir(opts.strFilesDir).filePath(strName));
+        nTicks = 1;
+        return;
+      }
+    }
+    else if(nTicks < kTicksWaited)
+    {
+      nTicks++;
+      return;
+    }
+    else
+      out << "harness: note waited: " << fnBehind() << "\n";
+    nTicks = 0;
+    if(opts.strNote == "keep")
+      pOff->setChecked(false);
+    if(opts.strNote == "escape")
+      pNote->reject();
+    else
+      pNote->accept();
+  });
+  timer.start(20);
+}
+
+// The image window's title and width, and its steps (see --image-window above)
+static void imageWindowReport(const QString &strWhat, int &nFirstWidth, QTextStream &out)
+{
+  // A label's new width reaches the window over several rounds of events
+  for(int nRound = 0; nRound < 5; nRound++)
+    QCoreApplication::processEvents();
+  const Q_Viewer *pViewer = findViewer();
+  if(!pViewer || !pViewer->isVisible())
+  {
+    out << "harness: image window " << strWhat << ": not shown\n";
+    return;
+  }
+  if(nFirstWidth == 0)
+    nFirstWidth = pViewer->width();
+  // (A label with a minimum width is squeezed to it, and its text cut, rather
+  // than widening the window)
+  bool bClipped = false;
+  for(const char *pszName : { "mcuLabel", "fileLabel", "yccLabel" })
+  {
+    const QLabel *pLabel = pViewer->findChild<QLabel *>(pszName);
+    if(pLabel && pLabel->isVisible() && (pLabel->width() < pLabel->sizeHint().width()))
+      bClipped = true;
+  }
+  out << "harness: image window " << strWhat << ": title=\"" << pViewer->windowTitle()
+      << "\" widened=" << ((pViewer->width() > nFirstWidth) ? 1 : 0) << " clipped=" << (bClipped ? 1 : 0)
+      << " width=" << pViewer->width() << "\n";
+}
+
+// What the image window shows of the image (--image-window's view step): the
+// zoom and the one checked in the menu, whether it is fitted as it should be,
+// the image pixel in the middle of the view, and whether a reduced image is
+// the smoothly reduced one.
+static QString viewState(MainWindow &window, Q_Viewer *pViewer)
+{
+  QScrollArea *pScroll = pViewer->findChild<QScrollArea *>();
+  PreviewCanvas *pCanvas = pViewer->findChild<PreviewCanvas *>();
+  if(!pScroll || !pCanvas || pCanvas->image().isNull())
+    return QStringLiteral("no image");
+  QStringList astrChecked;
+  for(const QAction *pAction : window.findChildren<QAction *>())
+  {
+    if(pAction->isChecked() && ((pAction->text() == "Zoom to Fit Window") || pAction->text().endsWith('%')))
+      astrChecked << pAction->text();
+  }
+  astrChecked.removeDuplicates();
+  const QSize sizeRoom = pScroll->maximumViewportSize();
+  const QSize sizeView = pScroll->viewport()->size();
+  const int nSpareX = sizeRoom.width() - pCanvas->width();
+  const int nSpareY = sizeRoom.height() - pCanvas->height();
+  const bool bInside = (nSpareX >= 0) && (nSpareY >= 0);
+  const bool bFull = bInside && (qMin(nSpareX, nSpareY) <= 1);
+  const bool bCentred = (qAbs(2 * pCanvas->x() + pCanvas->width() - sizeView.width()) <= 1)
+                        && (qAbs(2 * pCanvas->y() + pCanvas->height() - sizeView.height()) <= 1);
+  QPoint ptMid;
+  const bool bMid = pCanvas->widgetToImage(QPointF(sizeView.width() / 2.0 - pCanvas->x(),
+                                                   sizeView.height() / 2.0 - pCanvas->y()), ptMid);
+  QString strSmooth = QStringLiteral("-");
+  const double dZoom = pCanvas->zoom();
+  if(dZoom < 1.0)
+  {
+    const QImage &img = pCanvas->image();
+    const QImage imgRef = img.scaled(qMax(1, qRound(img.width() * dZoom)), qMax(1, qRound(img.height() * dZoom)),
+                                     Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    const QImage imgGrab = pCanvas->grab().toImage();
+    strSmooth = QStringLiteral("1");
+    for(int y = 0; y < qMin(imgRef.height(), imgGrab.height()); y++)
+    {
+      for(int x = 0; x < qMin(imgRef.width(), imgGrab.width()); x++)
+      {
+        if((imgRef.pixel(x, y) & 0xFFFFFF) != (imgGrab.pixel(x, y) & 0xFFFFFF))
+          strSmooth = QStringLiteral("0");
+      }
+    }
+  }
+  return QString("checked=%1 zoom=%2 inside=%3 full=%4 centred=%5 bars=%6,%7 middle=%8 smooth=%9")
+    .arg(astrChecked.isEmpty() ? QStringLiteral("none") : astrChecked.join('|'))
+    .arg(dZoom)
+    .arg(bInside ? 1 : 0)
+    .arg(bFull ? 1 : 0)
+    .arg(bCentred ? 1 : 0)
+    .arg(pScroll->horizontalScrollBar()->maximum() > 0 ? 1 : 0)
+    .arg(pScroll->verticalScrollBar()->maximum() > 0 ? 1 : 0)
+    .arg(bMid ? QString("%1,%2").arg(ptMid.x()).arg(ptMid.y()) : QStringLiteral("-"))
+    .arg(strSmooth);
+}
+
+// What is seen of the report when a file has opened (--image-window's report
+// step): whether it is at its top or its end, its last line with text, and
+// the status bar's message.
+static QString reportState(MainWindow &window)
+{
+  for(int nRound = 0; nRound < 5; nRound++)
+    QCoreApplication::processEvents();
+  const QScrollBar *pBar = window.textEdit->verticalScrollBar();
+  const QString strAt = (pBar->maximum() == 0)              ? QStringLiteral("all")
+                        : (pBar->value() >= pBar->maximum()) ? QStringLiteral("end")
+                        : (pBar->value() == 0)               ? QStringLiteral("top")
+                                                             : QStringLiteral("middle");
+  QString strLast;
+  for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
+  {
+    if(!strLine.trimmed().isEmpty())
+      strLast = strLine.trimmed();
+  }
+  return QString("at=%1 status=\"%2\" last=\"%3\"").arg(strAt, window.statusBar()->currentMessage(), strLast);
+}
+
+// Counts the times a scroll bar shows
+class BarWatch : public QObject
+{
+public:
+  using QObject::QObject;
+  int m_nShown = 0;
+
+protected:
+  bool eventFilter(QObject *pObj, QEvent *pEvent) override
+  {
+    if(pEvent->type() == QEvent::Show)
+      m_nShown++;
+    return QObject::eventFilter(pObj, pEvent);
+  }
+};
+
+// Zoom to Fit Window at many window sizes (--image-window's sweep=MCU step):
+// each fits, without a scroll bar even for a moment, and each screen pixel is
+// as it should be, painted whole or only in part. Reduced with the grid off,
+// it is the smoothly reduced image and the red line. Enlarged, it is the image
+// pixel under its centre, the red line on the first in the padding and, with
+// the grid on, a dot on every third along each MCU's first.
+static QString fitSweep(MainWindow &window, Q_Viewer *pViewer, int nMcu)
+{
+  QScrollArea *pScroll = pViewer->findChild<QScrollArea *>();
+  PreviewCanvas *pCanvas = pViewer->findChild<PreviewCanvas *>();
+  const QAction *pGrid = findAction(window, QStringLiteral("MCU Grid"));
+  if(!pScroll || !pCanvas || pCanvas->image().isNull() || !pGrid || (nMcu <= 0))
+    return QStringLiteral("no image");
+  constexpr int kSizes = 24;
+  BarWatch watch;
+  pScroll->horizontalScrollBar()->installEventFilter(&watch);
+  pScroll->verticalScrollBar()->installEventFilter(&watch);
+  int nMisfit = 0;
+  int nEnlarged = 0;
+  int nWrong = 0;
+  for(int nSize = 0; nSize < kSizes; nSize++)
+  {
+    pViewer->resize(700 + (nSize * 29) % 301, 300 + (nSize * 53) % 277);
+    for(int nRound = 0; nRound < 3; nRound++)
+      QCoreApplication::processEvents();
+    const QSize sizeRoom = pScroll->maximumViewportSize();
+    const int nSpareX = sizeRoom.width() - pCanvas->width();
+    const int nSpareY = sizeRoom.height() - pCanvas->height();
+    if((nSpareX < 0) || (nSpareY < 0) || (qMin(nSpareX, nSpareY) > 1)
+       || (pScroll->horizontalScrollBar()->maximum() > 0) || (pScroll->verticalScrollBar()->maximum() > 0))
+      nMisfit++;
+
+    const double dZoom = pCanvas->zoom();
+    if(dZoom < 1.0)
+    {
+      if(pGrid->isChecked())
+        continue;
+      QTest::qWait(200);          // until it is smoothed
+      const QImage &imgSrc = pCanvas->image();
+      const QImage imgRef = imgSrc.scaled(qMax(1, qRound(imgSrc.width() * dZoom)),
+                                          qMax(1, qRound(imgSrc.height() * dZoom)),
+                                          Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+      const QImage imgGrab = pCanvas->grab().toImage();
+      for(int y = 0; y < qMin(imgRef.height(), imgGrab.height()); y++)
+      {
+        for(int x = 0; x < qMin(imgRef.width(), imgGrab.width()); x++)
+        {
+          QRgb nWant = imgRef.pixel(x, y);
+          QRgb nLine;
+          if(imageEndPixel(pCanvas, x, y, nLine))
+            nWant = nLine;
+          if((imgGrab.pixel(x, y) & 0xFFFFFF) != (nWant & 0xFFFFFF))
+            nWrong++;
+        }
+      }
+      continue;
+    }
+    nEnlarged++;
+    const bool bGrid = pGrid->isChecked() && (dZoom >= 0.25);
+    const QImage &img = pCanvas->image();
+    const QImage imgGrab = pCanvas->grab().toImage();
+    const int nW = qMin(imgGrab.width(), qRound(img.width() * dZoom));
+    const int nH = qMin(imgGrab.height(), qRound(img.height() * dZoom));
+    // Which image pixel each column and row shows, and which start an MCU
+    QList<int> anX(nW);
+    QList<int> anY(nH);
+    for(int x = 0; x < nW; x++)
+      anX[x] = qMin(qFloor((x + 0.5) / dZoom), img.width() - 1);
+    for(int y = 0; y < nH; y++)
+      anY[y] = qMin(qFloor((y + 0.5) / dZoom), img.height() - 1);
+    // A part painted by itself, as when only that is uncovered (at even
+    // points, which are whole screen pixels at 1, 1.5 and 2)
+    const double dDpr = pCanvas->devicePixelRatioF();
+    const QRect rectPart(2 * (pCanvas->width() / 6), 2 * (pCanvas->height() / 6), 2 * (pCanvas->width() / 5),
+                         2 * (pCanvas->height() / 5));
+    const QImage imgPart = pCanvas->grab(rectPart).toImage();
+    const int nPartX = qRound(rectPart.x() * dDpr);
+    const int nPartY = qRound(rectPart.y() * dDpr);
+    for(int y = 0; y < nH; y++)
+    {
+      const bool bRow = (y == 0) || (anY[y] / nMcu != anY[y - 1] / nMcu);
+      for(int x = 0; x < nW; x++)
+      {
+        QRgb nWant = img.pixel(anX[x], anY[y]);
+        QRgb nLine;
+        if(imageEndPixel(pCanvas, x, y, nLine))
+          nWant = nLine;
+        if(bGrid)
+        {
+          const bool bCol = (x == 0) || (anX[x] / nMcu != anX[x - 1] / nMcu);
+          if((bCol && (y % 3 == 0)) || (bRow && (x % 3 == 0)))
+            nWant = qRgb(32, 32, 32);
+        }
+        if((imgGrab.pixel(x, y) & 0xFFFFFF) != (nWant & 0xFFFFFF))
+          nWrong++;
+        if((x >= nPartX) && (y >= nPartY) && (x - nPartX < imgPart.width()) && (y - nPartY < imgPart.height())
+           && ((imgPart.pixel(x - nPartX, y - nPartY) & 0xFFFFFF) != (nWant & 0xFFFFFF)))
+          nWrong++;
+      }
+    }
+  }
+  return QString("sizes=%1 misfit=%2 bars-shown=%3 enlarged=%4 wrong=%5")
+    .arg(kSizes).arg(nMisfit).arg(watch.m_nShown).arg(nEnlarged).arg(nWrong);
+}
+
+static void imageWindowSteps(MainWindow &window, const QString &strSteps, int &nFirstWidth, QTextStream &out)
+{
+  for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
+  {
+    const QString strName = strStep.section('=', 0, 0);
+    const QString strArg = QUrl::fromPercentEncoding(strStep.section('=', 1).toUtf8());
+    QAction *pAction = nullptr;
+    if(strName == "idct")
+      pAction = findAction(window, (strArg == "full") ? QStringLiteral("Full IDCT (AC+DC - slow)")
+                                                     : QStringLiteral("No IDCT (DC only - fast)"));
+    else if(strName == "reprocess")
+      pAction = findAction(window, QStringLiteral("Reprocess File"));
+    else if(strName == "chan")
+      pAction = findAction(window, strArg);
+    else if(strName == "zoom")
+      pAction = findAction(window, (strArg == "fit")  ? QStringLiteral("Zoom to Fit Window")
+                                   : (strArg == "in")  ? QStringLiteral("Zoom In")
+                                   : (strArg == "out") ? QStringLiteral("Zoom Out")
+                                                       : strArg + "%");
+    else if(strName == "grid")
+      pAction = findAction(window, QStringLiteral("MCU Grid"));
+    else if(strName == "new")
+      pAction = findAction(window, QStringLiteral("&New"));
+    else if((strName == "skip-large") || (strName == "option"))
+    {
+      QAction *pItem = findAction(window, QStringLiteral("Skip Hashes on 4 GiB or Larger Files"));
+      if(!pItem)
+      {
+        out << "harness: image option: no such item\n";
+        continue;
+      }
+      if(strName == "skip-large")
+        pItem->trigger();
+      out << "harness: image option: checkable=" << (pItem->isCheckable() ? 1 : 0)
+          << " checked=" << (pItem->isChecked() ? 1 : 0) << "\n";
+      continue;
+    }
+    else if(strName == "saved")
+    {
+      window.close();           // which saves the settings
+      QCoreApplication::processEvents();
+      out << "harness: image option saved="
+          << QSettings().value("General\\SkipLargeHashes", QStringLiteral("none")).toString() << "\n";
+      continue;
+    }
+    else if(strName == "report")
+    {
+      out << "harness: image report: " << reportState(window) << "\n";
+      continue;
+    }
+    else if(strName == "intro")
+    {
+      // The report's lines from the file's name to the first empty one
+      QStringList astrIntro;
+      for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
+      {
+        if(astrIntro.isEmpty() && !strLine.startsWith("  Filename: ["))
+          continue;
+        if(strLine.trimmed().isEmpty())
+          break;
+        astrIntro << (astrIntro.isEmpty() ? QStringLiteral("  Filename: [...]") : strLine);
+      }
+      out << "harness: image intro: " << astrIntro.join('|') << "\n";
+      continue;
+    }
+    else if(strName == "menu")
+    {
+      for(const QMenu *pMenu : window.findChildren<QMenu *>())
+      {
+        if(pMenu->title() != "Image Zoom")
+          continue;
+        QStringList astrItems;
+        for(const QAction *pItem : pMenu->actions())
+        {
+          const QString strKey = pItem->shortcut().toString(QKeySequence::PortableText);
+          astrItems << (pItem->isSeparator() ? QStringLiteral("-")
+                                             : (pItem->text() + (strKey.isEmpty() ? QString() : "[" + strKey + "]")));
+        }
+        out << "harness: image zoom menu: " << astrItems.join('|') << "\n";
+      }
+      continue;
+    }
+    else if((strName == "view") || (strName == "sweep") || (strName == "size") || (strName == "scroll")
+            || (strName == "wait") || (strName == "key") || (strName == "key-image"))
+    {
+      Q_Viewer *pViewer = findViewer();
+      QScrollArea *pScroll = pViewer ? pViewer->findChild<QScrollArea *>() : nullptr;
+      if(!pScroll)
+      {
+        out << "harness: image window " << strStep << ": none\n";
+        continue;
+      }
+      if(strName == "view")
+      {
+        out << "harness: image view: " << viewState(window, pViewer) << "\n";
+        continue;
+      }
+      if(strName == "sweep")
+      {
+        out << "harness: image sweep: " << fitSweep(window, pViewer, strArg.toInt()) << "\n";
+        continue;
+      }
+      if(strName == "wait")
+        QTest::qWait(400);
+      else if(strName == "size")
+      {
+        // (No report: it would give a resize's smoothing time to happen)
+        pViewer->resize(strArg.section(':', 0, 0).toInt(), strArg.section(':', 1, 1).toInt());
+        QCoreApplication::processEvents();
+        continue;
+      }
+      else if(strName == "scroll")
+      {
+        QScrollBar *pH = pScroll->horizontalScrollBar();
+        QScrollBar *pV = pScroll->verticalScrollBar();
+        pH->setValue((strArg == "mid") ? pH->maximum() / 2 : strArg.section(':', 0, 0).toInt());
+        pV->setValue((strArg == "mid") ? pV->maximum() / 2 : strArg.section(':', 1, 1).toInt());
+      }
+      else
+      {
+        // The item's shortcut, pressed in the main window or the image window
+        QAction *pItem = findAction(window, (strArg == "fit") ? QStringLiteral("Zoom to Fit Window")
+                                            : (strArg == "in") ? QStringLiteral("Zoom In")
+                                                               : QStringLiteral("Zoom Out"));
+        QWidget *pWin = (strName == "key") ? static_cast<QWidget *>(&window) : static_cast<QWidget *>(pViewer);
+        if(!pItem || pItem->shortcut().isEmpty())
+        {
+          out << "harness: image window " << strStep << ": no shortcut\n";
+          continue;
+        }
+        pWin->activateWindow();
+        static_cast<void>(QTest::qWaitFor([pWin]() { return QApplication::activeWindow() == pWin; }, 1000));
+        const QKeyCombination key = pItem->shortcut()[0];
+        QTest::keyClick(pWin, key.key(), key.keyboardModifiers());
+      }
+      imageWindowReport(strStep, nFirstWidth, out);
+      continue;
+    }
+    else if((strName == "hover") || (strName == "widest"))
+    {
+      Q_Viewer *pViewer = findViewer();
+      PreviewCanvas *pCanvas = pViewer ? pViewer->findChild<PreviewCanvas *>() : nullptr;
+      if(!pCanvas || pCanvas->image().isNull())
+      {
+        out << "harness: image window " << strStep << ": no image\n";
+        continue;
+      }
+      if(strName == "hover")
+      {
+        const double dScale = pCanvas->zoom() / pCanvas->devicePixelRatioF();
+        sendMouse(pCanvas, QEvent::MouseMove,
+                  QPointF((strArg.section(':', 0, 0).toInt() + 0.5) * dScale,
+                          (strArg.section(':', 1, 1).toInt() + 0.5) * dScale));
+      }
+      else
+      {
+        // 65535 pixels of 8, a 32-bit offset and 16-bit DC values
+        const char *const apszWidest[][2] = { { "mcuLabel", "MCU [8191,8191]" },
+                                              { "fileLabel", "File 0x00000000:0" },
+                                              { "yccLabel", "YCC DC=[-32768,-32768,-32768]" } };
+        for(const auto &apszPair : apszWidest)
+        {
+          if(QLabel *pLabel = pViewer->findChild<QLabel *>(apszPair[0]))
+            pLabel->setText(apszPair[1]);
+        }
+      }
+      imageWindowReport(strStep, nFirstWidth, out);
+      continue;
+    }
+    else if(strName != "show")
+    {
+      out << "harness: unknown image window step " << strStep << "\n";
+      continue;
+    }
+
+    if(strName != "show")
+    {
+      if(!pAction)
+      {
+        out << "harness: image window " << strStep << ": no such item\n";
+        continue;
+      }
+      pAction->trigger();
+    }
+    imageWindowReport(strStep, nFirstWidth, out);
+  }
+}
+
+// A large file's hashing progress, answered as --hash-dialog says (see above)
+static void answerHashDialog(QTimer &timer, MainWindow &window, const GuiOptions &opts, int &nShown, QTextStream &out)
+{
+  QObject::connect(&timer, &QTimer::timeout,
+                   [&window, &opts, &nShown, &out, pSeen = QPointer<QProgressDialog>(), nTicks = 0]() mutable {
+    QProgressDialog *pDlg = qobject_cast<QProgressDialog *>(QApplication::activeModalWidget());
+    if(!pDlg || (pDlg->objectName() != QLatin1String("hashProgress")) || pDlg->wasCanceled())
+      return;
+    if(pSeen != pDlg)
+    {
+      pSeen = pDlg;
+      nTicks = 0;
+      nShown++;
+      out << "harness: hash dialog: title=\"" << pDlg->windowTitle() << "\" label=\""
+          << pDlg->labelText().replace('\n', " / ") << "\" modal="
+          << ((pDlg->windowModality() == Qt::ApplicationModal) ? "app" : "other")
+          << " status=\"" << window.statusBar()->currentMessage().section(':', 0, 0) << "\"\n";
+      if(opts.strHashDialog.startsWith("finder="))
+      {
+        const QString strName = QUrl::fromPercentEncoding(opts.strHashDialog.mid(7).toUtf8());
+        QWindowSystemInterface::handleFileOpenEvent(QDir(opts.strFilesDir).filePath(strName));
+        return;
+      }
+    }
+    if(opts.strHashDialog.startsWith("finder=") && (++nTicks < 40))
+      return;                   // longer than a waiting file's retry
+    if(opts.strHashDialog.startsWith("finder="))
+    {
+      const bool bWaited = !window.textEdit->toPlainText().contains("  Filename: [");
+      out << "harness: hash dialog waited=" << (bWaited ? 1 : 0) << "\n";
+    }
+    if(opts.strHashDialog == "close")
+      pDlg->close();
+    else if(opts.strHashDialog == "quit")
+    {
+      window.close();
+      out << "harness: hash dialog quit: closed=" << (window.isVisible() ? 0 : 1) << "\n";
+    }
+    else if(QPushButton *pCancel = pDlg->findChild<QPushButton *>())
+      pCancel->click();
+  });
+  timer.start(5);
+}
+
 static int runGui(const QStringList &files, const GuiOptions &opts, const QString &strSettingsDir)
 {
   useGuiSettings(strSettingsDir, opts);
@@ -4983,6 +5588,20 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
 
   QTimer timerMsgBox;
   closeMessageBoxes(timerMsgBox, out, opts.bReplace);
+  int nNotes = 0;
+  int nFirstWidth = 0;
+  QTimer timerNote;
+  if(opts.bSettingsSaved)
+  {
+    if(CSnoopConfig *pConfig = window.findChild<CSnoopConfig *>())
+      pConfig->RegistryStore();
+  }
+  if(!opts.strNote.isEmpty())
+    answerNotes(timerNote, window, opts, nNotes, out);
+  int nHashDialogs = 0;
+  QTimer timerHash;
+  if(!opts.strHashDialog.isEmpty())
+    answerHashDialog(timerHash, window, opts, nHashDialogs, out);
 
   if(!opts.strEdit.isEmpty() && opts.bEditBefore)
   {
@@ -5196,6 +5815,12 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           else
             out << "harness: detail report " << detailSummary(window.textEdit->toPlainText()) << "\n";
         }
+        if(!opts.strImageWindow.isEmpty())
+        {
+          imageWindowReport(QString("file %1").arg(nFileInd), nFirstWidth, out);
+          if(nFileInd == 1)
+            imageWindowSteps(window, opts.strImageWindow, nFirstWidth, out);
+        }
         out.flush();
       }
 
@@ -5227,6 +5852,44 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
              .arg(opts.nMaxGrowthMb)
              .arg(dGrowth <= opts.nMaxGrowthMb ? "ok" : "too much");
 #endif
+  }
+
+  if(!opts.strHashDialog.isEmpty())
+  {
+    // A file Finder sent during the hashing opens just after it
+    QEventLoop loop;
+    QTimer::singleShot(500, &loop, &QEventLoop::quit);
+    loop.exec();
+    QString strFile = QStringLiteral("-");
+    for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
+    {
+      if(strLine.startsWith("  Filename: ["))
+        strFile = QFileInfo(strLine.mid(13).chopped(1)).fileName();
+    }
+    out << "harness: hash dialogs shown=" << nHashDialogs << " report file=" << strFile
+        << " window=" << (window.isVisible() ? "shown" : "closed") << "\n";
+  }
+
+  if(!opts.strNote.isEmpty())
+  {
+    // A file Finder sent during the note opens just after it
+    QEventLoop loop;
+    QTimer::singleShot(500, &loop, &QEventLoop::quit);
+    loop.exec();
+    if(opts.strNote.startsWith("finder="))
+    {
+      QString strFile = QStringLiteral("-");
+      for(const QString &strLine : window.textEdit->toPlainText().split('\n'))
+      {
+        if(strLine.startsWith("  Filename: ["))
+          strFile = QFileInfo(strLine.mid(13).chopped(1)).fileName();
+      }
+      out << "harness: note finder: report file=" << strFile << "\n";
+    }
+    window.close();               // which saves the settings
+    QCoreApplication::processEvents();
+    out << "harness: notes shown=" << nNotes << " saved="
+        << (QSettings().value("Coach\\DecodeIdct").toBool() ? 1 : 0) << "\n";
   }
 
   out << "harness: done\n";
@@ -5573,6 +6236,8 @@ struct BatchOptions
 {
   QString strSteps;               // --batch STEPS
   QStringList astrCat;            // --batch-cat REL (any number)
+  QStringList astrSparse;         // --batch-sparse REL=SIZE (any number)
+  bool bCancelHash = false;       // --batch-cancel-hash
   QStringList astrUnreadable;     // --batch-unreadable REL (any number)
   QStringList astrModes;          // --batch-mode OCTAL:REL (any number)
   QStringList astrLinks;          // --batch-link sym|hard:NAME=TARGET (any number)
@@ -5591,7 +6256,9 @@ static QMap<QString, QString> filesBelow(const QString &strRoot)
   while(it.hasNext())
   {
     const QString strPath = it.next();
-    mapFiles.insert(dirRoot.relativeFilePath(strPath), fileMd5(strPath));
+    const qint64 nSize = QFileInfo(strPath).size();
+    mapFiles.insert(dirRoot.relativeFilePath(strPath),
+                    (nSize > (64 << 20)) ? QString("big:%1").arg(nSize) : fileMd5(strPath));
   }
   return mapFiles;
 }
@@ -5676,6 +6343,32 @@ static int runBatchMode(const QString &strFolder, const QStringList &astrOpen, c
       out << "harness: couldn't set the mode " << strMode << "\n";
       return 2;
     }
+  }
+  // Files that take no room, made after the copy, which would fill them in
+  for(const QString &strSparse : opts.astrSparse)
+  {
+    QFile file(strRoot + "/in/" + strSparse.section('=', 0, 0));
+    if(!file.open(QIODevice::WriteOnly) || !file.resize(strSparse.section('=', 1).toLongLong()))
+    {
+      out << "harness: skipped: --batch-sparse needs a disk with sparse files\n";
+      return 0;
+    }
+  }
+  // Cancel, once a large file's hashes are counted
+  QTimer timerHashCancel;
+  if(opts.bCancelHash)
+  {
+    QObject::connect(&timerHashCancel, &QTimer::timeout, &timerHashCancel, [&out]() {
+      QProgressDialog *pProgress = qobject_cast<QProgressDialog *>(QApplication::activeModalWidget());
+      if(!pProgress || (pProgress->objectName() != QLatin1String("batchProgress")) || pProgress->wasCanceled())
+        return;
+      const QString strLabel = pProgress->labelText().section('\n', 2);
+      if(!strLabel.startsWith("Calculating file hashes"))
+        return;
+      out << "harness: batch hash progress: " << strLabel << "\n";
+      pProgress->cancel();
+    });
+    timerHashCancel.start(5);
   }
   const QMap<QString, QString> mapSources = filesBelow(strRoot);
 
@@ -6252,6 +6945,155 @@ static int runCmdLineMode(const QStringList &astrIn)
   return 0;
 }
 
+// settings-name: the app's settings file's name, whether it is the bundle ID
+// of the app built beside the driver, and whether that app has the domain,
+// with or without "www." (all only read: no setting is read or written).
+static int runSettingsName()
+{
+  QTextStream out(stdout);
+  const QString strFile =
+    QSettings(QSettings::NativeFormat, QSettings::UserScope, APP_ORG_DOMAIN, APP_NAME).fileName().section('/', -1);
+  const QString strPlist = QCoreApplication::applicationDirPath() + "/app/JPEGsnoopQt.app/Contents/Info.plist";
+  if(!QFile::exists(strPlist))
+  {
+    out << "harness: skipped: settings-name needs the app built beside the driver\n";
+    return 0;
+  }
+  const QString strBundle = QSettings(strPlist, QSettings::NativeFormat).value("CFBundleIdentifier").toString();
+  // main(), which the driver doesn't build: the domain in the app's strings
+  QFile fileApp(QFileInfo(strPlist).absolutePath() + "/MacOS/" APP_NAME);
+  QByteArray abApp;
+  if(fileApp.open(QIODevice::ReadOnly))
+    abApp = fileApp.readAll();
+  const auto fnHas = [&abApp](const char *pszText) {
+    return abApp.contains(QByteArray(1, '\0') + pszText + QByteArray(1, '\0')) ? 1 : 0;
+  };
+  out << "harness: settings name=" << strFile << " bundle=" << strBundle
+      << " same=" << ((strFile == strBundle + ".plist") ? 1 : 0) << " app-domain=" << fnHas(APP_ORG_DOMAIN)
+      << " app-www-domain=" << fnHas("www.impulseadventure.com") << "\n";
+  return 0;
+}
+
+// file-facts WHAT: the intro's hashes when the file changes, on files made in
+// strDir, and how often it was hashed:
+//   fresh:     changed just after it was hashed, which its times might not show
+//   recent:    unchanged, but changed just before: read again, as a write in
+//              the same second might not show in its times
+//   kept:      unchanged: read once
+//   rewritten: changed later; restored: and its modified time put back;
+//   replaced:  another file put in its place, of the same size and time;
+//   other:     another file
+//   grown, shrunk, unreadable: while it is read
+//   closed:    not open; progress: the percents given
+//   huge:      4 GiB, skipped; over: 5 GiB, skipped; limit: a byte under, and
+//              large: 4 GiB not skipped, both canceled as reading starts;
+//              large-all: 4 GiB not skipped, all of it
+//   canceled:  canceled, then read again
+static int runFileFacts(const QString &strWhat, const QString &strDir)
+{
+  const QStringList astrKnown = { "limit", "over", "large", "large-all", "canceled", "fresh", "recent", "kept", "rewritten", "restored", "replaced", "other",
+                                  "grown", "shrunk", "unreadable", "closed", "huge", "progress" };
+  if(!astrKnown.contains(strWhat))
+  {
+    usage();
+    return 2;
+  }
+  QTextStream out(stdout);
+  const QString strPath = QDir(strDir).filePath("facts.bin");
+  const QString strOther = QDir(strDir).filePath("other.bin");
+  const auto fnWrite = [](const QString &strFile, char cFill, qint64 nSize) {
+    QFile file(strFile);
+    if(file.open(QIODevice::WriteOnly))
+      file.write(QByteArray(static_cast<int>(nSize), cFill));
+  };
+  const bool bDuring = (strWhat == "grown") || (strWhat == "shrunk") || (strWhat == "unreadable")
+                       || (strWhat == "progress");
+  // Sparse: they take no room
+  const qint64 nSparse = (strWhat == "limit")                                                  ? 0xFFFFFFFFLL
+                         : (strWhat == "over")                                                 ? 0x140000000LL
+                         : ((strWhat == "huge") || (strWhat == "large") || (strWhat == "large-all")) ? 0x100000000LL
+                                                                                               : 0;
+  const bool bSkip = (strWhat != "large") && (strWhat != "large-all");
+  fnWrite(strPath, 'a', (nSparse > 0) ? 0 : (bDuring || (strWhat == "canceled")) ? (9 << 20) : 100000);
+  fnWrite(strOther, 'b', 100000);
+  const QDateTime dtOld = QDateTime::fromMSecsSinceEpoch(1000000000123LL);
+  for(const QString &strFile : { strPath, strOther })
+  {
+    QFile file(strFile);
+    if(file.open(QIODevice::ReadWrite))
+      file.setFileTime(dtOld, QFileDevice::FileModificationTime);
+  }
+  if(nSparse > 0)
+  {
+    QFile file(strPath);
+    if(!file.open(QIODevice::ReadWrite) || !file.resize(nSparse))
+    {
+      out << "harness: skipped: file-facts " << strWhat << " needs a disk with sparse files\n";
+      return 0;
+    }
+  }
+  else if(!bDuring && (strWhat != "fresh") && (strWhat != "recent") && (strWhat != "closed"))
+    QTest::qWait(3200);         // until a change would show in its times
+
+  CFileFacts facts;
+  QStringList astrPercents;
+  bool bDone = false;
+  const auto fnFacts = [&](const QString &strFile) {
+    QFile file(strFile);
+    if((strWhat != "closed") && !file.open(QIODevice::ReadOnly))
+      return QStringList();
+    return facts.lines(file, bSkip, [&](int nPercent) {
+      if(strWhat != "large-all")
+        astrPercents << QString::number(nPercent);
+      if((strWhat == "limit") || (strWhat == "large"))
+        return false;
+      if((strWhat == "canceled") && !bDone)
+      {
+        bDone = true;
+        return false;
+      }
+      if(bDone || !bDuring || (strWhat == "progress"))
+        return true;
+      bDone = true;
+      if(strWhat == "unreadable")
+        file.close();
+      else
+        QFile::resize(strFile, (strWhat == "grown") ? (10 << 20) : (5 << 20));
+      return true;
+    });
+  };
+
+  const QStringList astrFirst = fnFacts(strPath);
+  QStringList astrSecond;
+  if(!bDuring && (strWhat != "closed") && (nSparse == 0))
+  {
+    if((strWhat == "fresh") || (strWhat == "rewritten") || (strWhat == "restored"))
+    {
+      fnWrite(strPath, 'c', 100000);
+      if(strWhat != "rewritten")
+      {
+        // As a disk whose times don't show it would have it
+        QFile file(strPath);
+        if(file.open(QIODevice::ReadWrite))
+          file.setFileTime(dtOld, QFileDevice::FileModificationTime);
+      }
+    }
+    else if(strWhat == "replaced")
+    {
+      QFile::remove(strPath);
+      QFile::rename(strOther, strPath);
+    }
+    astrSecond = fnFacts((strWhat == "other") ? strOther : strPath);
+  }
+
+  out << "harness: file facts " << strWhat << ": hashed=" << facts.timesHashed();
+  if(!astrSecond.isEmpty())
+    out << " differ=" << ((astrFirst.mid(2) != astrSecond.mid(2)) ? 1 : 0);
+  out << " last=\"" << (astrSecond.isEmpty() ? astrFirst : astrSecond).last().trimmed() << "\""
+      << " progress=" << (astrPercents.isEmpty() ? QStringLiteral("none") : astrPercents.join(',')) << "\n";
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
   if(qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
@@ -6318,6 +7160,9 @@ int main(int argc, char **argv)
   guiOpts.bButtons = args.removeAll("--buttons") > 0;
   guiOpts.bMenus = args.removeAll("--menus") > 0;
   guiOpts.bEditBefore = args.removeAll("--edit-before") > 0;
+  guiOpts.bFullIdct = args.removeAll("--full-idct") > 0;
+  guiOpts.bHashLarge = args.removeAll("--hash-large") > 0;
+  guiOpts.bSettingsSaved = args.removeAll("--settings-saved") > 0;
   ExportOptions exportOpts;
   exportOpts.sJpeg.bExtractAll = args.removeAll("--all") > 0;
   exportOpts.sJpeg.bForceSoi = args.removeAll("--force-soi") > 0;
@@ -6332,6 +7177,17 @@ int main(int argc, char **argv)
   batchOpts.bCompare = args.removeAll("--batch-compare") > 0;
   batchOpts.bReopenMissing = args.removeAll("--batch-open-missing") > 0;
   // Options that can be given more than once
+  batchOpts.bCancelHash = args.removeAll("--batch-cancel-hash") > 0;
+  for(qsizetype nInd; (nInd = args.indexOf("--batch-sparse")) >= 0;)
+  {
+    if(nInd + 1 >= args.size())
+    {
+      usage();
+      return 2;
+    }
+    batchOpts.astrSparse << args.at(nInd + 1);
+    args.remove(nInd, 2);
+  }
   for(const char *pszOpt : { "--batch-cat", "--batch-unreadable", "--batch-mode", "--batch-link", "--user-db" })
   {
     QStringList &astrValues = (QLatin1String(pszOpt) == QLatin1String("--batch-cat"))          ? batchOpts.astrCat
@@ -6359,7 +7215,7 @@ int main(int argc, char **argv)
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
                              "--db-dir-mode", "--mcu-grid", "--bars", "--print", "--recent", "--recent-stored",
-                             "--new", "--outside", "--open" })
+                             "--new", "--outside", "--open", "--note", "--image-window", "--hash-dialog" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -6423,6 +7279,12 @@ int main(int argc, char **argv)
       guiOpts.strOutside = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--open"))
       guiOpts.strOpen = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--hash-dialog"))
+      guiOpts.strHashDialog = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--note"))
+      guiOpts.strNote = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--image-window"))
+      guiOpts.strImageWindow = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -6502,6 +7364,10 @@ int main(int argc, char **argv)
   }
   if(strMode == "settings" && args.isEmpty())
     return runSettings(tmpDir.path());
+  if(strMode == "settings-name" && args.isEmpty())
+    return runSettingsName();
+  if(strMode == "file-facts" && args.size() == 1)
+    return runFileFacts(args.first(), tmpDir.path());
   if(strMode == "export-jpeg" && args.size() == 1)
     return runExportJpeg(args.first(), exportOpts, tmpDir.path());
   if(strMode == "export-tiff" && args.size() == 1)

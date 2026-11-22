@@ -23,6 +23,7 @@
 #include <QPainter>
 #include <QPaintEvent>
 #include <QString>
+#include <QTimer>
 #include <QWidget>
 
 #include "snoop.h"
@@ -37,22 +38,28 @@ class CSnoopConfig;
 // area. 100% is one image pixel per screen (device) pixel, so a Retina screen
 // shows the image 1:1. Below 100% it keeps one smoothly reduced copy; above
 // 100% it enlarges only the area being painted, as sharp pixel blocks, so a
-// high zoom never needs a full-size enlarged copy. Mouse positions are
-// reported in image pixels.
+// high zoom never needs a full-size enlarged copy. A whole image (Zoom to Fit
+// Window) can have any zoom: it is drawn from a copy at its size on screen,
+// which is no larger than the window, so its blocks, the MCU grid and the red
+// line fall on the same screen pixels. Mouse positions are reported in image
+// pixels.
 class PreviewCanvas : public QWidget
 {
   Q_OBJECT
 public:
   explicit PreviewCanvas(QWidget *parent = nullptr);
 
-  void setImage(const QImage &img, double dZoom);   // image is shared, not copied
-  void setZoom(double dZoom);
+  // bWhole: fitted to the window. bQuick: reduced without smoothing, while
+  // the window is being resized. The image is shared, not copied.
+  void setImage(const QImage &img, double dZoom, bool bWhole = false);
+  void setZoom(double dZoom, bool bWhole = false, bool bQuick = false);
   void setMcuGrid(const QSize &sizeMcu);            // empty: no grid
   void setFrameSize(const QSize &sizeFrame);        // a JPEG's own size; empty: none
   bool widgetToImage(const QPointF &ptWidget, QPoint &ptImg) const;
 
   const QImage &image() const { return m_img; }
   double zoom() const { return m_dZoom; }
+  bool whole() const { return m_bWhole; }
   const QSize &frameSize() const { return m_sizeFrame; }
 
 signals:
@@ -68,14 +75,19 @@ protected:
 
 private:
   double logicalPerImagePixel() const;
-  void rebuild();             // reduced copy and widget size for zoom and screen
+  void rebuild();             // scaled copy and widget size for zoom and screen
+  QSize drawnSize() const;    // in screen pixels
+  int screenEdge(int nPixel) const;                 // where an image pixel starts
+  int screenEnd(int nEnd, int nFull, int nDrawn) const;   // where the frame ends
   QRect screenRect(const QRect &rectDirty) const;   // in screen pixels, on the image
   void paintImageEnd(QPainter &painter, const QRect &rectScreen);
   void paintMcuGrid(QPainter &painter, const QRect &rectScreen);
 
   QImage m_img;
-  QImage m_imgReduced;        // only below 100%
+  QImage m_imgScaled;         // only below 100%, or of a whole image
   double m_dZoom;
+  bool m_bWhole;
+  bool m_bQuick;
   QSize m_sizeMcu;            // MCU grid, in image pixels (empty: none)
   QSize m_sizeFrame;          // where the image ends inside its MCUs (empty: none)
 };
@@ -87,13 +99,19 @@ public:
   explicit Q_Viewer(CSnoopConfig *pAppConfig, CimgDecode *pImgDecoder, QWidget *parent = nullptr, Qt::WindowFlags f = Qt::WindowFlags());
   void drawImage();
   void clearImage();
+  void showNoImage(const QString &strWhy);      // the file analyzed has none
   void updateMcuGrid();       // after View > Overlays > MCU Grid
   void setStatusBarVisible(bool bOn);     // View > Status Bar
 
 public slots:
   void zoom(QAction *action);
   void setPreviewTitle(QAction *preview);
-  void scanImageAc(bool);
+
+signals:
+  void zoomModeChanged(int nMode);      // for the menu's check mark
+
+protected:
+  bool eventFilter(QObject *pObj, QEvent *pEvent) override;
 
 private slots:
   void onCanvasMoved(QPoint ptImg, bool bInside);
@@ -102,6 +120,12 @@ private slots:
 private:
   bool imageReady() const;
   bool scanReady() const;
+  void showNoPosition();      // N/A in the MCU, file and YCC indicators
+  void setZoomMode(int nMode);
+  int nextZoomMode(bool bIn) const;
+  double fitZoom(const QSize &sizeImg) const;
+  void refit();               // Zoom to Fit Window, after a resize
+  void updateTitle();
 
   CSnoopConfig *m_pAppConfig;
   CimgDecode *m_pImgDecoder;
@@ -111,9 +135,8 @@ private:
   double scaleFactor;
   int32_t m_nZoomMode;
 
-  QString m_strPreview;
-  QString m_strZoom;
-  QString m_strIdct;
+  QString m_strChannel;
+  QTimer m_timerSmooth;       // after a resize's quick redraws
 
   QStatusBar *statusBar;
   QLabel *mcuLabel;

@@ -173,6 +173,9 @@ public:
 
   // UI elements
   void SetStatusBar(QStatusBar * pStatBar);
+  // Why the last file processed has no image to show, in a few words ("" if
+  // it has one)
+  const QString &GetNoImageReason() const { return m_strNoImage; }
 
 signals:
   void updateStatus(QString statusMsg, int);
@@ -314,6 +317,10 @@ private:
 
   bool m_bImgProgressive;       // Progressive scan?
   bool m_bImgSofUnsupported;    // SOF mode unsupported - skip SOI content
+  uint32_t m_nSofMode;          // n of the last SOFn
+  QString m_strNoImage;         // see GetNoImageReason()
+  void ReportNoImage(bool bPsd);
+  void ShowDoneStatus();
 
   QString m_strComment;         // Comment string
 

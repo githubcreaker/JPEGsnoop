@@ -42,7 +42,8 @@ when it is installed, so Pillow needn't be installed separately).
     after each file, `--repeat` opens the files N times, and `--max-growth-mb`
     reports whether memory grew by more than N MB after the first round (a leak
     check; skipped under ASan). After each file in the first round:
-    - `--zoom PCT` picks that View > Zoom level (`800` for 800%), and
+    - `--zoom PCT` picks that View > Zoom level (`800` for 800%; `fit` for
+      Zoom to Fit Window, which is the default), and
       `--max-zoom-mb N` reports whether showing it took more than N MB;
     - `--check-preview` compares the preview with the decoded image: its size, where
       mouse positions land in the image, and the pixels drawn, in screen pixels,
@@ -150,7 +151,8 @@ when it is installed, so Pillow needn't be installed separately).
       It prints the dialog's fields (the ranges, X and Y, the MCU and file
       offset shown, and the focus) when it shows and after each step.
       `--hover X,Y[/X,Y...]` then moves the mouse over the preview to each
-      image pixel and prints the image window's status bar (MCU, file offset
+      image pixel (which may be off the image), or off the preview altogether
+      for `leave`, and prints the image window's status bar (MCU, file offset
       and YCC).
     - `--dqt CHOICE[+CHOICE...]` chooses Tools > Search Executable for DQT
       after the first file (or file N with `--dqt-at N`; `0` is before any
@@ -240,6 +242,37 @@ when it is installed, so Pillow needn't be installed separately).
       files given). It prints the dialog's title, filters, the one selected,
       its mode and whether it is read-only, then the file the report is of
       and whether it was read as an AVI.
+    - `--note ANSWER` starts with the low-resolution notice on (otherwise the
+      driver keeps it off) and answers each note: `ok` (its checkbox as it
+      is), `keep` (untick it, then OK), `escape`, or `finder=NAME` (OK, but
+      only after NAME has been sent as Finder does and given time to open).
+      It prints each note's text and checkbox and whether the report and
+      preview are empty behind it; at the end it closes the window and prints
+      how many showed and the setting as saved. `--settings-saved` saves the
+      settings as the window opens, as accepting the license does.
+    - `--image-window STEP[,STEP...]` prints the image window's title and
+      width after each file: whether it is wider than at first, and whether
+      an indicator's text is cut. After the first file it does each STEP and
+      prints the same: `idct=full`, `idct=none`, `reprocess`, `chan=NAME`,
+      `zoom=PCT`, `hover=X:Y` (on that image pixel), `widest` (the widest
+      values the indicators can show) and `show`. For the zoom: `zoom=` also
+      takes `fit`, `in` and `out`; `menu` prints the menu; `grid`, `new`,
+      `size=W:H`, `scroll=X:Y` (or `scroll=mid`) and `wait` (for a resize's
+      smoothing) do those; `key=fit|in|out` and `key-image=...` press the
+      shortcut in the main or the image window; `view` prints the zoom, the
+      one checked, whether it fits, the image pixel in the middle and whether
+      a reduced image is smooth; `sweep=MCU` fits it at 24 window sizes and
+      checks every screen pixel of those enlarged. `report` prints whether
+      the report is at its top or end, its last line and the status bar's
+      message; `intro` prints the report's lines about the file;
+      `skip-large`, `option` and `saved` choose, print and save Options >
+      Skip Hashes on 4 GiB or Larger Files. `--full-idct` starts with Full
+      IDCT saved.
+    - `--hash-large` starts with that option off (also in `batch`), and
+      `--hash-dialog cancel|close|quit|finder=NAME` answers a large file's
+      hashing progress. In `batch`, `--batch-sparse REL=SIZE` adds a file
+      that takes no room, and `--batch-cancel-hash` cancels while one is
+      hashed.
     - `--print STEP[,STEP...]` (`--print-at N`; `0` is before any file) prints
       File > Print Setup's place, makes the shared printer write a PDF in the
       settings folder, and answers Print Setup's and Print's system dialogs
@@ -393,6 +426,12 @@ when it is installed, so Pillow needn't be installed separately).
     ARGS would open the window instead, it prints only
     `harness: cmdline window input=FILE`. As `main()` does, it gives Qt none of
     ARGS;
+  - `settings-name` checks the settings' name against the bundle ID of the
+    app built beside the driver, and that app's own domain (both only read);
+  - `file-facts WHAT` hashes files it makes as the report's intro does, as
+    they change before or while they are read, or are of 4 GiB (sparse, so
+    they take no room; see the usage for WHAT), and prints how often a file
+    was read;
   - `settings` exercises settings load/store, option toggles and the
     Configuration dialog, and prints that dialog's groups, their heights,
     the room below them and its checkboxes, the license terms' groups,
@@ -441,8 +480,15 @@ ends inside its MCUs" section, `OF` in its "Opening a file from outside the
 app: a drop, Finder, the command line" section, `TB` in its "The toolbar's
 Copy and About buttons" section, `RM` in its "Removed: Check for Updates,
 Edit > Undo, View > Adjust, Submit signature" section, `CL` in its
-"Command-line mode" section, and `OD` in its "File > Open's AVI Movie, and the
-status bar's "1234"" section);
+"Command-line mode" section, `OD` in its "File > Open's AVI Movie, and the
+status bar's "1234"" section, `PI` in its "The image window's indicators
+with no pixel under the mouse" section, `RN`, `IT` and `IW` in its "The
+low-resolution notice, and the image window's title and width" section, and
+`SM` in its "One settings file, named as the bundle ID" section, `ZM` in
+its "The zoom menu: Zoom to Fit Window, and up to 6400%" section, `NS` in
+its "Why an image isn't shown" section, `FF` in its "The file's dates and
+hashes" section, and `SF` in its "Options > Skip Hashes on 4 GiB or Larger
+Files" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

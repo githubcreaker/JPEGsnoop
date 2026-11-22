@@ -23,6 +23,7 @@
 
 #include "cmdline.h"
 #include "mainwindow.h"
+#include "snoop.h"
 
 int main(int argc, char *argv[])
 {
@@ -44,9 +45,9 @@ int main(int argc, char *argv[])
     }
 
     QApplication a(argc, argv);
-    QCoreApplication::setOrganizationName("ImpulseAdventure");
-    QCoreApplication::setOrganizationDomain("www.impulseadventure.com");
-    QCoreApplication::setApplicationName("JPEGsnoopQt");
+    QCoreApplication::setOrganizationName(APP_ORG_NAME);
+    QCoreApplication::setOrganizationDomain(APP_ORG_DOMAIN);
+    QCoreApplication::setApplicationName(APP_NAME);
 
     if(sCmdLine.bCmdLine)
     {
