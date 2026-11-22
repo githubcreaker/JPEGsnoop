@@ -2991,7 +2991,9 @@ errors). Otherwise nothing is written to either.
   file that can't be opened still gets its log with the error in it, as on Windows.
 - **A batch's files are kept:** no log or export replaces one of them (with `-ext_all`,
   every file in the folder is one), before or after it is analyzed, nor by a name in
-  another case. It is an error: that log isn't written, or the export stops there.
+  another case, nor the file one of them is a link to, nor a link on the way to it (in
+  its folders' names too). With `-i`, nor is the file analyzed. It is an error: that
+  log isn't written, or the export stops there.
   Windows replaced it, and then analyzed what had replaced it. So a second `-b DIR
   -ext_all` run over the same folder reports each of the first run's files it would
   replace, which are now among the batch's.
@@ -3098,8 +3100,63 @@ cases: the batch's files not kept, 6 fail; kept from the exports only, 2, or the
 only, 4; compared by name, 1 (the other case); Qt given the arguments, 2; a file not
 decoded not an error, 7; an empty file not an error, 2; the size in decimal, 4.
 
+**Third check:** a review of the commits through the previous one found two more ways
+past that fix, both through links, and cases that hung without a printer. Each was
+reproduced and is now fixed:
+- **The file a link leads to wasn't kept.** With `a.jpg` a link to `a.jpg.txt`, which
+  held the image, `-b .` wrote `a.jpg`'s report over `a.jpg.txt` and exited 0: the batch
+  had noted the link's entry, not the file's. Each file's path is now followed as macOS
+  follows it (`PathEntries()` in `General.cpp`), and every entry on the way is kept: the
+  link, each link it leads through (also one to a folder, with `..` after it going up from
+  where that led), and the file at the end. They are noted before anything is written.
+- **An export took the place of the link the file was read through.**
+  `-i frame.000001.jpg -o frame.txt -ext_all`, with `frame.000001.jpg` a link to the
+  image, removed the link to write the first export there (as it removes a link of an
+  export's name that leads elsewhere), and Export JPEG's check for the file analyzed then
+  found nothing there to refuse. Before removing anything, Extract All now checks each name
+  against the file analyzed's entries, and so does the log (`keepPaths()` in
+  `batchprocess.cpp`). That also covers the window's Extract All, which opens a file by
+  its link's name, and File > Batch Process: a batch's log isn't written over the file it
+  reports on, even after Replace. (The other names a batch writes are still replaced when
+  asked, links included.) An export by the file's own name now says "Couldn't write [NAME]:
+  it would replace the file analyzed" too, in place of Export JPEG's "Can't overwrite
+  source file". A hard link of the file is kept as well: its inode can't tell it from the
+  file's own name in another case. (Before, a log or export by such a name replaced the
+  hard link and left the file.)
+- **Three Finder cases hung without a printer.** With none set up, Qt keeps the shared
+  printer a PDF one, so File > Print Setup shows this version's own dialog, which is
+  modal, instead of macOS's panel, which the driver answers. The cases waited out their time
+  limit. The driver now checks the printer: without one, `in-setup=` prints `harness:
+  skipped: ...`, which `run-tests.sh` lists as `SKIP` and counts apart, not as a failure.
+  A new step, `in-pdf-setup=`, answers the PDF printer's dialog, on any Mac. Run with no
+  printers, the whole suite also showed that the File > Print Setup cases that start
+  with `printer=native` never had the system's printer: two failed and four passed by
+  chance. That step now skips its case the same way.
+
+These added 21 cases (1,204 in all):
+- 14 `CL` cases, for links;
+- the window's Extract All through such a link (2 `E`);
+- a batch image that is a link to its own log's name (2 `BP`);
+- Print Setup's own dialog with a file from Finder (3 `OF`).
+
+On the previous commit, 18 of them fail. The 3 `OF` cases pass, as the app already
+handled that dialog; only the driver didn't. With this Mac's two printers hidden from Qt
+(`CUPS_SERVER` set to a socket that doesn't exist), the three Print Setup panel cases
+time out on the previous commit, and two `PS` cases fail. Now those 3 and 6 `PS` cases
+are skipped, and the rest pass. Eleven deliberate breaks each fail their own cases:
+- the file at the end not kept, 13 fail;
+- the links not kept, 11;
+- following stopped at the first link, 10;
+- `..` taken from the name (as `QFileInfo::symLinkTarget()` does), 1;
+- each file kept by its own entry only (the previous commit's way), 12;
+- the link removed before the check (the bug), 5;
+- the file analyzed not checked by Extract All, 6, or by the log, 4;
+- a file from Finder opened during any dialog, 10;
+- the printer check left out, 3 (they time out with the printers hidden).
+
 **Checks:**
-- **All 1,183 pass** with and without ASan/UBSan.
+- **All 1,204 pass** with and without ASan/UBSan. With the printers hidden, 1,195 pass
+  and 9 are skipped.
 - **The app builds** with no new warnings (the changed files built one at a time, with
   the previous commit's).
 - **cppcheck 2.22** finds nothing new in the changed files (it can't read
@@ -3117,8 +3174,60 @@ decoded not an error, 7; an empty file not an error, 2; the size in decimal, 4.
 
 **Still open:**
 - **Not yet ported:** File > Open's list of types lacks Windows' "AVI Movie".
+- **A link that leads nowhere** when a batch starts isn't kept: if one of the batch's
+  logs or exports then gives it something to lead to, it is analyzed as it is found then.
+  No file is lost.
 - **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
   RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
+### The tests: cases that didn't test what they said
+
+A review of the test suite found six places where a case could pass without checking
+what it claimed. None was a fault in the app, but each would have hidden one:
+- **The command line through the app itself.** The driver builds the app's sources
+  without `source/main.cpp`, and hides the arguments from Qt itself. So the two `-i
+  -platform` cases would still pass if `main()` stopped hiding them. `run-tests.sh` now
+  builds the app too (in `app/` beside the driver), and `cmdline --app` starts it as one
+  does in Terminal (not offscreen). The four new cases (`CL_app_*`) check the summary and
+  an unknown option after `-i -platform -o log.txt`, with the exit status. They run only
+  what reads no settings: a run with a file reads the license terms' setting, which would
+  be your own. (`CFFIXED_USER_HOME` doesn't move them: macOS's preferences daemon still
+  read the real ones.)
+- **The native printer.** On a Mac with no printer set up, `printer=native` left Qt's
+  printer a PDF one, so two cases failed and others passed with the wrong printer. That
+  step now checks, as the Finder cases do, and skips the case (see "Third check" under
+  Command-line mode).
+  `PS_native` also took the printer's paper to be US Letter: it now chooses A4 first, and
+  `PS_native_paper` checks that A4 took.
+- **`--only`.** A misspelt pattern, or one that isn't a valid regex (`[`), ran no case
+  and exited 0. Both are now errors (exit status 2). A selection whose cases are all
+  skipped still runs and says so.
+- **Two print jobs.** `PS_landscape_again` printed twice but checked only that one
+  landscape PDF line was there, which the first job wrote even when the second printed
+  nothing (`pdf=none`). A step may now end in `#LABEL`, which is printed with it, and
+  `PS_landscape_again_1` and `_2` check `print#1` and `print#2`.
+- **Progressive and CMYK files** were listed among the files that must decode cleanly,
+  but their cases checked nothing (each would pass with no report at all). They now
+  check what happens: the note that the scan isn't decoded ("Scan parsing doesn't support
+  this SOF mode" and "... CMYK files yet"), no preview and no error, and for the
+  progressive file no histogram.
+- **The other-case export on a case-sensitive disk** printed its own "skipped" line,
+  which counted as a pass. It now prints `harness: skipped: ...`, so it is counted as a
+  skip. (Checked on a case-sensitive disk image.)
+
+9 new cases (1,213 in all). They test the suite rather than the app, so they pass on the
+previous commit too. Five deliberate breaks each fail their own cases:
+- Qt given the arguments in `main()`, 4 fail (the app stops: "Could not find the Qt
+  platform plugin "-o"", status `crash`), while the in-process `CL_qt_*` cases still
+  pass;
+- `main()` reading the arguments from the second, 2;
+- only the first print job printed, 1 (`PS_landscape_again_2`; the old case passed);
+- Print Setup's panel putting the paper back to US Letter, 2;
+- the progressive and CMYK notes left out, 2.
+
+**Checks:** all 1,213 pass with and without ASan/UBSan; with the printers hidden, 1,203
+pass and 10 are skipped (the native printer's 7 and the Finder cases' 3). The changed `run-tests.sh` passes ShellCheck, and cppcheck 2.22
+finds nothing new in the driver.
 
 ## How this was reviewed
 

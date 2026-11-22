@@ -20,6 +20,7 @@
 #define _GENERAL_H_
 
 #include <QString>
+#include <QStringList>
 
 // General Global Functions
 QString Dec2Bin(uint32_t nVal, uint32_t nLen, bool bSpace = true);
@@ -30,6 +31,18 @@ bool TestBit(uint32_t nVal, uint32_t nBit);
 //QString ByteStr2Unicode(quint8* pBuf, uint32_t nBufLen);
 bool Str2Uint32(QString strVal, uint32_t nBase, uint32_t & nVal);
 bool SameFile(const QString &strPath1, const QString &strPath2);
+
+// What a file written by strPath would replace (for one renamed into place,
+// as a QSaveFile is, with a link of that name removed first): the entry of
+// that name in its folder, as an id to compare with PathEntries()'. Empty if
+// there is none.
+QString EntryId(const QString &strPath);
+// The entries that what strPath leads to depends on, as EntryId()'s: each
+// link it goes through, in its folders' names too, and the file (or folder)
+// at the end. A file written by one of them changes what strPath leads to;
+// by any other name, it doesn't. For a path that leads nowhere, the links up
+// to where it stops.
+QStringList PathEntries(const QString &strPath);
 
 // Lets the window repaint during long work, such as decoding a file, without
 // handling user input, which could start other work in the middle of it.

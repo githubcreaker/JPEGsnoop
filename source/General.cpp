@@ -24,9 +24,17 @@
 #include <QFileInfo>
 #include <QString>
 
+#include <algorithm>
+#include <climits>
+#include <cstdlib>
+
 #ifdef Q_OS_UNIX
+#include <sys/param.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
+
+#include "General.h"
 
 QString Dec2Bin(uint32_t nVal, uint32_t nLen, bool bSpace)
 {
@@ -370,6 +378,131 @@ bool SameFile(const QString &strPath1, const QString &strPath2)
 
   return fi1.canonicalFilePath().compare(fi2.canonicalFilePath(), Qt::CaseInsensitive) == 0;
 #endif
+}
+
+#ifdef Q_OS_UNIX
+namespace
+{
+// An entry's device and inode
+QString statId(const struct stat &sStat)
+{
+  return QString("%1:%2").arg(static_cast<qulonglong>(sStat.st_dev)).arg(static_cast<qulonglong>(sStat.st_ino));
+}
+} // namespace
+#endif
+
+// The entry's device and inode, without following a link, so a name in
+// another case (which macOS disks usually take for the same) is the same
+// entry. (Elsewhere, its full path.)
+QString EntryId(const QString &strPath)
+{
+#ifdef Q_OS_UNIX
+  struct stat sStat;
+  if(lstat(QFile::encodeName(strPath).constData(), &sStat) != 0)
+  {
+    return QString();
+  }
+  return statId(sStat);
+#else
+  const QFileInfo fi(strPath);
+  return (fi.exists() || fi.isSymLink()) ? fi.absoluteFilePath() : QString();
+#endif
+}
+
+// The path is followed as the system follows it: each name from the folder
+// reached so far, a link's target in its place (from the root if it starts
+// with "/", else from the link's folder), ".." from where the links led.
+QStringList PathEntries(const QString &strPath)
+{
+  QStringList astrIds;
+#ifdef Q_OS_UNIX
+  const QByteArray baPath = QFile::encodeName(strPath);
+  if(baPath.isEmpty())
+  {
+    return astrIds;
+  }
+
+  // The folder reached so far, with no links in it ("" for the root), and
+  // the names still to follow from there
+  QByteArray baDone;
+  if(!baPath.startsWith('/'))
+  {
+    char *pszCwd = getcwd(nullptr, 0);
+    if(!pszCwd)
+    {
+      return astrIds;
+    }
+    baDone = pszCwd;
+    free(pszCwd);
+    if(baDone == "/")
+    {
+      baDone.clear();
+    }
+  }
+  QByteArrayList abaRest = baPath.split('/');
+  int nLinks = 0;
+  bool bWhole = true;           // False if it leads nowhere
+
+  while(!abaRest.isEmpty())
+  {
+    const QByteArray baName = abaRest.takeFirst();
+    if(baName.isEmpty() || (baName == "."))
+    {
+      continue;
+    }
+    if(baName == "..")
+    {
+      baDone.truncate(std::max<qsizetype>(0, baDone.lastIndexOf('/')));
+      continue;
+    }
+
+    const QByteArray baEntry = baDone + '/' + baName;
+    struct stat sStat;
+    if(lstat(baEntry.constData(), &sStat) != 0)
+    {
+      bWhole = false;
+      break;
+    }
+    if(!S_ISLNK(sStat.st_mode))
+    {
+      baDone = baEntry;
+      continue;
+    }
+
+    astrIds << statId(sStat);
+    // (As many as the system follows)
+    QByteArray baTarget(std::max<qsizetype>(sStat.st_size, PATH_MAX) + 1, '\0');
+    const ssize_t nLen = readlink(baEntry.constData(), baTarget.data(), static_cast<size_t>(baTarget.size()));
+    if((++nLinks > MAXSYMLINKS) || (nLen <= 0) || (nLen >= baTarget.size()))
+    {
+      bWhole = false;
+      break;
+    }
+    baTarget.truncate(nLen);
+    if(baTarget.startsWith('/'))
+    {
+      baDone.clear();
+    }
+    abaRest = baTarget.split('/') + abaRest;
+  }
+
+  // The file (or folder) it leads to
+  struct stat sStat;
+  if(bWhole && (lstat(baDone.isEmpty() ? "/" : baDone.constData(), &sStat) == 0))
+  {
+    astrIds << statId(sStat);
+  }
+#else
+  const QFileInfo fi(strPath);
+  for(const QString &strId : { EntryId(strPath), fi.canonicalFilePath() })
+  {
+    if(!strId.isEmpty())
+    {
+      astrIds << strId;
+    }
+  }
+#endif
+  return astrIds;
 }
 
 //-----------------------------------------------------------------------------

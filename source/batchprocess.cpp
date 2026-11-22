@@ -23,6 +23,7 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QScopeGuard>
+#include <QSet>
 #include <QTextStream>
 
 #ifdef Q_OS_UNIX
@@ -32,6 +33,7 @@
 #endif
 
 #include "DocLog.h"
+#include "General.h"
 #include "ImgDecode.h"
 #include "JfifDecode.h"
 #include "SnoopConfig.h"
@@ -39,6 +41,21 @@
 #include "snoop.h"
 
 #include "batchprocess.h"
+
+FileKeep keepPaths(const QStringList &astrPaths)
+{
+  QSet<QString> setEntries;
+  for(const QString &strPath : astrPaths)
+  {
+    const QStringList astrIds = PathEntries(strPath);
+    setEntries.unite(QSet<QString>(astrIds.cbegin(), astrIds.cend()));
+  }
+
+  return [setEntries](const QString &strPath) {
+    const QString strId = EntryId(strPath);
+    return !strId.isEmpty() && setEntries.contains(strId);
+  };
+}
 
 //-----------------------------------------------------------------------------
 // Extract All
@@ -101,6 +118,7 @@ ExtractAllResult extractAllJpegs(CwindowBuf *pWBuf, CjfifDecode *pJfifDec, CSnoo
   ExtractAllResult sResult;
   uint32_t nPos = 0;
   const uint32_t nFileSize = static_cast<uint32_t>(pFile->size());
+  const FileKeep fnKeepSrc = keepPaths(QStringList() << strSrc);
 
   pLog->Disable();
   pAppConfig->setInteractive(false);
@@ -133,6 +151,19 @@ ExtractAllResult extractAllJpegs(CwindowBuf *pWBuf, CjfifDecode *pJfifDec, CSnoo
       if(fnKeep && fnKeep(strName))
       {
         sResult.strWriteError = QString("ERROR: Couldn't write [%1]: it would replace one of the files analyzed").arg(strName);
+        sResult.astrResults << QString("  [%1] %2").arg(strPos, sResult.strWriteError);
+        sResult.abResultOk << false;
+        sResult.bWriteOk = false;
+        break;
+      }
+
+      // The file being read, by its own name, a link it was opened through
+      // or one on the way. (ExportOpen() refuses its own name, but only
+      // after removeLinkAt() below: given the link it was opened by, that
+      // removed the link, and the export took its place.)
+      if(fnKeepSrc(strName))
+      {
+        sResult.strWriteError = QString("ERROR: Couldn't write [%1]: it would replace the file analyzed").arg(strName);
         sResult.astrResults << QString("  [%1] %2").arg(strPos, sResult.strWriteError);
         sResult.abResultOk << false;
         sResult.bWriteOk = false;
@@ -452,7 +483,9 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const Batch
   // name was a link (symbolic or hard) to one of the images wrote over the
   // image. A QSaveFile is renamed into place, so it replaces a hard link
   // rather than the file it shares; a symbolic link is removed first. A
-  // failed log also leaves the old one, if there was one.
+  // failed log also leaves the old one, if there was one. It never replaces
+  // the file analyzed, which a link may have led to by the log's name (nor,
+  // as an inode can't tell them apart, a hard link of it).
   if(!sFile.strLog.isEmpty())
   {
     QSaveFile fileLog(sFile.strLog);
@@ -460,6 +493,10 @@ CBatchProcess::Result CBatchProcess::process(const BatchFile &sFile, const Batch
     if(sOptions.fnKeep && sOptions.fnKeep(sFile.strLog))
     {
       sResult.strLogError = QString("Couldn't write the log [%1]: it would replace one of the files analyzed").arg(sFile.strLog);
+    }
+    else if(keepPaths(QStringList() << sFile.strSrc)(sFile.strLog))
+    {
+      sResult.strLogError = QString("Couldn't write the log [%1]: it would replace the file analyzed").arg(sFile.strLog);
     }
     else if(!QDir().mkpath(QFileInfo(sFile.strLog).path()))
     {

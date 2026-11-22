@@ -85,6 +85,12 @@ struct ExtractAllResult
 // the batch's files)
 using FileKeep = std::function<bool(const QString &strPath)>;
 
+// The names by which a file written would change what one of astrPaths
+// leads to (see PathEntries()): its own, a link's on the way, or the file's
+// at the end, by any name for it (in another case, or a hard link). They are
+// found now, before anything is written.
+FileKeep keepPaths(const QStringList &astrPaths);
+
 // Export the JPEG at each SOI (FF D8 FF) in pFile, from its start, to
 // numberedExportName(strOut, 1), (strOut, 2), ..., replacing any files of
 // those names (a link of one of those names is replaced, not written
@@ -92,7 +98,8 @@ using FileKeep = std::function<bool(const QString &strPath)>;
 // fnSrcChanged() must tell the decoders the image source changed, and
 // fnProgress (if given) is called before each place with the number
 // exported so far. If fnKeep (if given) says a name is to be kept, nothing
-// is written there, and the export stops, as when a file can't be written.
+// is written there, and the export stops, as when a file can't be written;
+// as it does at strSrc's own name and the others keepPaths() gives for it.
 // The start offset is put back afterwards; the buffer is left at the last
 // place looked at.
 //

@@ -9,6 +9,10 @@ tests/run-tests.sh --asan     # with AddressSanitizer + UBSan, in build-tests-as
 tests/run-tests.sh --only H   # only cases whose id matches a regex
 ```
 
+It builds the test driver and, in `app/` in the same folder, the app itself,
+which a few cases start. A `--only` pattern that isn't a valid regex, or that
+matches no case, is an error (exit status 2).
+
 Requirements: Qt 6 (`brew install qtbase`; set `QMAKE` to pick another Qt),
 the Xcode command line tools, and Python 3 with Pillow (the script uses `uv`
 when it is installed, so Pillow needn't be installed separately).
@@ -241,8 +245,11 @@ when it is installed, so Pillow needn't be installed separately).
       `print=landscape`, `print=save-pdf` (as Save as PDF in the print panel)
       or `print=cancel` (the PDF's pages and first page size are printed);
       `preview` (Print Preview's printer and pages, then closed);
-      `printer=native` (this Mac's default printer, which Print refuses) and
+      `printer=native` (this Mac's default printer, which Print refuses; with
+      no printer set up it prints `harness: skipped: ...` and stops) and
       `printer=pdf`; `select=N`, `select-all` and `select-none` in the report.
+      A step may end in `#LABEL`, printed with it, to tell the same step done
+      twice apart (`print#1,print#2`).
       It prints each dialog's printer and options when it shows, and the
       printer's format, orientation, paper, range and margins after each step.
     - `--recent STEP[,STEP...]` (`--recent-at N`; `0` is before any file)
@@ -289,21 +296,28 @@ when it is installed, so Pillow needn't be installed separately).
       and do STEP while its panel is up, as Qt runs macOS's panels. No panel
       is shown: Print prints to a PDF in a temporary folder, and Print
       Setup's panel is cancelled. They print what is shown then, whether the
-      report is the same when the panel closes, and Print's PDF.
+      report is the same when the panel closes, and Print's PDF. Print
+      Setup's panel needs a printer set up: without one, `in-setup=STEP`
+      prints `harness: skipped: ...`. `in-pdf-setup=STEP` does STEP while
+      Print Setup shows its own dialog for a printer making PDFs (as with no
+      printer set up), then cancels it.
 
     A message box, such as the one for a file that can't be opened, is closed
     and its text printed as `harness: message box: ...`;
   - `export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
     [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]
-    [--out-same-case]` opens the file in the real `MainWindow` and runs Export
-    JPEG with those settings (`--all` is Extract All, `--overlays` is Enable
-    Overlays), to a temporary `out.jpg` unless `--out` gives a path.
-    `--overlay` first answers Tools > File Overlay's dialog, as for `gui`, and
-    afterwards reprocesses and prints the overlay summary again.
-    `--out-same` and `--out-same-case` export over the file itself, by its name
-    or by its name in the other case. It prints the size and MD5 of each file
-    written, a `harness: exported N md5s=...` line, whether the source is
-    unchanged, and the report from the export on;
+    [--out-same-case] [--src-link]` opens the file in the real `MainWindow`
+    and runs Export JPEG with those settings (`--all` is Extract All,
+    `--overlays` is Enable Overlays), to a temporary `out.jpg` unless `--out`
+    gives a path. `--overlay` first answers Tools > File Overlay's dialog, as
+    for `gui`, and afterwards reprocesses and prints the overlay summary
+    again. `--out-same` and `--out-same-case` export over the file itself, by
+    its name or by its name in the other case. `--src-link` opens the file
+    through a link named `out.000001.jpg`, Extract All's first name, and
+    prints whether the link is still there (`harness: source link kept=1`).
+    It prints the size and MD5 of each file written, a `harness: exported N
+    md5s=...` line, whether the source is unchanged, and the report from the
+    export on;
   - `export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]`
     runs Export TIFF the same way, then reads the TIFF back and checks its tags
     and every sample against a separate decode of the file
@@ -357,7 +371,12 @@ when it is installed, so Pillow needn't be installed separately).
       disk (a file over 64 MiB isn't read: its MD5 shows as `big` and its size);
     - `--setting KEY=VALUE` saves a setting first (such as
       `General\DumpScan=false`), and `--no-eula` leaves the license terms not
-      accepted.
+      accepted;
+    - `--app` starts the app itself instead (`app/JPEGsnoopQt.app` beside the
+      driver), as one does in Terminal: its `main()` as built, not offscreen.
+      It reads your own settings, so only ARGS that read none run: the
+      summary or an error in them. The status is `crash` if it stopped on a
+      signal; the settings aren't listed.
 
     It prints the exit status with every file in the folder, each line
     written to the standard output and error (`harness: cmdline out:` and
@@ -390,7 +409,10 @@ when it is installed, so Pillow needn't be installed separately).
   masks and tagged blocks). Folders for the `batch` mode come from `tree()`.
 - `run-tests.sh` runs each case with a time limit. A case fails on a crash,
   timeout, sanitizer report, missing expected output or forbidden output.
-  Output of failed cases is kept in `build-tests*/logs/`.
+  Output of failed cases is kept in `build-tests*/logs/`. A case the driver
+  can't run on this Mac, printing `harness: skipped: REASON` (the Print Setup
+  panel's, without a printer set up), is listed as `SKIP` and counted apart;
+  it doesn't fail the run.
 
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)

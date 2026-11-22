@@ -20,16 +20,9 @@
 #include <cstdio>
 #include <iterator>
 
-#include <QFile>
-#include <QFileInfo>
 #include <QPlainTextEdit>
 #include <QScopeGuard>
-#include <QSet>
 #include <QTextStream>
-
-#ifdef Q_OS_UNIX
-#include <sys/stat.h>
-#endif
 
 #include "DbSigs.h"
 #include "DocLog.h"
@@ -79,23 +72,6 @@ void cmdLineMessage(QtMsgType eType, const QMessageLogContext &context, const QS
 
   std::fprintf(stderr, "%s\n", qPrintable(qFormatLogMessage(eType, context, strMsg)));
   std::fflush(stderr);
-}
-
-// A name's entry in its folder, if there is one: what is replaced when a file
-// is written by that name. Its device and inode, without following a link,
-// so a name in another case, which macOS disks usually take for the same,
-// is the same entry. (Elsewhere, its full path.)
-QString entryId(const QString &strPath)
-{
-#ifdef Q_OS_UNIX
-  struct stat sStat;
-  if(lstat(QFile::encodeName(strPath).constData(), &sStat) != 0)
-    return QString();
-  return QString("%1:%2").arg(static_cast<qulonglong>(sStat.st_dev)).arg(static_cast<qulonglong>(sStat.st_ino));
-#else
-  const QFileInfo fi(strPath);
-  return (fi.exists() || fi.isSymLink()) ? fi.absoluteFilePath() : QString();
-#endif
 }
 
 // The settings for a file of the batch, or -i's
@@ -189,16 +165,16 @@ int runBatch(const CmdLineOptions &sOptions, CSnoopConfig *pAppConfig, CDbSigs *
   }
 
   // The logs and exports are written next to the files, so (with -ext_all,
-  // which analyzes every file) one could be another of the batch's files:
-  // none of them is replaced, before or after it is analyzed. (Master
-  // replaced it, and then analyzed what had replaced it.)
-  QSet<QString> setInputs;
-  std::transform(list.files.cbegin(), list.files.cend(), std::inserter(setInputs, setInputs.end()),
-                 [](const BatchFile &sFile) { return entryId(sFile.strSrc); });
-  setInputs.remove(QString());
+  // which analyzes every file) one could be another of the batch's files,
+  // the file one is a link to, or a link on the way to it: none of them is
+  // replaced, before or after it is analyzed. (Master replaced it, and then
+  // analyzed what had replaced it.)
+  QStringList astrInputs;
+  std::transform(list.files.cbegin(), list.files.cend(), std::back_inserter(astrInputs),
+                 [](const BatchFile &sFile) { return sFile.strSrc; });
 
   BatchFileOptions sFileOptions = fileOptions(sOptions);
-  sFileOptions.fnKeep = [&setInputs](const QString &strPath) { return setInputs.contains(entryId(strPath)); };
+  sFileOptions.fnKeep = keepPaths(astrInputs);
   CBatchProcess batch(pAppConfig, pDbSigs);
 
   for(const BatchFile &sFile : list.files)

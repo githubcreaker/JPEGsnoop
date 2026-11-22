@@ -108,10 +108,19 @@ for name, data in (("ok_444.jpg", c444), ("ok_422.jpg", c422), ("ok_420.jpg", c4
                    ("ok_exif_gps.jpg", exif_gps)):
     write(name, data)
     case(name[:-4], "valid", "decode", name, "--ac --histo", expect=DECODED)
+# Valid files whose scan isn't decoded (progressive, CMYK): the report says
+# so, and there is no image or histogram
+OK_NO_IMAGE = "^harness: decoded=0 preview=0x0 "
 write("ok_progressive.jpg", progressive)
-case("ok_progressive", "valid", "decode", "ok_progressive.jpg", "--ac --histo")
+case("ok_progressive", "valid", "decode", "ok_progressive.jpg", "--ac --histo", expect=OK_NO_IMAGE, forbid="ERROR")
+case("ok_progressive_note", "valid", "decode", "ok_progressive.jpg", "--ac --histo",
+     expect="^  NOTE: Scan parsing doesn't support this SOF mode\\.$")
+case("ok_progressive_histogram", "valid", "decode", "ok_progressive.jpg", "--ac --histo",
+     expect="^harness: histogram bars rgb=-1 y=-1$")
 write("ok_cmyk.jpg", cmyk)
-case("ok_cmyk", "valid", "decode", "ok_cmyk.jpg", "--ac --histo")
+case("ok_cmyk", "valid", "decode", "ok_cmyk.jpg", "--ac --histo", expect=OK_NO_IMAGE, forbid="ERROR")
+case("ok_cmyk_note", "valid", "decode", "ok_cmyk.jpg", "--ac --histo",
+     expect="^  NOTE: Scan parsing doesn't support CMYK files yet\\.$")
 
 # --- C: memory safety -----------------------------------------------------------
 def patch_sof_dims(data, w, h):
@@ -1189,7 +1198,7 @@ case("E_jpeg_same_file", "E", "export-jpeg", "ok_444.jpg", "--out-same",
 # The same file by a name in another case (macOS disks are usually
 # case-insensitive): the names differed, so it was truncated while being read
 case("E_jpeg_same_file_case", "E", "export-jpeg", write("e_case.jpg", c444), "--out-same-case",
-     expect="ERROR: Can't overwrite source file|case-sensitive disk, skipped", forbid="source unchanged=0")
+     expect="ERROR: Can't overwrite source file", forbid="source unchanged=0")
 case("E_jpeg_unwritable", "E", "export-jpeg", "ok_444.jpg", "--out /nonexistent-jpegsnoop-dir/out.jpg",
      expect="message box: ERROR: Couldn't open file for write")
 case("E_jpeg_psd", "E", "export-jpeg", psd_rle,
@@ -1204,6 +1213,11 @@ case("E_jpeg_all_list", "E", "export-jpeg", two, "--all",
 case("E_jpeg_all_count", "E", "export-jpeg", two, "--all", expect="^  Exported 2 JPEGs$")
 case("E_jpeg_all_unwritable", "E", "export-jpeg", two, "--all --out /nonexistent-jpegsnoop-dir/out.jpg",
      expect="message box: ERROR: Couldn't open file for write")
+# The file opened through a link with the first export's name: the link was
+# removed (as one leading elsewhere is), and then the export took its place
+case("E_jpeg_all_src_link", "E", "export-jpeg", two, "--all --src-link", expect="^harness: source link kept=1$")
+case("E_jpeg_all_src_link_error", "E", "export-jpeg", two, "--all --src-link",
+     expect="^harness: message box: ERROR: Couldn't write \\[.*/out\\.000001\\.jpg\\]: it would replace the file analyzed$")
 # Motion JPEG frames leave out the DHT: Extract All with the standard one
 # inserted before each SOS (all four tables, 420 bytes)
 mjpeg_frame = without_dht(c444)
@@ -1840,6 +1854,7 @@ tree("bp_old_all", {"a.jpg": c444, "a.jpg.export.000001.jpg": b"an old export\n"
 tree("bp_logdir", {"a.jpg": c444, "a.jpg.txt/keep": b"", "b.jpg": c420})
 tree("bp_utf8", {"café.jpg": c444})
 tree("bp_alias", {"a.jpg": c444, "b.jpg": c420, "notes.txt": b"not an image\n"})
+tree("bp_self", {"x.jpg.txt": c444})
 # A Motion JPEG AVI: its frames leave out the Huffman tables
 mjpeg_movi = b"movi" + chunk(b"00dc", mjpeg_frame) + chunk(b"00dc", mjpeg_frame)
 mjpeg_avi_body = (b"AVI " + chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56))) + chunk(b"LIST", strl)
@@ -1991,6 +2006,14 @@ batch_case("BP_alias_export_hardlink", "in=in,out=out,all,ok",
 batch_case("BP_alias_export_dangling_asked", "in=in,out=out,all,ok",
            'harness: message box: A file the batch writes already exists: "a\\.jpg\\.export\\.000001\\.jpg"\\.',
            names=("bp_alias",), extra="--batch-link sym:out/a.jpg.export.000001.jpg=nowhere")
+# Not the file analyzed, though: an image x.jpg that is a link to x.jpg.txt
+# (its log's name) is kept, even if replacing was chosen. The log replaced
+# it, and the link led to the log.
+BP_SELF = "--batch-link sym:in/x.jpg=in/x.jpg.txt --replace"
+batch_case("BP_self_link_kept", BP_ALIAS, "harness: batch link sym:in/x\\.jpg=in/x\\.jpg\\.txt now exists=1 symlink=1 names=1 "
+           "target exists=1 unchanged=1$", names=("bp_self",), extra=BP_SELF)
+batch_case("BP_self_link_error", BP_ALIAS, "^    ERROR: Couldn't write the log \\[<batch>/in/x\\.jpg\\.txt\\]: it would replace "
+           "the file analyzed$", names=("bp_self",), extra=BP_SELF)
 
 # Folders that can't be read: listed, with the files in the others processed
 # (master took them for empty ones)
@@ -3513,10 +3536,12 @@ print_case("PS_pdf_dialog_current", "setup=landscape,setup=letter,setup=cancel",
 print_case("PS_landscape", "setup=landscape", ps_state("setup=landscape", "pdf", "landscape", "A4"))
 print_case("PS_pdf_keeps", "setup=landscape,setup=letter", ps_state("setup=letter", "pdf", "landscape",
            "Letter / ANSI A", rx("3.5,3.5,3.5,3.5mm")))
-# The system's dialog for this Mac's printer (answered by the driver)
+# The system's dialog for this Mac's printer (answered by the driver). A4
+# first: the printer's own paper differs from Mac to Mac.
 print_case("PS_native_dialog", "printer=native,setup=landscape", "harness: print setup dialog: same printer=1$")
-print_case("PS_native", "printer=native,setup=landscape", ps_state("setup=landscape", "native", "landscape",
-           "US Letter"))
+print_case("PS_native_paper", "printer=native,setup=a4", ps_state("setup=a4", "native", "portrait", "A4"))
+print_case("PS_native", "printer=native,setup=a4,setup=landscape", ps_state("setup=landscape", "native", "landscape",
+           "A4"))
 print_case("PS_native_preview", "printer=native,setup=landscape,preview",
            "harness: print preview: same printer=1 orientation=landscape pages=" + PS_MANY + "$")
 # Save as PDF in the print panel makes the printer one that makes PDF files:
@@ -3531,8 +3556,10 @@ print_case("PS_save_pdf_set", "printer=native,setup=letter,print=save-pdf,setup=
 print_case("PS_landscape_print", "setup=landscape,print", ps_pdf("print", "landscape", PS_A4_WIDE, PS_MANY))
 print_case("PS_landscape_preview", "setup=landscape,preview",
            "harness: print preview: same printer=1 orientation=landscape pages=" + PS_MANY + "$")
-print_case("PS_landscape_again", "setup=landscape,print,print", ps_pdf("print", "landscape", PS_A4_WIDE, PS_MANY),
-           forbid="page=595x842")
+# Each of two jobs (told apart by their labels)
+for n in (1, 2):
+    print_case(f"PS_landscape_again_{n}", "setup=landscape,print#1,print#2",
+               ps_pdf(f"print#{n}", "landscape", PS_A4_WIDE, PS_MANY), forbid="page=595x842")
 print_case("PS_portrait_back", "setup=landscape,setup=portrait,print", ps_pdf("print", "portrait", PS_A4, PS_MANY))
 print_case("PS_letter", "setup=letter,print", ps_pdf("print", "portrait", (612, 792), PS_MANY, paper="Letter / ANSI A"))
 print_case("PS_letter_landscape", "setup=letter,setup=landscape,print",
@@ -3844,6 +3871,17 @@ for kind in ("print", "setup"):
                  of_state(step, "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="main"))
 outside_case("OF_finder_in_print_printed", "in-print=finder=ok_420.jpg",
              rx("harness: outside in-print=finder=ok_420.jpg: printed: pdf pages=") + "[1-9]")
+# Print Setup with the printer making PDFs, as with no printer set up (the
+# cases above are then skipped: there is no page layout panel): this
+# version's own dialog, modal
+OF_PDF_SETUP = "in-pdf-setup=finder=ok_420.jpg"
+outside_case("OF_finder_in_pdf_setup", OF_PDF_SETUP,
+             rx(f"harness: outside {OF_PDF_SETUP}: during the dialog CPdfPageSetupDialog: modal=1 report=ok_444.jpg "
+                "lines=") + "[0-9]+" + rx(" recent=ok_444.jpg "))
+outside_case("OF_finder_in_pdf_setup_kept", OF_PDF_SETUP,
+             rx(f"harness: outside {OF_PDF_SETUP}: the dialog closed: same report=1") + "$")
+outside_case("OF_finder_after_pdf_setup", OF_PDF_SETUP,
+             of_state(OF_PDF_SETUP, "ok_420.jpg", "ok_420.jpg|ok_444.jpg", active="main"))
 
 
 # --- The toolbar's Copy and About buttons ------------------------------------------
@@ -4189,12 +4227,71 @@ cl_case("CL_batch_keeps_case", CL_OK, "-b . -ext_all",
         own="--put A.JPG=ok_444.jpg --put a.jpg.export.000001.jpg=ok_420.jpg")
 cl_case("CL_batch_writes_others", CL_OK, "-b . -ext_all",
         "^harness: cmdline file a\\.jpg\\.txt size=[0-9]+ md5=[0-9a-f]+ dht=0 new$", own=CL_KEEP_EXPORT)
+# Nor the file one of them is a link to (a.jpg leading to a.jpg.txt, its
+# log's name), a link on the way (b.jpg's log's name), or a link to a
+# folder on the way (d.jpg's)
+CL_KEEP_TARGET = "--put a.jpg.txt=ok_444.jpg --link a.jpg=a.jpg.txt"
+cl_case("CL_batch_keeps_link_target", CL_OK, "-b .",
+        f"^harness: cmdline file a\\.jpg\\.txt size={len(c444)} md5={md5(c444)} dht=[0-9]+ same$", own=CL_KEEP_TARGET)
+cl_case("CL_batch_keeps_link_target_error", CL_OK, "-b .",
+        "^harness: cmdline err: ERROR: Couldn't write the log \\[\\./a\\.jpg\\.txt\\]: it would replace one of the files "
+        "analyzed$", own=CL_KEEP_TARGET)
+cl_case("CL_batch_keeps_link_target_status", CL_OK, "-b .", "^harness: cmdline status=1 ", own=CL_KEEP_TARGET)
+CL_KEEP_WAY = "--put b.jpg=ok_444.jpg --put real.bin=ok_420.jpg --link b.jpg.txt=real.bin --link a.jpg=b.jpg.txt"
+cl_case("CL_batch_keeps_link_on_way", CL_OK, "-b .",
+        f"^harness: cmdline file b\\.jpg\\.txt size={len(c420)} md5={md5(c420)} dht=[0-9]+ same link$", own=CL_KEEP_WAY)
+cl_case("CL_batch_keeps_link_on_way_error", CL_OK, "-b .",
+        "^harness: cmdline err: ERROR: Couldn't write the log \\[\\./b\\.jpg\\.txt\\]: it would replace one of the files "
+        "analyzed$", own=CL_KEEP_WAY)
+CL_KEEP_FOLDER = "--put real/x.jpg=ok_420.jpg --link d.jpg.txt=real --link a.jpg=d.jpg.txt/x.jpg --put d.jpg=ok_444.jpg"
+cl_case("CL_batch_keeps_folder_link", CL_OK, "-b .",
+        "^harness: cmdline err: ERROR: Couldn't write the log \\[\\./d\\.jpg\\.txt\\]: it would replace one of the files "
+        "analyzed$", own=CL_KEEP_FOLDER)
+cl_case("CL_batch_keeps_folder_link_kept", CL_OK, "-b .",
+        f"^harness: cmdline file a\\.jpg size={len(c420)} md5={md5(c420)} dht=[0-9]+ same link$", own=CL_KEEP_FOLDER)
+# (".." after a link to a folder goes up from where it led, as macOS goes:
+# a.jpg leads to deep/t.jpg.txt, not ./t.jpg.txt)
+CL_KEEP_UP = ("--put deep/t.jpg.txt=ok_444.jpg --put deep/t.jpg=ok_420.jpg --mkdir deep/inner --link up=deep/inner "
+              "--link a.jpg=up/../t.jpg.txt")
+cl_case("CL_batch_keeps_link_up", CL_OK, "-br .",
+        f"^harness: cmdline file deep/t\\.jpg\\.txt size={len(c444)} md5={md5(c444)} dht=[0-9]+ same$", own=CL_KEEP_UP)
+
+# With -i, the file analyzed: Extract All's first name, given as it is, or
+# as a link (which was removed, and the export put in its place), or a link
+# to a folder on the way, given as the log
+CL_EXPORT_SELF = "-i frame.000001.jpg -o frame.txt -ext_all"
+CL_EXPORT_SELF_ERR = ("^harness: cmdline err: ERROR: Couldn't write \\[\\./frame\\.000001\\.jpg\\]: it would replace the "
+                      "file analyzed$")
+cl_case("CL_file_export_self", CL_OK, CL_EXPORT_SELF, CL_EXPORT_SELF_ERR, own="--put frame.000001.jpg=ok_420.jpg")
+cl_case("CL_file_export_self_link", CL_OK, CL_EXPORT_SELF, CL_EXPORT_SELF_ERR, own="--link frame.000001.jpg=ok_420.jpg")
+cl_case("CL_file_export_self_link_kept", CL_OK, CL_EXPORT_SELF,
+        f"^harness: cmdline file frame\\.000001\\.jpg size={len(c420)} md5={md5(c420)} dht=[0-9]+ same link$",
+        own="--link frame.000001.jpg=ok_420.jpg")
+cl_case("CL_file_export_self_link_status", CL_OK, CL_EXPORT_SELF, "^harness: cmdline status=1 ",
+        own="--link frame.000001.jpg=ok_420.jpg")
+CL_LOG_FOLDER = "--put real/x.jpg=ok_420.jpg --link d.txt=real"
+cl_case("CL_log_folder_link", CL_OK, "-i d.txt/x.jpg -o d.txt",
+        "^harness: cmdline err: ERROR: Couldn't write the log \\[d\\.txt\\]: it would replace the file analyzed$",
+        own=CL_LOG_FOLDER)
+cl_case("CL_log_folder_link_status", CL_OK, "-i d.txt/x.jpg -o d.txt", cl_status(1, CL_OK + ["real/x.jpg"]),
+        own=CL_LOG_FOLDER)
 
 # Qt doesn't read the app's arguments: given "-i -platform -o LOG", it took
 # "-o" for its platform plugin and stopped the app
 cl_case("CL_qt_option_name", CL_OK, "-i -platform -o log.txt", cl_log("log.txt", "  Filename: \\[-platform\\]"),
         own="--put -platform=ok_420.jpg")
 cl_case("CL_qt_option_help", CL_OK, "-i -platform -o log.txt -help", cl_status(0, CL_OK))
+# The same through the app itself, as started in Terminal: main() as built,
+# and the bundle. (Only the summary and an error: a run with a file reads
+# your own settings.)
+CL_APP_QT = "-i -platform -o log.txt"
+cl_case("CL_app_qt_option_help", CL_OK, CL_APP_QT + " -help", cl_status(0, CL_OK), forbid="^harness: cmdline err:",
+        own="--app")
+cl_case("CL_app_qt_option_help_out", CL_OK, CL_APP_QT + " -help",
+        "^harness: cmdline out: " + rx("JPEGsnoopQt.app/Contents/MacOS/JPEGsnoopQt <parameters>") + "$", own="--app")
+cl_case("CL_app_qt_option_error", CL_OK, CL_APP_QT + " -x",
+        "^harness: cmdline err: ERROR: Unknown command-line flag \\[-x\\]$", own="--app")
+cl_case("CL_app_qt_option_error_status", CL_OK, CL_APP_QT + " -x", cl_status(1, CL_OK), own="--app")
 
 # -done: said at the end, also after an error
 cl_case("CL_done", CL_OK, CL_I + " -done", "^harness: cmdline out: JPEGsnoop operations complete$")

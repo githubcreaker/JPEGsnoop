@@ -52,8 +52,8 @@ The Qt version of JPEGsnoop (this branch) builds on macOS with Qt 6.
 - Command line: run the app's program with the Windows version's options, for example
   `JPEGsnoopQt.app/Contents/MacOS/JPEGsnoopQt -i photo.jpg -o photo.txt` (`-help` lists them).
   It runs without its window or a Dock icon, writes errors to the standard error, and exits
-  with 0 if everything worked, 1 if not. The license terms must have been accepted in the app
-  first.
+  with 0 if everything worked, 1 if not. Its reports and exports never replace a file it
+  analyzes. The license terms must have been accepted in the app first.
 - The app icon `images/jpegsnoop.icns` is made from `images/jpegsnoop.ico` by
   `scripts/make-macos-icon.py`; run it again only if the `.ico` changes.
 - With Homebrew's Qt, the app needs the macOS version Homebrew built its libraries for

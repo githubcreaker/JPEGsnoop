@@ -51,11 +51,15 @@
 //
 // export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]
 //     [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]
-//     [--out-same-case]
+//     [--out-same-case] [--src-link]
 //     Open the file in the real MainWindow and run Tools > Export JPEG with
 //     these settings (--all: Extract All), to a temporary out.jpg unless
 //     --out says where. --out-same / --out-same-case export over the file
-//     itself, by the same name or by the name in another case. --overlay
+//     itself, by the same name or by the name in another case. --src-link
+//     opens the file through a link named out.000001.jpg, Extract All's
+//     first name, beside the temporary out.jpg, and prints whether the link
+//     is still there, leading to the file, as "harness: source link
+//     kept=1". --overlay
 //     first answers Tools > File Overlay's dialog with STEPS (as for gui),
 //     and afterwards reprocesses and prints the overlay summary again;
 //     --overlays ticks Enable Overlays. Prints the
@@ -70,7 +74,7 @@
 //
 // cmdline <file> [<file> ...] [--put DEST=NAME]... [--link DEST=TARGET]...
 //     [--mkdir DIR]... [--chmod OCTAL:REL]... [--sparse NAME=SIZE]...
-//     [--setting KEY=VALUE]... [--no-eula] -- ARGS...
+//     [--setting KEY=VALUE]... [--no-eula] [--app] -- ARGS...
 //     Run the app's command-line mode with ARGS, as main() does when the app
 //     is started with them (cmdline.h; read as main() reads them, before
 //     QApplication takes out those it knows), in a fresh folder that holds a
@@ -90,6 +94,12 @@
 //     DHT markers, and whether the run made or changed it), each line of
 //     each .txt file that is text ("harness: cmdline log NAME: LINE"), and
 //     which saved settings the run changed.
+//     --app starts the app itself instead, with ARGS, as one does in Terminal:
+//     the app built beside the driver (app/JPEGsnoopQt.app, which
+//     run-tests.sh builds), not offscreen. It uses your own settings, so
+//     only ARGS that read none are run: the summary (-help) or an error in
+//     them. Prints the same, but "status=crash" if it stopped on a signal,
+//     and not the settings.
 //
 // gui ... [--export-menus | --export-menus-cancel | --export-menus-all]
 //     [--old-numbered] [--replace]
@@ -316,9 +326,12 @@
 //     first page size are printed), preview (choose Print Preview, print its
 //     printer's orientation and its pages, and close it), printer=native or
 //     printer=pdf (make the printer this Mac's default, which Print refuses,
-//     or a PDF again), select=N, select-all and select-none (select the
-//     report's first N characters, all of it, or none). Print each dialog's
-//     printer and options when it shows, and the printer after each step.
+//     or a PDF again; with no printer set up, printer=native prints
+//     "harness: skipped: ..." and stops), select=N, select-all and
+//     select-none (select the report's first N characters, all of it, or
+//     none). A step may end in #LABEL, printed with it (print#1, print#2).
+//     Print each dialog's printer and options when it shows, and the
+//     printer after each step.
 //
 // gui ... --recent STEP[,STEP...] [--recent-at N] [--recent-stored NAME[+NAME...]]
 //     After the first file (or file N; 0 is before any file), print the
@@ -374,7 +387,11 @@
 //     panel is up, as Qt runs macOS's panels (none is shown: Print prints to
 //     a PDF, and Print Setup's panel is cancelled), and print what is shown
 //     then, whether the report is the same when the panel closes, and Print's
-//     PDF.
+//     PDF. With no printer set up there is no page layout panel, so
+//     in-setup=STEP prints "harness: skipped: ..." instead (a case is then
+//     skipped); in-pdf-setup=STEP does STEP while Print Setup shows its
+//     dialog for a printer making PDFs (as it does with none set up), and
+//     prints the same, before cancelling it.
 //
 // Always runs offscreen and keeps any settings in a temporary folder, so it
 // never shows a window or touches the user's JPEGsnoop settings.
@@ -507,12 +524,12 @@ static void usage()
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
-          "                         [--out-same-case]\n"
+          "                         [--out-same-case] [--src-link]\n"
           "       jpegsnoop-harness export-tiff <file> --format rgb8|rgb16|ycc8 [--out PATH] [--out-same]\n"
           "       jpegsnoop-harness cmdline <file> [<file> ...] [--put DEST=NAME]... [--link DEST=TARGET]...\n"
           "                         [--mkdir DIR]... [--chmod OCTAL:REL]... [--sparse NAME=SIZE]...\n"
           "                         [--setting KEY=VALUE]...\n"
-          "                         [--no-eula] -- ARGS...\n"
+          "                         [--no-eula] [--app] -- ARGS...\n"
           "       jpegsnoop-harness batch <folder> [<file to open first> ...] --batch STEPS [--batch-cat REL]...\n"
           "                         [--batch-unreadable REL]... [--batch-mode OCTAL:REL]...\n"
           "                         [--batch-link sym|hard:NAME=TARGET]... [--batch-compare] [--batch-open-missing]\n"
@@ -3612,9 +3629,12 @@ static void printMenu(MainWindow &window, const QString &strSteps, const QString
 
   for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
   {
-    const qsizetype nEq = strStep.indexOf('=');
-    const QString strName = (nEq < 0) ? strStep : strStep.left(nEq);
-    strAnswer = (nEq < 0) ? QString() : strStep.mid(nEq + 1);
+    // (A step ending in "#LABEL" is printed with it, so the same step done
+    // twice can be told apart)
+    const QString strDo = strStep.section('#', 0, 0);
+    const qsizetype nEq = strDo.indexOf('=');
+    const QString strName = (nEq < 0) ? strDo : strDo.left(nEq);
+    strAnswer = (nEq < 0) ? QString() : strDo.mid(nEq + 1);
     if(strName == "setup")
       pSetup->trigger();
     else if(strName == "print")
@@ -3629,7 +3649,16 @@ static void printMenu(MainWindow &window, const QString &strSteps, const QString
       // The printer itself (native: this Mac's default; only Print Setup and
       // Print Preview use it, as Print refuses it)
       if(strAnswer == "native")
+      {
+        // (With no printer set up, it stays a PDF one: the steps after
+        // would test that instead)
         rPrinter.setOutputFormat(QPrinter::NativeFormat);
+        if(rPrinter.outputFormat() != QPrinter::NativeFormat)
+        {
+          out << "harness: skipped: printer=native needs a printer set up\n";
+          break;
+        }
+      }
       else
       {
         rPrinter.setOutputFormat(QPrinter::PdfFormat);
@@ -4185,7 +4214,18 @@ static void outsideSteps(MainWindow &window, const GuiOptions &opts, QTextStream
         rPrinter.setOutputFileName(strPdf);
       }
       else
-        rPrinter.setOutputFormat(QPrinter::NativeFormat); // Print Setup's own dialog is for a PDF printer
+      {
+        // Print Setup shows macOS's panel only for a printer that isn't
+        // making PDFs (else this version's own dialog, see in-pdf-setup).
+        // With no printer set up, the printer stays a PDF one.
+        rPrinter.setOutputFormat(QPrinter::NativeFormat);
+        if(rPrinter.outputFormat() != QPrinter::NativeFormat)
+        {
+          rPrinter.setOutputFormat(QPrinter::PdfFormat);
+          out << "harness: skipped: " << strStep << " needs a printer set up, for macOS's page layout panel\n";
+          continue;
+        }
+      }
       const QString strFirst = window.textEdit->toPlainText();
       bool bShown = false;
       window.setPrintDialogRunner([&](QDialog &dlg) -> int {
@@ -4210,6 +4250,44 @@ static void outsideSteps(MainWindow &window, const GuiOptions &opts, QTextStream
         out << "harness: outside " << strStep << ": no panel\n";
       else if(bPrint)
         out << "harness: outside " << strStep << ": printed: " << pdfSummary(strPdf) << "\n";
+    }
+    else if(strStep.startsWith("in-pdf-setup="))
+    {
+      // File > Print Setup with the printer making PDFs, as it is with no
+      // printer set up: this version's own dialog, modal, with STEP done
+      // while it is up, then cancelled
+      const QString strSub = strStep.mid(13);
+      QAction *pAction = findAction(window, QStringLiteral("Print Setup..."));
+      if(!pAction)
+      {
+        out << "harness: outside " << strStep << ": menu unavailable\n";
+        continue;
+      }
+      window.printer().setOutputFormat(QPrinter::PdfFormat);
+      const QString strFirst = window.textEdit->toPlainText();
+      bool bShown = false;
+      QTimer timerDlg;
+      QObject::connect(&timerDlg, &QTimer::timeout, [&]() {
+        QDialog *pDlg = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+        if(bShown || !pDlg)
+          return;
+        bShown = true;
+        timerDlg.stop();
+        if(!fnStep(strSub))
+          out << "harness: unknown outside step " << strSub << "\n";
+        QTest::qWait(300);
+        out << "harness: outside " << strStep << ": during the dialog " << pDlg->metaObject()->className()
+            << ": modal=" << (QApplication::activeModalWidget() ? 1 : 0) << " " << outsideState(window) << "\n";
+        pDlg->reject();
+      });
+      timerDlg.start(20);
+      pAction->trigger();
+      timerDlg.stop();
+      if(!bShown)
+        out << "harness: outside " << strStep << ": no dialog\n";
+      else
+        out << "harness: outside " << strStep << ": the dialog closed: same report="
+            << ((window.textEdit->toPlainText() == strFirst) ? 1 : 0) << "\n";
     }
     else if(!fnStep(strStep))
     {
@@ -5046,6 +5124,7 @@ struct ExportOptions
   QString strOut;                 // --out PATH
   bool bOutSame = false;          // --out-same
   bool bOutSameCase = false;      // --out-same-case
+  bool bSrcLink = false;          // --src-link
   QString strOverlay;             // --overlay STEPS
 };
 
@@ -5062,7 +5141,18 @@ static int runExportJpeg(const QString &strFile, const ExportOptions &opts, cons
   closeMessageBoxes(timerMsgBox, out);
 
   const QString strSrcMd5 = fileMd5(strFile);
-  window.openFile(strFile);
+  const QString strSrcFull = QFileInfo(strFile).absoluteFilePath();
+  const QString strLink = strTmpDir + "/export/out.000001.jpg";
+  if(opts.bSrcLink)
+  {
+    QDir().mkpath(strTmpDir + "/export");
+    if(!QFile::link(strSrcFull, strLink))
+    {
+      out << "harness: couldn't make the link " << strLink << "\n";
+      return 2;
+    }
+  }
+  window.openFile(opts.bSrcLink ? strLink : strFile);
   QCoreApplication::processEvents();
 
   if(!opts.strOverlay.isEmpty())
@@ -5082,7 +5172,7 @@ static int runExportJpeg(const QString &strFile, const ExportOptions &opts, cons
     strOut = fiSrc.dir().filePath(strName);
     if(!QFileInfo::exists(strOut))
     {
-      out << "harness: case-sensitive disk, skipped\n";
+      out << "harness: skipped: --out-same-case needs a disk that ignores case, and this one doesn't\n";
       return 0;
     }
   }
@@ -5121,6 +5211,12 @@ static int runExportJpeg(const QString &strFile, const ExportOptions &opts, cons
   }
   out << "harness: exported " << astrWritten.size() << " md5s=" << astrMd5.join(',') << "\n";
   out << "harness: source unchanged=" << ((fileMd5(strFile) == strSrcMd5) ? 1 : 0) << "\n";
+  if(opts.bSrcLink)
+  {
+    const QFileInfo fiLink(strLink);
+    out << "harness: source link kept=" << ((fiLink.isSymLink() && (fiLink.symLinkTarget() == strSrcFull)) ? 1 : 0)
+        << "\n";
+  }
   out << exportReport(window) << "\n";
 
   // The File Overlay is still in place afterwards (an export without Enable
@@ -5864,6 +5960,7 @@ static int runCmdLineMode(const QStringList &astrIn)
   QStringList astrFiles;
   QList<QPair<QString, QString>> chmods;  // REL, OCTAL
   QString strFilesDir;
+  bool bApp = false;            // --app
   for(qsizetype nInd = 0; nInd < astrOwn.size(); nInd++)
   {
     const QString &strOpt = astrOwn.at(nInd);
@@ -5871,6 +5968,10 @@ static int runCmdLineMode(const QStringList &astrIn)
     if(strOpt == "--no-eula")
     {
       QSettings().remove("General\\EulaAccepted");
+    }
+    else if(strOpt == "--app")
+    {
+      bApp = true;
     }
     else if(bHasValue && ((strOpt == "--put") || (strOpt == "--link") || (strOpt == "--mkdir") ||
                           (strOpt == "--chmod") || (strOpt == "--setting") || (strOpt == "--sparse")))
@@ -5920,6 +6021,21 @@ static int runCmdLineMode(const QStringList &astrIn)
     return 0;
   }
 
+  // The app itself: only what reads no settings (a run with a file reads
+  // the license terms' setting, from your own settings), so never its window
+  const QString strApp = QCoreApplication::applicationDirPath() + "/app/JPEGsnoopQt.app/Contents/MacOS/JPEGsnoopQt";
+  if(bApp && !sOptions.bHelp && sOptions.strError.isEmpty())
+  {
+    out << "harness: cmdline --app runs only the summary and errors, which read no settings\n";
+    return 2;
+  }
+  if(bApp && !QFileInfo(strApp).isExecutable())
+  {
+    out << "harness: skipped: the app isn't built beside the driver (" << strApp << "): run tests/run-tests.sh "
+        << "without --no-build\n";
+    return 0;
+  }
+
   for(const auto &chmodPair : chmods)
   {
     bool bOk = false;
@@ -5933,13 +6049,39 @@ static int runCmdLineMode(const QStringList &astrIn)
 
   QString strOut;
   QString strErr;
-  int nStatus = 0;
+  QString strStatus;
+  if(bApp)
+  {
+    // As started in Terminal: not offscreen (the driver's own setting)
+    QProcess proc;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.remove("QT_QPA_PLATFORM");
+    proc.setProcessEnvironment(env);
+    proc.setWorkingDirectory(strWork);
+    proc.start(strApp, astrArgs);
+    if(!proc.waitForStarted(10000))
+    {
+      out << "harness: cmdline couldn't start " << strApp << ": " << proc.errorString() << "\n";
+      return 2;
+    }
+    if(!proc.waitForFinished(30000))
+    {
+      proc.kill();
+      proc.waitForFinished();
+      out << "harness: cmdline the app didn't finish\n";
+      return 2;
+    }
+    strOut = QString::fromLocal8Bit(proc.readAllStandardOutput());
+    strErr = QString::fromLocal8Bit(proc.readAllStandardError());
+    strStatus = (proc.exitStatus() == QProcess::CrashExit) ? QStringLiteral("crash") : QString::number(proc.exitCode());
+  }
+  else
   {
     QTextStream streamOut(&strOut);
     QTextStream streamErr(&strErr);
     const QString strCwd = QDir::currentPath();
     QDir::setCurrent(strWork);
-    nStatus = runCmdLineApp(sOptions, streamOut, streamErr);
+    strStatus = QString::number(runCmdLineApp(sOptions, streamOut, streamErr));
     QDir::setCurrent(strCwd);
   }
 
@@ -5948,7 +6090,7 @@ static int runCmdLineMode(const QStringList &astrIn)
     ::chmod(QFile::encodeName(dirWork.filePath(chmodPair.first)).constData(), 0700);
 
   const QMap<QString, QString> filesAfter = cmdLineFiles(strWork);
-  out << "harness: cmdline status=" << nStatus << " files=" << QStringList(filesAfter.keys()).join('|') << "\n";
+  out << "harness: cmdline status=" << strStatus << " files=" << QStringList(filesAfter.keys()).join('|') << "\n";
 
   const auto printLines = [&out](const QString &strWhat, QString strText) {
     if(strText.endsWith('\n'))
@@ -5977,6 +6119,10 @@ static int runCmdLineMode(const QStringList &astrIn)
     if(it.key().endsWith(".txt") && !abData.contains('\0'))
       printLines("log " + it.key(), QString::fromUtf8(abData));
   }
+
+  // (The app's own settings are yours, and aren't read)
+  if(bApp)
+    return 0;
 
   QStringList astrChanged;
   const QMap<QString, QString> settingsAfter = savedSettings();
@@ -6066,6 +6212,7 @@ int main(int argc, char **argv)
   exportOpts.sJpeg.bOverlayEn = args.removeAll("--overlays") > 0;
   exportOpts.bOutSame = args.removeAll("--out-same") > 0;
   exportOpts.bOutSameCase = args.removeAll("--out-same-case") > 0;
+  exportOpts.bSrcLink = args.removeAll("--src-link") > 0;
   BatchOptions batchOpts;
   batchOpts.bCompare = args.removeAll("--batch-compare") > 0;
   batchOpts.bReopenMissing = args.removeAll("--batch-open-missing") > 0;

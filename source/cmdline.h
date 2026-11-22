@@ -49,9 +49,10 @@
 //     export that couldn't be written, and (errors in the report too) a
 //     file that is empty or too large to decode, and an offset past a
 //     file's end, which Windows decoded as if 0x00 bytes were there.
-//   - In a batch, no log or export replaces one of the batch's files (with
-//     -ext_all, every file in the folder): Windows replaced it, and then
-//     analyzed what had replaced it.
+//   - No log or export replaces the file analyzed, nor in a batch one of
+//     the batch's files (with -ext_all, every file in the folder): not by
+//     its name, nor the file a link of that name leads to, nor a link on
+//     the way. Windows replaced it, and then analyzed what had replaced it.
 //   - -ext_dht_avi adds the standard Huffman tables an exported frame
 //     lacks (as Tools > Export JPEG can); on Windows it did nothing. Without
 //     it, as Export JPEG does by default, they are added to a Motion JPEG
