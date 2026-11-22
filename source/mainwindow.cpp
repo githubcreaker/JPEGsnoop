@@ -210,13 +210,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), textEdit(new CRep
   textEdit->setFont(f);
   textEdit->appendPlainText("");
 
+  // Only the messages: the MCU, file position and YCC under the mouse, which
+  // Windows' status bar showed beside them, are in the image window's
   m_StatusBar = statusBar();
-  QLabel *st1 = new QLabel("     ");
-  st1->setAlignment(Qt::AlignHCenter);
-  st1->setMinimumSize(st1->sizeHint());
-
-  m_StatusBar->addPermanentWidget(st1);
-  st1->setText("1234");
   m_pJfifDec->SetStatusBar(m_StatusBar);
 
   connect(m_pJfifDec, SIGNAL(updateStatus(QString, int)), m_StatusBar, SLOT(showMessage(QString,int)));
@@ -794,8 +790,10 @@ void MainWindow::open()
   QFileDialog dialog(this);
 
   QStringList filters;
+  // Windows' list
   filters << "JPEG Image (*.jpg *.jpeg)"
           << "Thumbnail (*.thm)"
+          << "AVI Movie (*.avi)"
           << "QuickTime Movie (*.mov)"
           << "Digital Negative (*.dng)"
           << "RAW Image (*.crw *.cr2 *.nef *.orf *.pef)"

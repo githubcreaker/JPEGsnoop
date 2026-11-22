@@ -232,7 +232,14 @@ when it is installed, so Pillow needn't be installed separately).
       toolbar itself, as closing it does when it floats). After each step it
       prints the same, and whether the report and the image window's view got
       `taller`, `shorter` or stayed the `same`; after every file, the same as
-      `harness: bars file N:`.
+      `harness: bars file N:`. The step `widgets` prints what each status bar
+      holds besides its messages: its widgets, a label with its text.
+    - `--open CHOICE[+CHOICE...]` (`--open-at N`; `0` is before any file)
+      chooses File > Open Image and answers its file dialog: `cancel`, or the
+      file to open (percent-encoded; a relative path is in the folder of the
+      files given). It prints the dialog's title, filters, the one selected,
+      its mode and whether it is read-only, then the file the report is of
+      and whether it was read as an AVI.
     - `--print STEP[,STEP...]` (`--print-at N`; `0` is before any file) prints
       File > Print Setup's place, makes the shared printer write a PDF in the
       settings folder, and answers Print Setup's and Print's system dialogs
@@ -433,8 +440,9 @@ toolbar's New button" section, `IE` in its "The red line where the image
 ends inside its MCUs" section, `OF` in its "Opening a file from outside the
 app: a drop, Finder, the command line" section, `TB` in its "The toolbar's
 Copy and About buttons" section, `RM` in its "Removed: Check for Updates,
-Edit > Undo, View > Adjust, Submit signature" section, and `CL` in its
-"Command-line mode" section);
+Edit > Undo, View > Adjust, Submit signature" section, `CL` in its
+"Command-line mode" section, and `OD` in its "File > Open's AVI Movie, and the
+status bar's "1234"" section);
 `ok_*` cases are valid files that must keep decoding.
 
 ## Adding a case

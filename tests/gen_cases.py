@@ -3465,6 +3465,14 @@ bars_case("VB_menu_toolbar", "statusbar", rx('harness: bars &Toolbar menu=&View 
 bars_case("VB_menu_status", "statusbar", rx('harness: bars &Status Bar menu=&View after="&Toolbar" separator=0 '
           'enabled=1 tip="Show or hide the status bar" checkable=1') + "$")
 bars_case("VB_at_first", "statusbar", rx("harness: bars at first: " + vb_state(1, 1)) + "$")
+# The main window's status bar holds only the messages (it had a label that
+# always said "1234"); the MCU, file position and YCC are in the image window's
+VB_WIDGETS = "harness: bars widgets: main="
+bars_case("VB_main_widgets", "widgets", "^" + VB_WIDGETS + "none image=")
+bars_case("VB_main_widgets_before_file", "widgets", "^" + VB_WIDGETS + "none image=", extra="--bars-at 0")
+bars_case("VB_main_widgets_shown_again", "statusbar,statusbar,widgets", "^" + VB_WIDGETS + "none image=")
+bars_case("VB_image_widgets", "widgets",
+          '^harness: bars widgets: .* image=mcuLabel="[^"]*"\\|fileLabel="[^"]*"\\|yccLabel="[^"]*"$')
 # Status Bar: this window's and the image window's (which has the MCU, file
 # position and YCC that Windows' one status bar had); the report and the
 # image take the space
@@ -4306,6 +4314,26 @@ cl_case("CL_eula", CL_OK, CL_I,
 cl_case("CL_eula_nothing_done", CL_OK, CL_I, cl_status(1, CL_OK), own="--no-eula")
 cl_case("CL_eula_help", CL_OK, "-help", cl_status(0, CL_OK), own="--no-eula")
 cl_case("CL_eula_not_saved", CL_OK, CL_I, "^harness: cmdline settings changed=none$", own="--no-eula")
+
+
+# --- File > Open's types of file --------------------------------------------------
+# Windows' list, in its order: the port's had no AVI Movie. gui --open chooses
+# File > Open Image and answers its dialog.
+def open_case(cid, choice, expect, names=("ok_420.jpg",), extra=""):
+    case(cid, "OD", "gui", list(names), f"--open {choice} {extra}".strip(), timeout=30, expect=expect)
+
+
+OD_TYPES = ("JPEG Image (*.jpg *.jpeg)|Thumbnail (*.thm)|AVI Movie (*.avi)|QuickTime Movie (*.mov)|"
+            "Digital Negative (*.dng)|RAW Image (*.crw *.cr2 *.nef *.orf *.pef)|PDF Files (*.pdf)|"
+            "Photoshop Files (*.psd)|All Files (*)")
+open_case("OD_types", "cancel", "^" + rx(f'harness: open dialog: Open (filters="{OD_TYPES}" '))
+open_case("OD_first_type", "cancel",
+          "^harness: open dialog: .* " + rx('selected="JPEG Image (*.jpg *.jpeg)" mode=existing-file read-only=1)')
+          + "$")
+open_case("OD_cancel", "cancel", "^" + rx("harness: open cancel: report file=ok_420.jpg avi=0") + "$")
+open_case("OD_avi", "e_mjpeg.avi", "^" + rx("harness: open e_mjpeg.avi: report file=e_mjpeg.avi avi=1") + "$")
+open_case("OD_avi_before_file", "e_mjpeg.avi",
+          "^" + rx("harness: open e_mjpeg.avi: report file=e_mjpeg.avi avi=1") + "$", extra="--open-at 0")
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

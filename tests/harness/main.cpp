@@ -308,8 +308,18 @@
 //     choose the toolbar's item in it) and hide-toolbar (hide the toolbar
 //     itself, as closing it does when it floats). After each step print the
 //     same, and whether the report and the image window's view got taller,
-//     shorter or stayed the same. After every file, print the same as
-//     "harness: bars file N:".
+//     shorter or stayed the same. The step widgets prints what each status
+//     bar holds besides its messages (its widgets, a label with its text).
+//     After every file, print the same as "harness: bars file N:".
+//
+// gui ... --open CHOICE[+CHOICE...] [--open-at N]
+//     After the first file (or file N; 0 is before any file), print the
+//     place of File > Open Image in the menu, then for each CHOICE choose it
+//     and answer its file dialog: cancel, or the file to open
+//     (percent-encoded; a relative path is in the folder of the files given).
+//     Print the dialog's title, filters, the filter selected, its mode and
+//     whether it is read-only, then the file the report is of and whether it
+//     was read as an AVI.
 //
 // gui ... --print STEP[,STEP...] [--print-at N]
 //     After the first file (or file N; 0 is before any file), print the
@@ -442,6 +452,7 @@
 #include <QPointingDevice>
 #include <QSet>
 #include <QSettings>
+#include <QSizeGrip>
 #include <QStyle>
 #include <QScopeGuard>
 #include <QScreen>
@@ -521,6 +532,7 @@ static void usage()
           "                         [--recent STEP[,STEP...] [--recent-at N]] [--recent-stored NAME[+NAME...]]\n"
           "                         [--new STEP[,STEP...] [--new-at N]]\n"
           "                         [--outside STEP[,STEP...] [--outside-at N]]\n"
+          "                         [--open CHOICE[+CHOICE...] [--open-at N]]\n"
           "       jpegsnoop-harness settings\n"
           "       jpegsnoop-harness export-jpeg <file> [--all] [--force-soi] [--force-eoi] [--ignore-eoi]\n"
           "                         [--dht-avi] [--overlays] [--overlay STEPS] [--out PATH] [--out-same]\n"
@@ -1333,6 +1345,8 @@ struct GuiOptions
   int nNewAt = 1;                 // --new-at N
   QString strOutside;             // --outside STEP[,STEP...]
   int nOutsideAt = 1;             // --outside-at N
+  QString strOpen;                // --open CHOICE[+CHOICE...]
+  int nOpenAt = 1;                // --open-at N
   QString strFilesDir;            // the folder of the files given
 };
 
@@ -3424,6 +3438,31 @@ static void barsMenu(MainWindow &window, const QString &strSteps, QTextStream &o
   for(const QString &strStep : strSteps.split(',', Qt::SkipEmptyParts))
   {
     QCoreApplication::processEvents();
+    if(strStep == "widgets")
+    {
+      // What each status bar holds besides its messages: its widgets, by
+      // name (or class), with a label's text
+      const auto fnWidgets = [](const QStatusBar *pBar) {
+        QStringList astr;
+        for(const QWidget *pChild : pBar ? pBar->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly)
+                                         : QList<QWidget *>())
+        {
+          if(qobject_cast<const QSizeGrip *>(pChild))
+            continue;
+          QString str = pChild->objectName().isEmpty() ? QString::fromLatin1(pChild->metaObject()->className())
+                                                       : pChild->objectName();
+          if(const QLabel *pLabel = qobject_cast<const QLabel *>(pChild))
+            str += "=\"" + pLabel->text() + "\"";
+          astr << str;
+        }
+        return pBar ? (astr.isEmpty() ? QStringLiteral("none") : astr.join('|')) : QStringLiteral("-");
+      };
+      Q_Viewer *pViewer = findViewer();
+      out << "harness: bars widgets: main="
+          << fnWidgets(window.findChild<QStatusBar *>(QString(), Qt::FindDirectChildrenOnly))
+          << " image=" << fnWidgets(pViewer ? pViewer->findChild<QStatusBar *>() : nullptr) << "\n";
+      continue;
+    }
     const QSize sizeBefore = barsSpace(window);
     if(strStep == "toolbar")
       pToolbar->trigger();
@@ -3736,6 +3775,73 @@ static void recentState(MainWindow &window, QTextStream &out)
       astrStored << QFileInfo(strFile).fileName();
   }
   out << "harness: recent stored: " << (astrStored.isEmpty() ? QStringLiteral("none") : astrStored.join(',')) << "\n";
+}
+
+// File > Open Image as a user uses it (see --open above)
+static void openMenu(MainWindow &window, const GuiOptions &opts, QTextStream &out)
+{
+  QAction *pAction = findAction(window, QStringLiteral("&Open Image..."));
+  if(!pAction)
+  {
+    out << "harness: menu Open Image unavailable\n";
+    return;
+  }
+  out << "harness: open " << menuPlace(pAction) << "\n";
+
+  QString strChoice;
+  bool bShown = false;
+  QTimer timer;
+  QObject::connect(&timer, &QTimer::timeout, [&]() {
+    QFileDialog *pDlg = qobject_cast<QFileDialog *>(QApplication::activeModalWidget());
+    if(!pDlg || bShown)
+      return;
+    bShown = true;
+    out << "harness: open dialog: " << pDlg->windowTitle() << " (filters=\"" << pDlg->nameFilters().join('|')
+        << "\" selected=\"" << pDlg->selectedNameFilter() << "\" mode="
+        << ((pDlg->fileMode() == QFileDialog::ExistingFile) ? "existing-file" : "other")
+        << " read-only=" << (pDlg->testOption(QFileDialog::ReadOnly) ? 1 : 0) << ")\n";
+    if(strChoice == QLatin1String("cancel"))
+    {
+      pDlg->reject();
+      return;
+    }
+    QString strPath = QUrl::fromPercentEncoding(strChoice.toUtf8());
+    if(QFileInfo(strPath).isRelative())
+      strPath = QDir(opts.strFilesDir).filePath(strPath);
+    // Typed in the name field, as for Search Executable for DQT's dialog
+    if(QLineEdit *pName = pDlg->findChild<QLineEdit *>("fileNameEdit"))
+      pName->setText(strPath);
+    else
+      pDlg->selectFile(strPath);
+    QStringList astrChosen;
+    for(const QString &strFile : pDlg->selectedFiles())
+      astrChosen << QFileInfo(strFile).fileName();
+    out << "harness: open chose " << astrChosen.join('|') << "\n";
+    static_cast<QDialog *>(pDlg)->done(QDialog::Accepted);
+  });
+  timer.start(20);
+
+  for(const QString &strOne : opts.strOpen.split('+'))
+  {
+    strChoice = strOne;
+    bShown = false;
+    pAction->trigger();
+    QCoreApplication::processEvents();
+    if(!bShown)
+      out << "harness: open dialog not shown\n";
+    // The file the report is of (its "Filename:" line), and whether it was
+    // read as an AVI
+    const QString strLog = window.textEdit->toPlainText();
+    QString strReportFile = QStringLiteral("-");
+    for(const QString &strLine : strLog.split('\n'))
+    {
+      if(strLine.startsWith("  Filename: ["))
+        strReportFile = QFileInfo(strLine.mid(13).chopped(1)).fileName();
+    }
+    out << "harness: open " << strOne << ": report file=" << strReportFile
+        << " avi=" << (strLog.contains(QLatin1String("*** AVI File Decoding ***")) ? 1 : 0) << "\n";
+  }
+  out.flush();
 }
 
 // File > Recent File as a user uses it (see --recent above)
@@ -4926,6 +5032,13 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
     outsideSteps(window, opts, out);
   }
 
+  // File > Open Image before any file has been opened
+  if(!opts.strOpen.isEmpty() && (opts.nOpenAt == 0))
+  {
+    out << "harness: open before any file\n";
+    openMenu(window, opts, out);
+  }
+
   // File > Recent File before any file has been opened
   if(!opts.strRecent.isEmpty() && (opts.nRecentAt == 0))
   {
@@ -5057,6 +5170,8 @@ static int runGui(const QStringList &files, const GuiOptions &opts, const QStrin
           newButton(window, opts, out);
         if(!opts.strOutside.isEmpty() && (nFileInd == opts.nOutsideAt))
           outsideSteps(window, opts, out);
+        if(!opts.strOpen.isEmpty() && (nFileInd == opts.nOpenAt))
+          openMenu(window, opts, out);
         if(!opts.strBars.isEmpty())
         {
           if(nFileInd == opts.nBarsAt)
@@ -6244,7 +6359,7 @@ int main(int argc, char **argv)
                              "--edit", "--overlay", "--offset", "--search", "--lookup", "--hover", "--dqt",
                              "--batch", "--add-db", "--user-db-mode", "--db-dir",
                              "--db-dir-mode", "--mcu-grid", "--bars", "--print", "--recent", "--recent-stored",
-                             "--new", "--outside" })
+                             "--new", "--outside", "--open" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -6306,6 +6421,8 @@ int main(int argc, char **argv)
       guiOpts.strNew = args.at(nInd + 1);
     else if(QLatin1String(pszOpt) == QLatin1String("--outside"))
       guiOpts.strOutside = args.at(nInd + 1);
+    else if(QLatin1String(pszOpt) == QLatin1String("--open"))
+      guiOpts.strOpen = args.at(nInd + 1);
     args.remove(nInd, 2);
   }
 
@@ -6314,7 +6431,7 @@ int main(int argc, char **argv)
   for(const char *pszOpt : { "--repeat", "--max-growth-mb", "--max-zoom-mb", "--start", "--detail-dlg-at", "--overlay-at",
                              "--offset-at", "--search-at", "--lookup-at", "--dqt-at", "--batch-cancel-after",
                              "--batch-close-after", "--add-db-at", "--mcu-grid-at", "--bars-at", "--print-at",
-                             "--recent-at", "--new-at", "--outside-at" })
+                             "--recent-at", "--new-at", "--outside-at", "--open-at" })
   {
     const qsizetype nInd = args.indexOf(QLatin1String(pszOpt));
     if(nInd < 0)
@@ -6359,6 +6476,8 @@ int main(int argc, char **argv)
       guiOpts.nNewAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--outside-at"))
       guiOpts.nOutsideAt = nVal;
+    else if(QLatin1String(pszOpt) == QLatin1String("--open-at"))
+      guiOpts.nOpenAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-cancel-after"))
       batchOpts.nCancelAfter = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--batch-close-after"))

@@ -3229,6 +3229,61 @@ previous commit too. Five deliberate breaks each fail their own cases:
 pass and 10 are skipped (the native printer's 7 and the Finder cases' 3). The changed `run-tests.sh` passes ShellCheck, and cppcheck 2.22
 finds nothing new in the driver.
 
+### File > Open's AVI Movie, and the status bar's "1234"
+
+The last of Windows' features still to port, and a leftover found while looking for any
+others. Now:
+- **File > Open's types include "AVI Movie (*.avi)",** after Thumbnail, as on Windows.
+  AVI files already decoded, but could be found only under All Files.
+- **The main window's status bar shows only its messages.** It also had a label at its
+  right that always said "1234", a placeholder from the first Qt port that nothing
+  changed.
+
+**Unchanged from Windows:** the other types and their order, and JPEG Image chosen at
+first, so an AVI is offered after choosing AVI Movie or All Files. The MCU, file position
+and YCC stay in the image window's status bar (see View > Toolbar and Status Bar).
+
+**Tests:** 9 new cases, 5 `OD` and 4 `VB` (1,222 in all).
+- **The driver:** `gui --open CHOICE[+CHOICE...]` chooses File > Open and answers its
+  dialog, which no case had used. `--bars`' new step `widgets` lists what each status bar
+  holds besides its messages.
+- **The cases:** the types and their order; JPEG Image chosen at first, an existing file
+  only, read-only; cancel keeping the file shown; an AVI opened through the dialog, also
+  before any file; the main window's status bar with no widgets, also before any file and
+  hidden and shown again; the image window's three labels.
+
+On the previous commit 4 of them fail (the types, and the main window's 3). The other 5
+check what was already so. Eleven deliberate breaks each fail their own cases:
+- **The types:** AVI Movie left out, after QuickTime, or with another pattern, 1 each;
+  chosen at first, 1.
+- **The dialog:** any file name allowed, 1; not read-only, 1; the file chosen not opened,
+  2; cancel clearing the report, 1.
+- **The status bars:** an empty label kept in the main window's, 3; "1234" beside the
+  messages, 3; the image window's file position left out, 1.
+
+**Checks:**
+- **All 1,222 pass** with and without ASan/UBSan. With the printers hidden, 1,212 pass
+  and 10 are skipped, as before.
+- **The app builds,** and the driver's whole build (the app's sources but the unchanged
+  `main.cpp`) has no new warnings.
+- **cppcheck 2.22** finds nothing new in `mainwindow.cpp`. In the driver it adds one
+  false positive, as three others there: `!bShown` "always true", where a timer sets it
+  while the dialog is up.
+- **The status bar** was drawn offscreen before and after: "1234" showed at its right,
+  and is gone.
+- **Not checked:** the Open panel and the status bar on the macOS platform (the driver
+  sees Qt's own dialog).
+
+**Still open:**
+- **No other feature found left to port,** apart from those removed or left out on
+  purpose and F6, Windows' key for moving between its panes (the image has a window of
+  its own here). Compared with `upstream/master`: the menus, toolbar, menu shortcuts,
+  list of dialogs and Configuration's controls. Not compared again: the other dialogs'
+  controls, and the decoders' output.
+- **A link that leads nowhere** when a batch starts isn't kept (see Command-line mode).
+- **Also:** Developer ID signing and notarization (M5). Latent code. Fill bytes before an
+  RST marker in the report's marker list (see Tools > Lookup MCU Offset).
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:
