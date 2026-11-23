@@ -3267,7 +3267,16 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
   uint32_t nBimId = m_pWBuf->BufRdAdv2(nPos, PS_BSWAP);
   m_pWBuf->BufRdAdv1(nPos, PS_BSWAP);   // (nResNameLen)
 
-  QString strResName = m_pWBuf->BufReadStrn(nPos, nResNameLen);
+  // Its name: a byte that doesn't print is shown as a dot (as in an APPn
+  // identifier), rather than left out ("Caf\xe9" as "Caf")
+  QString strResName;
+
+  for(uint32_t nInd = 0; nInd < nResNameLen; nInd++)
+  {
+    const uint8_t nChar = Buf(nPos + nInd);
+
+    strResName += IsPrintAscii(nChar) ? QChar(nChar) : QChar('.');
+  }
 
   nPos += nResNameLen;
 
@@ -3280,7 +3289,6 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
   uint32_t nBimLen = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   QString strTmp;
-  QString strBimName;
   QString strByte;
 
   // Lookup 8BIM defined name
@@ -3297,9 +3305,10 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
     strBimDefName = asBimRecords[nFldInd].strRecordName;
   }
 
+  // (The resource's own name: this showed a name never set, so always "")
   strTmp = QString("8BIM: [0x%1] Name=\"%2\" Len=[0x%3] DefinedName=\"%4\"")
       .arg(nBimId, 4, 16, QChar('0'))
-      .arg(strBimName)
+      .arg(strResName)
       .arg(nBimLen, 4, 16, QChar('0'))
       .arg(strBimDefName);
   PhotoshopParseReportNote(nIndent, strTmp);

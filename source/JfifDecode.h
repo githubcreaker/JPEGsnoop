@@ -226,13 +226,15 @@ private:
   quint64 SegEnd(uint32_t nPosLength, uint32_t nLength) const;
   static bool SegHas(quint64 nPos, quint64 nLen, quint64 nPosEnd);
   enum teSegOverrun { SEG_READ_ON, SEG_STOP_EOF, SEG_STOP };
-  teSegOverrun SegOverrun(const QString &strWhat, quint64 nPos, quint64 nPosEnd, const QString &strSeg, bool &bShown);
+  teSegOverrun SegOverrun(const QString &strWhat, quint64 nPos, quint64 nLen, quint64 nPosEnd, const QString &strSeg,
+                          bool &bShown);
   void SegPastErr(const QString &strWhat, quint64 nPos, quint64 nPosEnd, const QString &strSeg, const QString &strThen);
   QByteArray ReadIdentifier(quint64 nPos, quint64 nPosEnd, bool &bEnds);
   void TakeIdentifier(const QByteArray &abId, bool bEnds, quint64 nPosEnd, const QString &strIn, char *acId,
                       uint32_t nAfter);
   void DecodeEmbeddedThumb();
   bool DecodeAvi();
+  void AviCutNote(const QString &strName, uint32_t nPos);
   bool IsZeroAviHeader(uint64_t nPos, uint64_t nPosEof);
 
   bool ValidateValue(uint32_t &nVal, uint32_t nMin, uint32_t nMax, QString strName, bool bOverride, uint32_t nOverrideVal);
@@ -243,7 +245,7 @@ private:
 //      uint32_t                DecodeMakerIfd(uint32_t ifd_tag,uint32_t ptr,uint32_t len);
   bool DecodeMakerSubType();
   bool DecodeDHT(bool bInject);
-  uint32_t DecodeApp13Ps(uint32_t nPosEnd);
+  uint32_t DecodeApp13Ps(quint64 nPosEnd);
   uint32_t DecodeApp2Flashpix(quint64 nPosEnd);
   uint32_t DecodeApp2IccProfile(quint64 nPosEnd);
   uint32_t DecodeIccHeader(uint32_t nPos);
@@ -384,7 +386,8 @@ private:
 
   // Embedded EXIF Thumbnail
   uint32_t m_nImgExifThumbComp;
-  uint32_t m_nImgExifThumbOffset;
+  quint64 m_nImgExifThumbOffset;       // (In 64 bits: see DecodeExifIfd())
+  bool m_bImgExifThumbOffset;          // Whether IFD1 gave it
   uint32_t m_nImgExifThumbLen;
   uint32_t m_anImgThumbDqt[4][64];
   bool m_abImgDqtThumbSet[4];

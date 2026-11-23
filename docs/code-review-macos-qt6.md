@@ -3876,7 +3876,8 @@ segment can hold thousands of them.
 - **An EXIF thumbnail inside the scan** (`DecodeEmbeddedThumb` 9370): every RST pair
   adds a blank line; a 400 KB file gives 200,033 (agent's file).
 
-**Offsets that wrap past 2^32:**
+**Offsets that wrap past 2^32** (all fixed since: see "Offsets that wrapped, and Photoshop
+resource names" below):
 - **IFD0** at an offset of 0xFFFFFFF4 is read from the file's start (the SOI as an entry
   count of 0xD8FF): `DecodeMarker` 6144 adds the offsets in 32 bits (fixed with the IFD
   entries, below).
@@ -4218,10 +4219,125 @@ a number in it fails the case, but for the decode's `status=` count.
 
 **Found, not fixed:**
 - **A resource's name** is read but not shown: every 8BIM line says Name="" (inherited).
+  (Fixed since: see "Offsets that wrapped, and Photoshop resource names".)
 - **The global layer mask info's** 17 fixed bytes are read whatever its length; they aren't
   shown, and the position goes by the length, so nothing changes in the report.
 - **"8BIM header ... runs past the end of its segment"** says "segment" for a PSD's image
   resources section too, as the existing "8BIM length" error does.
+
+### Offsets that wrapped, and Photoshop resource names
+
+The two "Offsets that wrap past 2^32" left in the audit above are fixed, with the rest of
+their class found in the same functions, and Photoshop resources show their names. An
+offset or size from the file is now added in 64 bits, and where it lands past the end of
+the file an error or note says so.
+
+**The EXIF thumbnail:**
+- **Its offset,** from the TIFF header, was added in 32 bits: one that took it to 2^32
+  wrapped to the file's start, and the main image was reported as the thumbnail (its
+  markers and signature). Now "ERROR: EXIF thumbnail at [0x100000000] is past the end of
+  the file, at [...]", as for an offset past the end short of 2^32 (read as zeros there:
+  "Expected marker 0xFF, got 0x00" past the end).
+- **A compression of 6 with no offset** (JPEGInterchangeFormat) took the offset as 0: the
+  main image again. Now "ERROR: EXIF thumbnail has no offset (JPEGInterchangeFormat)".
+- **A thumbnail that runs past the end of the file** had its markers and DQT tables read
+  past it as zeros (a DQT length of 0xFFFF gave 1,011 tables). At the end of the largest
+  file its DQT's end wrapped, so its table wasn't read and an "EOI" was read from inside
+  it. Its markers now stop at the end of the file ("ERROR: EXIF thumbnail runs past the
+  end of the file"), and a DQT table or frame header is in its segment ("ERROR: Thumbnail
+  DQT table at [...] runs past the end of its DQT segment, at [...]. Stopping.").
+- **Its scan data's error** named the thumbnail's length also where the end of the file
+  stopped it (listed above as found, not fixed): it now says which ("Thumbnail scan data
+  runs past the end of the file").
+
+**AVI:**
+- **Chunk sizes:** a chunk's end was added in 32 bits, so a size of 0xFFFFFFF9 to
+  0xFFFFFFFF wrapped to just past its start (the last 2 bytes of its size and "AB" were
+  listed as a chunk "AB", and the movi list after it was never reached), and 0xFFFFFFF8
+  to its start ("AVI chunk size points backwards"). The main header (avih) likewise. Now
+  "NOTE: AVI chunk [JUNK] at 0x... (4294967293 bytes) runs past the end of the file.
+  Stopping AVI parsing." The note is also given where a chunk is cut short by the end of
+  the file, a recording cut short, which ended the parsing there without a word; what is
+  found is the same. A last chunk without its pad byte is whole, and zeros at the end are
+  zeros, as before.
+- **A chunk's header and a list's fields** (its type, its first chunk's name and size, and
+  the stream header's type, codec and rate) were read past the end of the file, as zeros
+  (a rate of 0.00 frames a second, an IDIT's empty timestamp), and at the end of the
+  largest one from its start (2.33): "NOTE: AVI chunk [strl] at 0x... is cut by the end
+  of the file. Stopping AVI parsing." A stream header cut after its codec still shows its
+  type and codec, so the AVI is still found Motion JPEG; one shorter than its fields
+  keeps its own error; and a whole list that ends with the file before its first chunk
+  (an empty INFO list) is passed, as before.
+
+**Others of the class:**
+- **APP14's Adobe fields** (version, flags and transform) were read past the end of the
+  file (a transform of 0, taken as RGB), and at the end of the largest one from its start:
+  "ERROR: Adobe fields at [...] runs past the end of its APP14 segment, at [...].
+  Skipping."
+- **With Relaxed Parsing,** a field past the end of the file was read on, as only the
+  segment's end was compared with the file's: at the end of the largest file a JFIF
+  header came from its start (a density of 55551 x 57344). It is an Early EOF whatever
+  the options.
+- **APP13's end,** passed to the Photoshop parser, was added in 32 bits: at the end of the
+  largest file it wrapped, and no resource was read.
+- **APP0's JFIF thumbnail** is in the file as well as its segment (it was shown as zeros
+  past the end).
+
+**Photoshop resource names:** every 8BIM line said Name="", a variable that was never set,
+in place of the name read. The name is shown, with a byte that doesn't print as a dot,
+as in an APPn identifier.
+
+**Windows** has all of these (by reading its code).
+
+**Tests:** 29 new cases (1,777 in all): 24 `OW`, 5 of them at the end of a file of 4 GiB
+- 1 bytes, 4 `PN` and 1 `H5` (the length stopping a thumbnail's scan data). 4 changed:
+`H4_avi_loop`, whose JUNK chunk of 0xFFFFFFF8 runs past the end of the file rather than
+pointing backwards; `H5_thumb_sos` and `H5_thumb_sos_eof`, whose scan data the file's end
+stops; and `WR_thumb_dqt`, whose DQT table, 3 bytes at the end of the largest file, is
+now stopped at its segment's end. On the code before, 27 of the 33 fail; the other 6
+check what was right (an AVI's Motion JPEG still found, twice; a whole last chunk and an
+empty last list, with no note; a value after a named resource; the length's message).
+Each of the 19 fixes, switched off on its own in a scratch copy, fails its own cases,
+and passes with it on. In each passing output, deleting the matched line or adding 1 to
+a number in it fails the case.
+
+**Checks:**
+- **Only these reports change.** Old against new:
+  - **Case files:** of the 415 under 64 MB, 392 are unchanged. The others are 16 new ones;
+    `h4_avi_loop` and `av_idit`, whose wrapped chunk sizes now run past the end of the
+    file rather than pointing backwards; `av_stray_bytes`, `av_stray_idit_cut` and
+    `av_stray_list_cut`, which end in a chunk cut short and now say so; and
+    `h5_thumb_sos` and `h5_thumb_sos_eof`.
+  - **Made files:** 656 with an EXIF thumbnail at offsets across and past the end of the
+    file and past 2^32 (with its own length, 0 and 0xFFFFFFFF), each chunk size of a
+    small Motion JPEG AVI from 8 short to 8 long and up to 2^32 - 1, the AVI cut after
+    each byte, and resource names of each length from 0 to 6. 73 are unchanged. Every
+    changed line is a new note or error, a value no longer read from past the end of the
+    file or, after a wrap, from its start (a thumbnail's markers, a stream header's
+    fields, a timestamp), or a resource's name. No AVI lost "AVI is MotionJPEG". Where a
+    chunk size near 4 GiB wrapped the position into the chunk's own zeros, the chunks
+    after it were found by that accident (an IDIT and the movi list, in 2 files); a size
+    past the end of the file that doesn't wrap stopped the parsing there before, as both
+    do now. A stream header cut 4 to 7 bytes into its fields no longer shows its type
+    (its codec, cut, was shown in part).
+  - **Last round's 2,088 made files** are all unchanged.
+- **The affected groups pass:** all 780 cases that don't open the window (decoding,
+  export, batches, the command line, file facts, settings), with the `RP`, `OW`, `PN`,
+  `AV`, `H4`, `H5` and `WR_thumb` cases.
+- **With ASan/UBSan,** the `OW`, `PN`, `RP`, `RA`, `PE`, `PSD`, `ok_`, `H`, `C3`, `F2`, `AV`
+  and `WR_thumb` cases pass (310).
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds nothing new in the two files (243
+  things before, 241 after; the one added is an old finding under the variable's new
+  name). One of those gone was the resource name's bug: "Variable 'strResName' is
+  assigned a value that is never used".
+- **No new compiler warnings** (66 in the two files before and after).
+- **Two independent reviews** (agents given only the diff). The first found the rest of
+  the class fixed above: the thumbnail's DQT end that wrapped, a thumbnail at an offset
+  inside the file that ran past its end, a compression of 6 with no offset, the stream
+  and header lists' fields, the JFIF header under Relaxed Parsing, APP14's fields, and
+  the APP13 end with no case. The second, of the AVI changes, found an empty INFO list at
+  the end of a file given a "cut" note (fixed), and the stream header's type above.
+- **Not checked:** the cases that open the window, a real camera's AVI or Photoshop's file.
 
 ## How this was reviewed
 

@@ -313,9 +313,11 @@ case("H3_xmp_short", "H3", "decode", write("h3_xmp_short.jpg", insert_after_app0
      expect="^ERROR: Expected marker 0xFF, got 0x00 @ offset 0x00000034\\. ")
 
 avi = b"RIFF" + struct.pack("<I", 100) + b"AVI " + b"JUNK" + struct.pack("<I", 0xFFFFFFF8) + bytes(64)
-# (20 + 0xFFFFFFF8 is 12 in 32 bits)
+# (20 + 0xFFFFFFF8 is 12 in 32 bits, so the chunk was said to point backwards;
+# in 64 bits it runs past the end of the file: see OW)
 case("H4_avi_loop", "H4", "decode", write("h4_avi_loop.avi", avi), timeout=10,
-     expect="^  ERROR: AVI chunk size points backwards\\. Stopping AVI parsing\\.$")
+     expect="^  NOTE: AVI chunk \\[JUNK\\] at 0x0000000c \\(4294967288 bytes\\) runs past the end of the file\\. "
+            "Stopping AVI parsing\\.$")
 
 # H5: EXIF IFD1 thumbnail (compression 6) pointing at an SOS with no end marker
 head, rest = after_app0(c444)
@@ -333,14 +335,19 @@ struct.pack_into("<I", tiff, ifd1 + 2 + 12 + 8, trailer_pos - tiff_start)
 trailer = b"\xff\xd8\xff\xda" + bytes(64)
 case("H5_thumb_sos", "H5", "decode",
      write("h5_thumb_sos.jpg", head + seg(0xE1, b"Exif\x00\x00" + bytes(tiff)) + rest + trailer), timeout=10,
-     expect="^ERROR: Thumbnail scan data runs past the thumbnail length \\(1000 bytes\\)$")
+     expect="^ERROR: Thumbnail scan data runs past the end of the file$")
 # Only 68 bytes are left, so the file's end stops that skip before the length
 # does. Here only the file's end can: without that check it ran 4 billion times.
-# (The message names the length either way.)
+# (The message named the length either way. With a length of 20 and more after
+# it, the length stops it.)
 struct.pack_into("<I", tiff, ifd1 + 2 + 2 * 12 + 8, 0xFFFFFF00)
 case("H5_thumb_sos_eof", "H5", "decode",
      write("h5_thumb_sos_eof.jpg", head + seg(0xE1, b"Exif\x00\x00" + bytes(tiff)) + rest + trailer), timeout=10,
-     expect="^ERROR: Thumbnail scan data runs past the thumbnail length \\(4294967040 bytes\\)$")
+     expect="^ERROR: Thumbnail scan data runs past the end of the file$", forbid="thumbnail length")
+struct.pack_into("<I", tiff, ifd1 + 2 + 2 * 12 + 8, 20)
+case("H5_thumb_sos_len", "H5", "decode",
+     write("h5_thumb_sos_len.jpg", head + seg(0xE1, b"Exif\x00\x00" + bytes(tiff)) + rest + trailer + bytes(200)),
+     timeout=10, expect="^ERROR: Thumbnail scan data runs past the thumbnail length \\(20 bytes\\)$")
 
 # H6: JFIF APP0 declaring a 255x255 thumbnail with no thumbnail data
 app0 = seg(0xE0, b"JFIF\x00" + bytes([1, 1, 0]) + struct.pack(">HH", 1, 1) + bytes([255, 255]))
@@ -5069,8 +5076,11 @@ def wr_thumb(name, tail):
 WR_THUMB_EOF = "^ *ERROR: EXIF thumbnail runs past the end of the file$"
 case("WR_thumb", "WR", "decode", wr_thumb("wr_thumb.bin", b"\xff\xd8\xff\xe4\x00\x13" + bytes(16)),
      expect=WR_THUMB_EOF, forbid="Embedded Thumb Marker: SOF")
+# (A DQT of length 5, with 3 bytes of a table that needs 65: its table now
+# stops at the end of its segment, which is the file's)
 case("WR_thumb_dqt", "WR", "decode", wr_thumb("wr_thumb_dqt.bin", b"\xff\xd8\xff\xdb\x00\x05\x00\x00\x00"),
-     expect=WR_THUMB_EOF, forbid="nDqtQuantDestId_Tq = 7")
+     expect=f"^ERROR: Thumbnail DQT table at \\[0x{WR_SIZE - 3:08x}\\] runs past the end of its DQT segment, at "
+            f"\\[0x{WR_SIZE:08x}\\]\\. Stopping\\.$", forbid="nDqtQuantDestId_Tq = 7")
 # The whole of such a file, which never finished (some 20 seconds now): a
 # baseline one, and a progressive one opened in the window
 case("WR_whole", "WR", "decode", wr_file("wr_whole.jpg", b"\x00", lm444[:lm_cut])[0], timeout=120, expect=WR_EOF)
@@ -6011,6 +6021,198 @@ rp_wr("ducky", b"\xff\xd8\xff\xec\x00\x20Ducky\x00",
 # precision and size were read from the start)
 rp_wr("dri", b"\xff\xd8\xff\xdd\x00", lambda at: RP_EOF, forbid="interval")
 rp_wr("sof", b"\xff\xd8\xff\xc0\x01", lambda at: RP_EOF, forbid="Precision")
+
+
+# --- OW: offsets that wrap past 2^32 -----------------------------------------------
+# Offsets and sizes from the file added in 32 bits: past 2^32 the sum wraps to a
+# small number, and what is there was read in its place. Now added in 64 bits.
+def ow_case(cid, name, expect, forbid="-", flags=""):
+    case(cid, "OW", "decode", name, flags or "-", timeout=10, expect=expect, forbid=forbid)
+
+
+# An EXIF thumbnail (IFD1: compression 6, offset, length) whose offset from the
+# TIFF header takes it to 2^32, which wrapped to 0: the main image was reported
+# as the thumbnail, with a length of 0xFFFFFFFF
+def ow_thumb(offset, length):
+    t = bytearray(b"II*\x00" + struct.pack("<I", 8) + struct.pack("<HI", 0, 14) + struct.pack("<H", 3)
+                  + struct.pack("<HHII", 0x0103, 3, 1, 6) + struct.pack("<HHII", 0x0201, 4, 1, offset)
+                  + struct.pack("<HHII", 0x0202, 4, 1, length) + struct.pack("<I", 0))
+    return seg(0xE1, b"Exif\x00\x00" + bytes(t))
+
+
+OW_TIFF = RP_AT + 4 + 6   # the TIFF header, after the APP0, APP1's marker, length and "Exif\0\0"
+ow_wrap = rp_file("ow_thumb_wrap.jpg", ow_thumb((1 << 32) - OW_TIFF, 0xFFFFFFFF))
+OW_WRAP_EOF = len(RP_HEAD) + len(ow_thumb(0, 0)) + len(RP_REST)
+ow_case("OW_thumb_wrap", ow_wrap,
+        f"^ERROR: EXIF thumbnail at \\[0x100000000\\] is past the end of the file, at \\[0x{OW_WRAP_EOF:08x}\\]$",
+        forbid="Embedded Thumb Marker: SOI")
+ow_case("OW_thumb_wrap_offset", ow_wrap, "^  Offset: 0x100000000$")
+# An offset past the end of the file, short of 2^32: read as zeros
+ow_case("OW_thumb_past", rp_file("ow_thumb_past.jpg", ow_thumb(0x100000, 100)),
+        f"^ERROR: EXIF thumbnail at \\[0x{OW_TIFF + 0x100000:08x}\\] is past the end of the file, at "
+        f"\\[0x{OW_WRAP_EOF:08x}\\]$", forbid="Expected marker 0xFF, got 0x00")
+
+# AVI: a JUNK chunk of 0xFFFFFFFD bytes (odd, so with its pad) ended 2^32 + 6
+# bytes on, which wrapped to 6 bytes past its start: the last 2 bytes of its
+# size and "AB" were listed as a chunk "AB"
+ow_junk = b"JUNK" + struct.pack("<I", 0xFFFFFFFD) + b"ABCDEFGH" + chunk(b"LIST", b"movi" + bytes(8))
+write("ow_avi_junk.avi", b"RIFF" + struct.pack("<I", 4 + len(AV_HDR) + len(ow_junk)) + b"AVI " + AV_HDR + ow_junk)
+ow_case("OW_avi_junk", "ow_avi_junk.avi",
+        f"^  NOTE: AVI chunk \\[JUNK\\] at 0x{AV_AT:08x} \\(4294967293 bytes\\) runs past the end of the file\\. "
+        "Stopping AVI parsing\\.$", forbid="^  AB$")
+ow_case("OW_avi_junk_mjpeg", "ow_avi_junk.avi", "^  AVI is MotionJPEG$")
+# A movi list longer than the file (a recording cut short): parsing ended there
+# as before, and now says so
+ow_movi = chunk(b"LIST", b"movi" + bytes(100))[:8 + 40]
+write("ow_avi_cut.avi", b"RIFF" + struct.pack("<I", 4 + len(AV_HDR) + 116) + b"AVI " + AV_HDR + ow_movi)
+ow_case("OW_avi_cut", "ow_avi_cut.avi",
+        f"^  NOTE: AVI chunk \\[LIST\\] at 0x{AV_AT:08x} \\(104 bytes\\) runs past the end of the file\\. "
+        "Stopping AVI parsing\\.$")
+# The main header (avih) said to be 0xFFFFFFF0 bytes: the next chunk was read
+# 2^32 - 16 bytes on, wrapped to 16 bytes into the file: the hdrl list's size
+# (68, a "D") was listed as a chunk
+ow_avih = (b"AVI " + chunk(b"LIST", b"hdrl" + b"avih" + struct.pack("<I", 0xFFFFFFF0) + bytes(56))
+           + chunk(b"LIST", strl))
+write("ow_avi_avih.avi", b"RIFF" + struct.pack("<I", len(ow_avih)) + ow_avih)
+ow_case("OW_avi_avih", "ow_avi_avih.avi",
+        "^  NOTE: AVI chunk \\[avih\\] at 0x00000018 \\(4294967280 bytes\\) runs past the end of the file\\. "
+        "Stopping AVI parsing\\.$", forbid="^  D$")
+
+# A JFIF thumbnail (2 x 2, 12 bytes) with 3 bytes before the end of the file:
+# the rest was shown as zeros
+ow_jfif = b"\xff\xd8\xff\xe0" + struct.pack(">H", 16 + 12) + b"JFIF\x00\x01\x02\x00\x00\x01\x00\x01\x02\x02" + b"\x10\x20\x30"
+ow_case("OW_jfif_thumb_cut", write("ow_jfif_thumb_cut.jpg", ow_jfif),
+        "^  ERROR: Thumbnail \\(12 bytes\\) larger than the rest of the APP0 segment\\. Not shown\\.$",
+        forbid="Thumb\\[000\\]")
+
+
+# --- PN: Photoshop resource names ------------------------------------------------
+# A resource's name (a Pascal string, padded to an even size with its length)
+# was read but not shown: every 8BIM line said Name="".
+def bim_named(rid, name, data):
+    n = bytes([len(name)]) + name
+    return (b"8BIM" + struct.pack(">H", rid) + n + (b"\x00" if len(n) % 2 else b"") + struct.pack(">I", len(data))
+            + data + (b"\x00" if len(data) % 2 else b""))
+
+
+write("pn_names.jpg", app13_only(bim_named(0x040D, b"Angle", struct.pack(">I", 30))
+                                 + bim_named(0x0419, b"Ab", struct.pack(">I", 7))))
+case("PN_name", "PN", "decode", "pn_names.jpg",
+     expect='^ +8BIM: \\[0x040d\\] Name="Angle" Len=\\[0x0004\\] DefinedName="Global Angle" *$', forbid='Name=""')
+# A name whose length is even ("Ab": with its length byte, 3 bytes) is padded,
+# and the resource after it still read
+case("PN_name_pad", "PN", "decode", "pn_names.jpg",
+     expect='^ +8BIM: \\[0x0419\\] Name="Ab" Len=\\[0x0004\\] DefinedName="Global Altitude" *$')
+case("PN_name_value", "PN", "decode", "pn_names.jpg", expect="^ +Global Altitude += 7 $")
+# A byte that doesn't print is shown as a dot (it was left out: "Caf")
+case("PN_name_dot", "PN", "decode", write("pn_name_dot.jpg", app13_only(bim_named(0x040D, b"Caf\xe9", struct.pack(">I", 30)))),
+     expect='^ +8BIM: \\[0x040d\\] Name="Caf\\." Len=\\[0x0004\\] DefinedName="Global Angle" *$', forbid='Name="(Caf)?"')
+
+
+# From the review of the OW changes. A compression of 6 with no offset: it was
+# 0, and the main image was reported as the thumbnail
+def ow_thumb_no_offset():
+    t = (b"II*\x00" + struct.pack("<I", 8) + struct.pack("<HI", 0, 14) + struct.pack("<H", 2)
+         + struct.pack("<HHII", 0x0103, 3, 1, 6) + struct.pack("<HHII", 0x0202, 4, 1, 100) + struct.pack("<I", 0))
+    return seg(0xE1, b"Exif\x00\x00" + t)
+
+
+ow_case("OW_thumb_no_offset", rp_file("ow_thumb_no_offset.jpg", ow_thumb_no_offset()),
+        "^ERROR: EXIF thumbnail has no offset \\(JPEGInterchangeFormat\\)$", forbid="Embedded Thumb Marker: SOI")
+# An offset exactly at the end of the file
+ow_case("OW_thumb_eof", rp_file("ow_thumb_eof.jpg", ow_thumb(OW_WRAP_EOF - OW_TIFF, 100)),
+        f"^ERROR: EXIF thumbnail at \\[0x{OW_WRAP_EOF:08x}\\] is past the end of the file, at \\[0x{OW_WRAP_EOF:08x}\\]$",
+        forbid="Expected marker 0xFF, got 0x00")
+
+
+# A thumbnail inside the file that runs past its end: its markers, and a DQT
+# table (here 10 of its 64 values there), were read past it as zeros. (Its
+# table rows are indented 6, the main image's 4.)
+def ow_thumb_tail(name, tail):
+    pre = RP_HEAD + ow_thumb(0, 0) + RP_REST
+    at = len(pre)
+    data = RP_HEAD + ow_thumb(at - OW_TIFF, 1000) + RP_REST + tail
+    write(name, data)
+    return at, len(data)
+
+
+ow_at, ow_eof = ow_thumb_tail("ow_thumb_cut.jpg", b"\xff\xd8\xff\xdb\x00\x43")
+ow_case("OW_thumb_cut", "ow_thumb_cut.jpg", "^ERROR: EXIF thumbnail runs past the end of the file$",
+        forbid="^      DQT, Row")
+ow_at, ow_eof = ow_thumb_tail("ow_thumb_dqt.jpg", b"\xff\xd8\xff\xdb\x00\x43\x00" + bytes(range(1, 11)))
+ow_case("OW_thumb_dqt", "ow_thumb_dqt.jpg",
+        rp_past("Thumbnail DQT table", ow_at + 6, ow_eof, "DQT segment", ". Stopping."), forbid="^      DQT, Row")
+
+
+# At the end of a file of 4 GiB - 1 bytes (as RP_wr): a thumbnail at 0xFFFFFFD7
+# whose DQT's end wrapped to 0x1E, so its table wasn't read, and its "EOI" was
+# read from inside the DQT
+def ow_wr(cid, tail, expect, forbid="-", head=c420, flags=""):
+    name, start = wr_file(f"ow_wr_{cid}.bin", tail, head)
+    fl = (flags + (f" --start {start}" if head == c420 else "")).strip() or "-"
+    case(f"OW_wr_{cid}", "OW", "decode", name, fl, timeout=20, expect=expect(start), forbid=forbid)
+
+
+ow_big_thumb = RP_HEAD + ow_thumb(0xFFFFFFD7 - OW_TIFF, 40) + RP_REST
+ow_wr("thumb_dqt", b"\xff\xd8\xff\xdb\x00\x43\xff\xd9" + bytes(32),
+      lambda at: rp_past("Thumbnail DQT table", 0xFFFFFFDD, WR_SIZE, "DQT segment", ". Stopping."),
+      forbid="Embedded Thumb Marker: EOI", head=ow_big_thumb)
+# A JFIF APP0 of 7 bytes ending a byte before the file: with Relaxed Parsing
+# its header was read on, past the end of the file, from its start (a density
+# of 55551 x 57344)
+ow_wr("jfif_relaxed", b"\xff\xd8\xff\xe0\x00\x07JFIF\x00\x01",
+      lambda at: rp_past("JFIF header", at + 11, at + 11, "APP0 segment"), forbid="density", flags="--relaxed")
+# APP14's version, flags and transform, past the end of the file (from its start)
+ow_wr("app14", b"\xff\xd8\xff\xee\x00\x0e",
+      lambda at: rp_past("Adobe fields", at + 4 + 7, WR_SIZE, "APP14 segment", ". Skipping."), forbid="DCTEncodeVersion")
+# An APP13 cut by the end of the file, its Global Angle whole: its end, added in
+# 32 bits, wrapped, and no resource was read
+ow_wr("app13", b"\xff\xd8\xff\xed\x00\x40Photoshop 3.0\x00" + bim(0x040D, struct.pack(">I", 30)),
+      lambda at: "^ +Global Angle += 30 degrees$")
+# An AVI whose stream list is at 0xFFFFFFE0, after a JUNK chunk: its stream
+# header was read past the end of the file, from its start (a rate of 2.33)
+ow_avi_head = b"RIFF" + struct.pack("<I", 0xFFFFFFF7) + b"AVI " + b"JUNK" + struct.pack("<I", 0xFFFFFFE0 - 20)
+ow_wr("strl", b"LIST" + struct.pack("<I", 100) + b"strl" + b"strh" + struct.pack("<I", 56) + b"vidsMJPG" + bytes(3),
+      lambda at: "^  NOTE: AVI chunk \\[strl\\] at 0xffffffe0 is cut by the end of the file\\. Stopping AVI parsing\\.$",
+      forbid="Sample Rate", head=ow_avi_head)
+# APP14 cut short in a small file: its transform was read as 0 (taken as RGB)
+ow_app14 = b"\xff\xd8\xff\xee\x00\x0eAdobe\x00\x64"
+ow_case("OW_app14_cut", write("ow_app14_cut.jpg", ow_app14),
+        rp_past("Adobe fields", 4 + 7, len(ow_app14), "APP14 segment", ". Skipping."), forbid="ColorTransform")
+# An AVI that ends after its header list's type: its main header's name and
+# size were read past the end, and parsing ended without a word
+ow_case("OW_avi_hdrl_cut", write("ow_avi_hdrl_cut.avi", b"RIFF" + struct.pack("<I", 100) + b"AVI LIST"
+                                 + struct.pack("<I", 64) + b"hdrl"),
+        "^  NOTE: AVI chunk \\[hdrl\\] at 0x0000000c is cut by the end of the file\\. Stopping AVI parsing\\.$")
+# An AVI whose only stream list ends 3 bytes after its stream header's codec:
+# the header's rate was read past the end of the file (as 0.00). Its type and
+# codec, in the file, are still shown and found Motion JPEG.
+ow_strh_hdrl = chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56)))
+ow_strh_at = 12 + len(ow_strh_hdrl)
+ow_strh_cut = (b"AVI " + ow_strh_hdrl + b"LIST" + struct.pack("<I", 100) + b"strl" + b"strh" + struct.pack("<I", 56)
+               + b"vidsMJPG" + bytes(3))
+write("ow_avi_strh_cut.avi", b"RIFF" + struct.pack("<I", len(ow_strh_cut)) + ow_strh_cut)
+ow_case("OW_avi_strh_cut", "ow_avi_strh_cut.avi",
+        f"^  NOTE: AVI chunk \\[strl\\] at 0x{ow_strh_at:08x} is cut by the end of the file\\. Stopping AVI "
+        "parsing\\.$", forbid=f"Sample Rate\\]|^  NOTE: AVI chunk \\[LIST\\] at 0x{ow_strh_at:08x}")
+ow_case("OW_avi_strh_cut_mjpeg", "ow_avi_strh_cut.avi", "^  AVI is MotionJPEG$", forbid="AVI is not MotionJPEG")
+# An empty INFO list (4 bytes) and 4 zeros end the file: the list is whole, not
+# cut, though its first chunk's header would run past the end of the file
+write("ow_avi_info_empty.avi", b"RIFF" + struct.pack("<I", 4 + len(AV_HDR) + 16) + b"AVI " + AV_HDR
+      + chunk(b"LIST", b"INFO") + bytes(4))
+ow_case("OW_avi_info_empty", "ow_avi_info_empty.avi", f"^  \\(4 bytes of zeros at 0x{AV_AT + 12:08x}\\)$",
+        forbid="is cut by the end of the file")
+# An AVI that ends 2 bytes into a chunk's size: parsing ended there without a
+# word, after an IDIT's timestamp read past the end of the file
+write("ow_avi_head_cut.avi", b"RIFF" + struct.pack("<I", 4 + len(AV_HDR) + 6) + b"AVI " + AV_HDR + b"IDIT\x1a\x00")
+ow_case("OW_avi_head_cut", "ow_avi_head_cut.avi",
+        f"^  NOTE: AVI chunk \\[IDIT\\] at 0x{AV_AT:08x} is cut by the end of the file\\. Stopping AVI parsing\\.$",
+        forbid="Timestamp")
+# An odd-sized last chunk (IDIT, 25 bytes) without its pad byte, at the end of
+# the file, is whole: it is read, with no note
+ow_idit = chunk(b"IDIT", b"THU OCT 13 12:00:00 2016\n")[:-1]
+write("ow_avi_odd.avi", b"RIFF" + struct.pack("<I", 4 + len(AV_HDR) + len(ow_idit)) + b"AVI " + AV_HDR + ow_idit)
+ow_case("OW_avi_odd", "ow_avi_odd.avi", AV_FOUND, forbid="runs past the end")
 
 
 with open(out_dir / "cases.tsv", "w") as f:

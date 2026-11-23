@@ -497,8 +497,9 @@ section, `CS` in its "The compression figures of large images" section,
 `AV` in its "AVIs that made the report run away" and "Frames lost near the end
 of an AVI" sections, `PE` in its "An EXIF value past the end of a small
 JPEG" section, `MP` in its "Three fixes from a review of these changes"
-section, `RA` in its "Six runaway reports" section, and `RP` in its "Reads
-past their own field" section);
+section, `RA` in its "Six runaway reports" section, `RP` in its "Reads
+past their own field" section, and `OW` and `PN` in its "Offsets that wrapped,
+and Photoshop resource names" section);
 `ok_*` cases are valid files that must keep decoding. The plain JPEGs must
 decode at their size, with no error or warning and the subsampling their SOF
 gives, and their pixels must be within 6 of libjpeg's decode of the same file
