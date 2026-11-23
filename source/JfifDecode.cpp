@@ -206,6 +206,7 @@ void CjfifDecode::Reset()
   // Embedded thumbnail
   m_nImgExifThumbComp = 0;
   m_nImgExifThumbOffset = 0;
+  m_nPosExifEnd = 0;
   m_nImgExifThumbLen = 0;
   m_strHashThumb = "NONE";      // Will go into DB to say NONE!
   m_strHashThumbRot = "NONE";   // Will go into DB to say NONE!
@@ -2646,6 +2647,51 @@ uint32_t CjfifDecode::ReadSwap4(uint32_t nPos)
 }
 
 //-----------------------------------------------------------------------------
+// Whether the position has wrapped around since it was nPosFrom. The largest
+// file analyzed has 0xFFFFFFFF bytes, so moving past its end passed 2^32, and
+// parsing went on from the start of the file: forever, if it got to the end
+// again. Parsing only moves forward, so that shows as a position before one
+// it had.
+//
+// INPUT:
+// - nPosFrom           A position it had
+//
+// RETURN:
+// - True if it is past the end of the file
+//
+bool CjfifDecode::WrappedSince(uint32_t nPosFrom) const
+{
+  return m_nPos < nPosFrom;
+}
+
+//-----------------------------------------------------------------------------
+// Whether an AVI chunk's name and size at nPos are zeros, as far as the file
+// goes: reading past its end marks the file's buffer bad.
+// (Not a lambda in DecodeAvi(), which cppcheck then didn't check.)
+//
+// INPUT:
+// - nPos               Where the chunk would start
+// - nPosEof            The file's length
+//
+// RETURN:
+// - True if those 8 bytes, or as many as there are, are zeros
+//
+bool CjfifDecode::IsZeroAviHeader(uint64_t nPos, uint64_t nPosEof)
+{
+  const uint64_t nEnd = qMin<uint64_t>(nPos + 8, nPosEof);
+
+  for(uint64_t nByte = nPos; nByte < nEnd; nByte++)
+  {
+    if(Buf(static_cast<uint32_t>(nByte), false) != 0)
+    {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+//-----------------------------------------------------------------------------
 // Read a UINT32 from the buffer, force as big endian
 //
 // INPUT:
@@ -2947,6 +2993,27 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
   // Move the file pointer to the start of the IFD
   m_nPos = nPosExifStart + nStartIfdPtr;
 
+  // An IFD is in the APP1 segment. (In 32 bits an offset past 2^32 wrapped,
+  // and IFD0 was read 4 GiB before it, from the file's start: the SOI as the
+  // entry count when that came to 0.)
+  const quint64 nPosIfd = quint64(nPosExifStart) + nStartIfdPtr;
+
+  if((nPosIfd > 0xFFFFFFFFull) || (nPosIfd + 2 > m_nPosExifEnd))
+  {
+    // (The file still has maker notes, which the assessment goes by)
+    if(strIfd == "MakerIFD")
+    {
+      m_bImgExifMakernotes = true;
+    }
+
+    strTmp = QString("ERROR: %1 at [0x%2] is outside its APP1 segment, which ends at [0x%3]. Skipping.")
+        .arg(strIfd)
+        .arg(nPosIfd, 8, 16, QChar('0'))
+        .arg(m_nPosExifEnd, 8, 16, QChar('0'));
+    m_pLog->AddLineErr(strTmp);
+    return 2;
+  }
+
   strTmp = QString("  EXIF %1 @ Absolute 0x%2").arg(strIfd).arg(m_nPos, 8, 16, QChar('0'));
   m_pLog->AddLine(strTmp);
 
@@ -3025,6 +3092,21 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
   // decode accordingly.
   for(uint32_t nIfdEntryInd = 0; nIfdEntryInd < nIfdDirLen; nIfdEntryInd++)
   {
+    // The count comes from the file: an entry (12 bytes) is in the APP1
+    // segment too. Up to 65,535 were read from whatever followed it.
+    if(quint64(m_nPos) + 12 > m_nPosExifEnd)
+    {
+      strTmp = QString("ERROR: %1 entry #%2 at [0x%3] runs past the end of its APP1 segment, at [0x%4]. Stopping.")
+          .arg(strIfd)
+          .arg(nIfdEntryInd)
+          .arg(m_nPos, 8, 16, QChar('0'))
+          .arg(m_nPosExifEnd, 8, 16, QChar('0'));
+      // (Shown even in maker notes whose decode is off)
+      m_pLog->Enable();
+      m_pLog->AddLineErr(strTmp);
+      return 2;
+    }
+
     // By default, show single-line value summary
     // bExtraDecode is used to indicate that additional special
     // parsing output is available for this entry
@@ -5026,7 +5108,9 @@ uint32_t CjfifDecode::DecodeApp2IccProfile(uint32_t nLen)
 
 //-----------------------------------------------------------------------------
 // Parser for APP2 FlashPix marker
-uint32_t CjfifDecode::DecodeApp2Flashpix()
+// - nPosEnd = where the APP2 segment ends (one past its last byte), or the
+//   file, if that ends first
+uint32_t CjfifDecode::DecodeApp2Flashpix(quint64 nPosEnd)
 {
   QString strTmp;
 
@@ -5070,8 +5154,26 @@ uint32_t CjfifDecode::DecodeApp2Flashpix()
     strTmp = QString("      Interoperability Count = %1").arg(nFpxInteropCnt);
     m_pLog->AddLine(strTmp);
 
+    const uint32_t nPosList = m_nPos;
+
     for(uint32_t ind = 0; ind < nFpxInteropCnt; ind++)
     {
+      // The count comes from the file: stop at the end of the segment, where
+      // there isn't room for an entry (its size, default and a name's 0).
+      // An APP2 of 9 bytes said 65,535, and gave 196,954 lines. (Also where
+      // the last entry took the position past 2^32, to the file's start.)
+      const bool bWrapped = WrappedSince(nPosList);
+
+      if(bWrapped || (m_nPos >= nPosEnd) || (nPosEnd - m_nPos < 7))
+      {
+        strTmp = QString("ERROR: FlashPix entry #%1 at [0x%2] runs past the end of its APP2 segment, at [0x%3]. Stopping.")
+            .arg(ind)
+            .arg(m_nPos + (bWrapped ? Q_UINT64_C(0x100000000) : 0), 8, 16, QChar('0'))
+            .arg(nPosEnd, 8, 16, QChar('0'));
+        m_pLog->AddLineErr(strTmp);
+        break;
+      }
+
       strTmp = QString("      Entity Index #%1").arg(ind);
       m_pLog->AddLine(strTmp);
       nFpxEntitySz = ReadBe4(m_nPos);
@@ -5255,7 +5357,18 @@ void CjfifDecode::DecodeDHT(bool bInject)
   }
 
   nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
+  const uint32_t nPosLength = m_nPos;
   nPosEnd = m_nPos + nLength;
+
+  // A segment cut short by the end of the file ends there: past it every byte
+  // reads as 0, which is an empty table (7 bytes gave 80,000 report lines)
+  const bool bCutByEof = !bInject && (nPosEnd >= nPosLength) && (nPosEnd > m_pWBuf->GetPosEof());
+
+  if(bCutByEof)
+  {
+    nPosEnd = m_pWBuf->GetPosEof();
+  }
+
   m_nPos += 2;
   strTmp = QString("  Huffman table length = %1").arg(nLength);
   m_pLog->AddLine(strTmp);
@@ -5267,7 +5380,7 @@ void CjfifDecode::DecodeDHT(bool bInject)
   // to escape in case we get in excessive number of DHT entries
   // See BUG FIX #1003
 
-  while((!m_bStateAbort) && (nPosEnd > m_nPos))
+  while((!m_bStateAbort) && (nPosEnd > m_nPos) && !WrappedSince(nPosLength))
   {
     m_pLog->AddLine("  ----");
 
@@ -5351,20 +5464,11 @@ void CjfifDecode::DecodeDHT(bool bInject)
         // Save the huffman code
         // Just in case we have more DHT codes than we expect, trap
         // the range check here, otherwise we'll have buffer overrun!
+        // (The codes past it are reported once, below: a line for each of
+        // them made up to 3,824 lines a table, 57,360 in a segment of 15.)
         if(nDhtInd < DECODE_DHT_MAX_DHT)
         {
           anDhtCodeVal[nDhtInd++] = nTmpVal;    // Vij, range 0..255
-        }
-        else
-        {
-          nDhtInd++;
-          strTmp = QString("Excessive DHT entries (%1)... skipping").arg(nDhtInd);
-          m_pLog->AddLineErr(strTmp);
-
-          if(!m_bStateAbort)
-          {
-            DecodeErrCheck(true);
-          }
         }
       }
 
@@ -5373,6 +5477,12 @@ void CjfifDecode::DecodeDHT(bool bInject)
 
     strTmp = QString("    Total number of codes: %1").arg(nDhtCodesTotal, 3, 10, QChar('0'));
     m_pLog->AddLine(strTmp);
+
+    if(nDhtCodesTotal > DECODE_DHT_MAX_DHT)
+    {
+      strTmp = QString("Excessive DHT entries (%1): only the first %2 are used").arg(nDhtCodesTotal).arg(DECODE_DHT_MAX_DHT);
+      m_pLog->AddLineErr(strTmp);
+    }
 
     uint32_t nDhtLookupInd = 0;
 
@@ -5483,6 +5593,13 @@ void CjfifDecode::DecodeDHT(bool bInject)
     m_pLog->AddLine("");
   }
 
+  // Then past the end, as the tables read to the segment's end left it, so
+  // ProcessFile() says Early EOF (at the file's end it read a marker there)
+  if(bCutByEof)
+  {
+    m_nPos = m_pWBuf->GetPosEof() + 1;
+  }
+
   if(bInject)
   {
     // Restore position (as if we didn't move)
@@ -5528,7 +5645,14 @@ bool CjfifDecode::ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen)
   uint32_t nMarkerEnd = nMarkerStart + nMarkerLen;
   uint32_t nMarkerExtra = nMarkerEnd - m_nPos;
 
-  if(m_nPos < nMarkerEnd)
+  // Cut short by the end of the file, which ProcessFile() reports
+  if(WrappedSince(nMarkerStart))
+  {
+    return true;
+  }
+
+  // (An end past 2^32 wrapped, and was said to be shorter than expected)
+  if((m_nPos < nMarkerEnd) || (nMarkerEnd < nMarkerStart))
   {
     // The length indicates that there is more data than we processed
     strTmp = QString("  WARNING: Marker length longer than expected");
@@ -5731,8 +5855,14 @@ uint32_t CjfifDecode::DecodeMarker()
 
   m_nPos++;
 
+  // Not past the end of the file: the 0 read there was taken for a marker
+  // (0xFF00), and at the end of the largest file the position passed 2^32,
+  // so a marker was then read from the file's start
+  const uint32_t nPosEof = m_pWBuf->GetPosEof();
+  bool bPastEof = (m_nPos >= nPosEof);
+
   // Read the current marker code
-  nCode = Buf(m_nPos++);
+  nCode = bPastEof ? 0 : Buf(m_nPos++);
 
   // Handle Marker Padding
   //
@@ -5745,6 +5875,11 @@ uint32_t CjfifDecode::DecodeMarker()
   {
     // Count the pad
     nSkipMarkerPad++;
+    if(m_nPos >= nPosEof)
+    {
+      bPastEof = true;
+      break;
+    }
     // Read another byte
     nCode = Buf(m_nPos++);
   }
@@ -5754,6 +5889,14 @@ uint32_t CjfifDecode::DecodeMarker()
   {
     strTmp = QString("*** Skipped %1 marker pad bytes ***").arg(nSkipMarkerPad);
     m_pLog->AddLineHdr(strTmp);
+  }
+
+  // Cut short by the end of the file, which ProcessFile() reports: the
+  // position is past it (0 at the end of the largest file, see WrappedSince())
+  if(bPastEof)
+  {
+    m_nPos = nPosEof + 1;
+    return DECMARK_OK;
   }
 
   // Save the current marker offset
@@ -6046,6 +6189,7 @@ uint32_t CjfifDecode::DecodeMarker()
         // Mark pointer to EXIF Sub IFD as 0 so that we can
         // detect if the tag never showed up.
         m_nImgExifSubIfdPtr = 0;
+        m_nPosExifEnd = qMin<quint64>(quint64(nPosSaved) + nLength, m_pWBuf->GetPosEof());
         m_nImgExifMakerPtr = 0;
         m_nImgExifGpsIfdPtr = 0;
         m_nImgExifInteropIfdPtr = 0;
@@ -6102,18 +6246,21 @@ uint32_t CjfifDecode::DecodeMarker()
           // Process the IFD
           nRet = DecodeExifIfd(strTmp, nPosExifStart, nOffsetIfd1);
 
-          // Now that we have gone through all entries in the IFD directory,
-          // we read the offset to the next IFD
-          nOffsetIfd1 = ByteSwap4(Buf(m_nPos + 0), Buf(m_nPos + 1), Buf(m_nPos + 2), Buf(m_nPos + 3));
-          m_nPos += 4;
-
-          strTmp = QString("    Offset to Next IFD = 0x%1").arg(nOffsetIfd1, 8, 16, QChar('0'));
-          m_pLog->AddLine(strTmp);
-
           if(nRet != 0)
           {
-            // Error condition (DecodeExifIfd returned error)
+            // Error condition (DecodeExifIfd returned error): where the
+            // entries stopped isn't where the offset to the next IFD is
             nOffsetIfd1 = 0x00000000;
+          }
+          else
+          {
+            // Now that we have gone through all entries in the IFD directory,
+            // we read the offset to the next IFD
+            nOffsetIfd1 = ByteSwap4(Buf(m_nPos + 0), Buf(m_nPos + 1), Buf(m_nPos + 2), Buf(m_nPos + 3));
+            m_nPos += 4;
+
+            strTmp = QString("    Offset to Next IFD = 0x%1").arg(nOffsetIfd1, 8, 16, QChar('0'));
+            m_pLog->AddLine(strTmp);
           }
 
           if(nOffsetIfd1 == 0x00000000)
@@ -6214,7 +6361,7 @@ uint32_t CjfifDecode::DecodeMarker()
       {
         // Photoshop
         m_pLog->AddLine("    FlashPix:");
-        DecodeApp2Flashpix();
+        DecodeApp2Flashpix(qMin<quint64>(quint64(nPosSaved) + nLength, m_pWBuf->GetPosEof()));
       }
       else if(strcmp(acIdentifier, "ICC_PROFILE") == 0)
       {
@@ -6486,7 +6633,7 @@ uint32_t CjfifDecode::DecodeMarker()
       strTmp = QString("  Table length = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
 
-      while(nPosEnd > m_nPos)
+      while((nPosEnd > m_nPos) && !WrappedSince(nPosMarkerStart))
       {
         m_pLog->AddLine("  ----");
 
@@ -7199,7 +7346,7 @@ uint32_t CjfifDecode::DecodeMarker()
 
         uint32_t nSkipStart = m_nPos;
 
-        while(!bDoneSearch)
+        while(!bDoneSearch && !WrappedSince(nPosMarkerStart))
         {
           if(Buf(m_nPos) != 0xFF)
           {
@@ -7330,6 +7477,12 @@ uint32_t CjfifDecode::DecodeMarker()
       strTmp = QString("  Successive approximation = 0x%1").arg(m_nSosSuccApprox_A, 2, 16, QChar('0'));
       m_pLog->AddLine(strTmp);
 
+      // Cut short by the end of the file: the scan would be read from its start
+      if(WrappedSince(nPosMarkerStart))
+      {
+        break;
+      }
+
       if(m_pAppConfig->scanDump())
       {
         m_pLog->AddLine("");
@@ -7338,6 +7491,16 @@ uint32_t CjfifDecode::DecodeMarker()
 
       // Save the scan data segment position
       nPosScanStart = m_nPos;
+
+      // A read past the end of the file before this (an EXIF value pointing
+      // just past it, or stray bytes after an AVI's last chunk) leaves the
+      // buffer marked bad. When everything read since came from the same
+      // window, nothing cleared it, and the scan stopped at once ("Ran out of
+      // buffer"). A scan that does run past the end still marks it bad.
+      if(!m_pWBuf->GetBufOk())
+      {
+        m_pWBuf->BufLoadWindow(nPosScanStart);
+      }
 
       // Skip over the Scan Data segment
       //   Pass 1) Quick, allowing for bOutputScanDump to dump first 640B.
@@ -7433,7 +7596,9 @@ uint32_t CjfifDecode::DecodeMarker()
         // return but "break".
         if(!m_pWBuf->GetBufOk())
         {
-          strTmp = QString("ERROR: Ran out of buffer before EOI during phase 1 of Scan decode @ 0x%1").arg(m_nPos, 8, 16, QChar('0'));
+          // (Said to be @ 0x00000000 at the end of the largest file)
+          const quint64 nPosPast = m_nPos + (WrappedSince(nPosScanStart) ? Q_UINT64_C(0x100000000) : 0);
+          strTmp = QString("ERROR: Ran out of buffer before EOI during phase 1 of Scan decode @ 0x%1").arg(nPosPast, 8, 16, QChar('0'));
           m_pLog->AddLineErr(strTmp);
           break;
         }
@@ -9053,7 +9218,13 @@ void CjfifDecode::DecodeEmbeddedThumb()
     while(!bDone)
     {
       // For some reason, I have found files that have a nLength of 0
-      if(m_nImgExifThumbLen != 0)
+      if(WrappedSince(m_nImgExifThumbOffset))
+      {
+        m_pLog->AddLineErr("ERROR: EXIF thumbnail runs past the end of the file");
+        bErrorAny = true;
+        bDone = true;
+      }
+      else if(m_nImgExifThumbLen != 0)
       {
         if((m_nPos - m_nImgExifThumbOffset) > m_nImgExifThumbLen)
         {
@@ -9087,7 +9258,12 @@ void CjfifDecode::DecodeEmbeddedThumb()
       {
         nCode = Buf(m_nPos++);
 
-        m_pLog->AddLine("");
+        // (An RST outside a scan reports nothing, and isn't given a blank
+        // line either: a thumbnail of RSTs added one for every 2 bytes.)
+        if((nCode < JFIF_RST0) || (nCode > JFIF_RST7))
+        {
+          m_pLog->AddLine("");
+        }
 
         switch (nCode)
         {
@@ -9104,7 +9280,7 @@ void CjfifDecode::DecodeEmbeddedThumb()
             strTmp = QString("    Length = %1").arg(nLength);
             m_pLog->AddLine(strTmp);
 
-            while(nPosEnd > m_nPos)
+            while((nPosEnd > m_nPos) && !WrappedSince(m_nImgExifThumbOffset))
             {
               strTmp = QString("    ----");
               m_pLog->AddLine(strTmp);
@@ -9352,11 +9528,38 @@ bool CjfifDecode::GetMarkerName(uint32_t nCode, QString & markerStr)
 }
 
 //-----------------------------------------------------------------------------
+// How much of an AVI text to read: to the end of its field, but not past the
+// end of the file (which marks the file's buffer bad), nor more than nMax.
+//
+// INPUT:
+// - nPos               Where the text starts
+// - nEnd               Where its field ends (or the list holding it, if sooner)
+// - nPosEof            The file's length
+// - nMax               The most to read
+//
+// RETURN:
+// - The number of bytes to read
+//
+static uint32_t AviTextLen(quint64 nPos, quint64 nEnd, quint64 nPosEof, uint32_t nMax)
+{
+  const quint64 nStop = qMin(nEnd, nPosEof);
+
+  return (nStop > nPos) ? static_cast<uint32_t>(qMin<quint64>(nStop - nPos, nMax)) : 0;
+}
+
+//-----------------------------------------------------------------------------
 // Determine if the file is an AVI MJPEG.
 // If so, parse the headers.
 // TODO: Expand this function to use sub-functions for each block type
 bool CjfifDecode::DecodeAvi()
 {
+  // What's reported is bounded: each line costs some 2.5 KB in the report, and
+  // Extract All parses the AVI again for each frame. A real AVI has some tens
+  // of chunks outside movi (which is skipped whole), and short texts.
+  constexpr uint32_t kMaxAviChunks = 4096;
+  constexpr quint64 kMaxAviZeros = 1 << 20;     // padding is some KB
+  constexpr uint32_t kMaxAviText = 1024;
+
   if(DEBUG_EN)
     m_pAppConfig->DebugLogAdd("CfifDecode::DecodeAvi() Begin");
 
@@ -9415,6 +9618,10 @@ bool CjfifDecode::DecodeAvi()
   uint32_t nChunkSize;
   uint32_t nChunkDataStart;
 
+  const quint64 nPosEof = m_pWBuf->GetPosEof();
+  uint32_t nChunks = 0;
+  quint64 nZeros = 0;
+
   bool done = false;
 
   while(!done)
@@ -9422,6 +9629,38 @@ bool CjfifDecode::DecodeAvi()
     if(m_nPos >= m_pWBuf->GetPosEof())
     {
       done = true;
+      break;
+    }
+
+    // Zeros aren't chunks, though each 8 were listed as one: 131,000 lines a
+    // MiB. They are passed 8 at a time as those were, so the same chunks are
+    // found after padding. (In 64 bits: the last step can pass 2^32.)
+    quint64 nZerosEnd = m_nPos;
+
+    while((nZerosEnd < nPosEof) && (nZeros <= kMaxAviZeros) && IsZeroAviHeader(nZerosEnd, nPosEof))
+    {
+      nZeros += 8;
+      nZerosEnd += 8;
+    }
+
+    if(nZeros > kMaxAviZeros)
+    {
+      m_pLog->AddLineWarn(QString("  NOTE: Zeros in place of AVI chunks at 0x%1 (over 1 MiB in all). Stopping AVI parsing.")
+                            .arg(m_nPos, 8, 16, QChar('0')));
+      break;
+    }
+
+    if(nZerosEnd > m_nPos)
+    {
+      nZerosEnd = qMin(nZerosEnd, nPosEof);
+      m_pLog->AddLine(QString("  (%1 bytes of zeros at 0x%2)").arg(nZerosEnd - m_nPos).arg(m_nPos, 8, 16, QChar('0')));
+      m_nPos = static_cast<uint32_t>(nZerosEnd);
+      continue;
+    }
+
+    if(++nChunks > kMaxAviChunks)
+    {
+      m_pLog->AddLineErr(QString("  ERROR: More than %1 AVI chunks. Stopping AVI parsing.").arg(kMaxAviChunks));
       break;
     }
 
@@ -9689,7 +9928,11 @@ bool CjfifDecode::DecodeAvi()
         {
           QString strIsft = "";
 
-          strIsft = m_pWBuf->BufReadStrn(m_nPos, nChunkSize);
+          // Up to the end of the field or the list, whichever is first (as
+          // Windows did, this read as much as the list's size, past both)
+          const quint64 nIsftEnd = qMin(quint64(m_nPos) + nInfoLen, quint64(nChunkDataStart) + nChunkSize);
+
+          strIsft = m_pWBuf->BufReadStrn(m_nPos, AviTextLen(m_nPos, nIsftEnd, nPosEof, kMaxAviText));
           strIsft = strIsft.trimmed();  //!! trim right
           strTmp = QString("      -[Software] = [%1]").arg(strIsft);
           m_pLog->AddLine(strTmp);
@@ -9715,7 +9958,7 @@ bool CjfifDecode::DecodeAvi()
 
       QString strIditTimestamp = "";
 
-      strIditTimestamp = m_pWBuf->BufReadStrn(m_nPos, nChunkSize);
+      strIditTimestamp = m_pWBuf->BufReadStrn(m_nPos, AviTextLen(m_nPos, quint64(m_nPos) + nChunkSize, nPosEof, kMaxAviText));
       strIditTimestamp = strIditTimestamp.trimmed();    //!!
       strTmp = QString("    -[Timestamp] = [%1]").arg(strIditTimestamp);
       m_pLog->AddLine(strTmp);
@@ -9964,6 +10207,8 @@ void CjfifDecode::ProcessFile(QFile *inFile)
   {
     // Allow some other threads to jump in
 
+    const uint32_t nPosBefore = m_nPos;
+
     // Return value 0 - OK
     //              1 - Error
     //              2 - EOI
@@ -9978,7 +10223,9 @@ void CjfifDecode::ProcessFile(QFile *inFile)
     }
     else
     {
-      if(m_nPos > m_pWBuf->GetPosEof())
+      // Every marker moves on, so one that didn't has wrapped past the end
+      // (see WrappedSince())
+      if((m_nPos > m_pWBuf->GetPosEof()) || (m_nPos <= nPosBefore))
       {
         m_pLog->AddLineErr("ERROR: Early EOF - file may be missing EOI");
         bDone = true;

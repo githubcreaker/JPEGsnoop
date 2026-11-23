@@ -633,50 +633,19 @@ void CDecodePs::DecodeIptc(uint32_t &nPos, uint32_t nLen, uint32_t nIndent)
 
   strIndent = PhotoshopParseIndent(nIndent);
   nPosStart = nPos;
-  bDone = true;
 
-  if(nPos <= nPosStart + nLen)
-  {
-    // TODO: Should probably check to see if we have at least 5 bytes?
-    bDone = false;
-  }
+  // Where the resource ends: a field's header and its data are kept inside it.
+  // (Its 16-bit length was used as it was: a 6-byte resource read a caption of
+  // 65,535 bytes from past its end.)
+  const quint64 nPosEnd = quint64(nPosStart) + nLen;
+
+  bDone = (nPos >= nPosEnd);
 
   while(!bDone)
   {
     nTagMarker = Buf(nPos + 0);
-    nRecordNumber = Buf(nPos + 1);
-    nDataSetNumber = Buf(nPos + 2);
-    nDataFieldCnt = Buf(nPos + 3) * 256 + Buf(nPos + 4);
-    nPos += 5;
 
-    if(nTagMarker == 0x1C)
-    {
-      uint32_t nFldInd;
-
-      teIptcType eIptcType;
-
-      if(LookupIptcField(nRecordNumber, nDataSetNumber, nFldInd))
-      {
-        strIptcField = QString("%1").arg(asIptcFields[nFldInd].strFldName, -35);
-        eIptcType = asIptcFields[nFldInd].eFldType;
-      }
-      else
-      {
-        strIptcField = QString("%1").arg("?", -35);
-        eIptcType = IPTC_T_UNK;
-      }
-
-      strIptcVal = DecodeIptcValue(eIptcType, nDataFieldCnt, nPos);
-      // The indent has its own placeholder (it took %1 and dropped the value)
-      strTmp = QString("%1IPTC [%2:%3] %4 = %5").arg(strIndent)
-          .arg(nRecordNumber, 3, 10, QChar('0'))
-          .arg(nDataSetNumber, 3, 10, QChar('0'))
-          .arg(strIptcField)
-          .arg(strIptcVal);
-      m_pLog->AddLine(strTmp);
-      nPos += nDataFieldCnt;
-    }
-    else
+    if(nTagMarker != 0x1C)
     {
       // Unknown Tag Marker
       // I have seen at least one JPEG file that had an IPTC block with all zeros.
@@ -684,7 +653,7 @@ void CDecodePs::DecodeIptc(uint32_t &nPos, uint32_t nLen, uint32_t nIndent)
       // Since we don't know how to parse it, abort now.
       strTmp = QString("ERROR: Unknown IPTC TagMarker [0x%1] @ 0x%2. Skipping parsing.")
           .arg(nTagMarker, 2, 16, QChar('0'))
-          .arg(nPos - 5, 8, 16, QChar('0'));
+          .arg(nPos, 8, 16, QChar('0'));
       m_pLog->AddLineErr(strTmp);
 
 #ifdef DEBUG_LOG
@@ -697,17 +666,65 @@ void CDecodePs::DecodeIptc(uint32_t &nPos, uint32_t nLen, uint32_t nIndent)
       qDebug() << (strDebug);
 #endif
 
-      // Adjust length to end
-      nPos = nPosStart + nLen;
-
-      // Now abort
-      bDone = true;
+      // Adjust length to end, and abort
+      nPos = static_cast<uint32_t>(nPosEnd);
+      break;
     }
 
-    if(nPos >= nPosStart + nLen)
+    if(nPosEnd - nPos < 5)
     {
-      bDone = true;
+      strTmp = QString("ERROR: IPTC field header at [0x%1] runs past the end of its 8BIM resource, at [0x%2]. Stopping.")
+          .arg(nPos, 8, 16, QChar('0'))
+          .arg(nPosEnd, 8, 16, QChar('0'));
+      m_pLog->AddLineErr(strTmp);
+      nPos = static_cast<uint32_t>(nPosEnd);
+      break;
     }
+
+    nRecordNumber = Buf(nPos + 1);
+    nDataSetNumber = Buf(nPos + 2);
+    nDataFieldCnt = Buf(nPos + 3) * 256 + Buf(nPos + 4);
+    nPos += 5;
+
+    if(nDataFieldCnt > nPosEnd - nPos)
+    {
+      const uint32_t nAvail = static_cast<uint32_t>(nPosEnd - nPos);
+
+      strTmp = QString("ERROR: IPTC field length [%1] at [0x%2] runs past the end of its 8BIM resource, at [0x%3]; using [%4]")
+          .arg(nDataFieldCnt)
+          .arg(nPos, 8, 16, QChar('0'))
+          .arg(nPosEnd, 8, 16, QChar('0'))
+          .arg(nAvail);
+      m_pLog->AddLineErr(strTmp);
+      nDataFieldCnt = nAvail;
+    }
+
+    uint32_t nFldInd;
+
+    teIptcType eIptcType;
+
+    if(LookupIptcField(nRecordNumber, nDataSetNumber, nFldInd))
+    {
+      strIptcField = QString("%1").arg(asIptcFields[nFldInd].strFldName, -35);
+      eIptcType = asIptcFields[nFldInd].eFldType;
+    }
+    else
+    {
+      strIptcField = QString("%1").arg("?", -35);
+      eIptcType = IPTC_T_UNK;
+    }
+
+    strIptcVal = DecodeIptcValue(eIptcType, nDataFieldCnt, nPos);
+    // The indent has its own placeholder (it took %1 and dropped the value)
+    strTmp = QString("%1IPTC [%2:%3] %4 = %5").arg(strIndent)
+        .arg(nRecordNumber, 3, 10, QChar('0'))
+        .arg(nDataSetNumber, 3, 10, QChar('0'))
+        .arg(strIptcField)
+        .arg(strIptcVal);
+    m_pLog->AddLine(strTmp);
+    nPos += nDataFieldCnt;
+
+    bDone = (nPos >= nPosEnd);
   }
 }
 
@@ -1695,12 +1712,26 @@ void CDecodePs::PhotoshopParseLayerSelectId(uint32_t &nPos, uint32_t nIndent)
 
   QString strVal;
 
+  if(!BlockRoom(nPos, 2))
+  {
+    BlockOverrun(nPos, "Layer count");
+    return;
+  }
+
   uint32_t nNumLayer = m_pWBuf->BufRdAdv2(nPos, PS_BSWAP);
 
   PhotoshopParseReportFldNum(nIndent, "Num selected", nNumLayer, "");
 
+  // The count comes from the file: stop at the end of the block (a 2-byte
+  // block said 65,535, and as many IDs were read from past it)
   for(uint32_t nInd = 0; nInd < nNumLayer; nInd++)
   {
+    if(!BlockRoom(nPos, 4))
+    {
+      BlockOverrun(nPos, "Layer ID");
+      break;
+    }
+
     nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
     PhotoshopParseReportFldNum(nIndent + 1, "Layer ID", nVal, "");
   }
@@ -3057,7 +3088,11 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
 
   // A length that runs past the containing segment, or wraps the 32-bit
   // position back to this block, would make the caller loop forever or parse
-  // gigabytes past the end. Clamp it to the data actually available.
+  // gigabytes past the end. Clamp it to the data actually available: a
+  // segment cut short by the end of the file ends there (past it every byte
+  // reads as 0, and a count of 0xFFFF gave 16,000 Layer IDs of 0).
+  nPosLimit = qMin(nPosLimit, m_pWBuf->GetPosEof());
+
   if((nPos > nPosLimit) || (nBimLen > nPosLimit - nPos))
   {
     const uint32_t nBimLenAvail = (nPos < nPosLimit) ? (nPosLimit - nPos) : 0;

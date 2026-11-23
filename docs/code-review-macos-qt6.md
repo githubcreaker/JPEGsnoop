@@ -3551,6 +3551,484 @@ files are sparse. 19 deliberate breaks each fail the cases aimed at them.
 - **Not checked:** the dialog and the menu item in the app's own window, and a file of
   4 GiB or more that isn't sparse.
 
+### An endless loop at the end of the largest files
+
+Found while looking into 64-bit file positions. A file of 4 GiB - 1 bytes (0xFFFFFFFF,
+the largest analyzed, and FAT32's largest) has no position after its end in 32 bits:
+moving past it wrapped around to 0, so the check for "Early EOF" never saw it. Parsing
+went on with the start of the file, and for a scan with no EOI that was forever (with
+no Cancel, as analysis has none). A byte less ended in some 20 seconds.
+
+Parsing only moves forward, so a position before one it had has wrapped
+(`CjfifDecode::WrappedSince()`). Now:
+- **The marker loop ends** with "ERROR: Early EOF - file may be missing EOI", as for a
+  smaller file, and the scan's error says @ 0x100000000 rather than 0x00000000.
+- **The loops inside a segment end** there too, rather than read the start of the file as
+  the rest of it: DHT, DQT, the search after a comment with a length of 0, IPTC, and an
+  Exif thumbnail, which says "runs past the end of the file".
+- **A scan header cut short** there doesn't decode the start of the file as its scan.
+- **A segment reaching past the end** is said to be longer than expected, not shorter.
+
+The scan's loop needs that exact size. A segment's length could also carry the position
+past 2^32 in files some kilobytes smaller, which are covered too. **Windows** has the
+same code for the marker loop and the scan (by reading it: it wasn't run).
+
+**Tests:** 17 new `WR` cases: each of these, and two whole files of that size, one opened
+in the window. 15 fail on the previous commit, the two whole ones by never finishing
+(the other 2 are the file a byte less).
+
+### The compression figures of large images
+
+Both were worked out in 32 bits:
+- **The compression ratio was wrong** over 89.5 megapixels in colour, and negative up to
+  179: so for 108 MP phone photos (12000 x 9000 gave -126.03:1 for a plain test image).
+  The port's signed sizes halved Windows' limit, above which it is wrong there too.
+- **Both figures were wrong from 512 MiB of scan data,** as on Windows: 570 MiB gave 2.62
+  bits a pixel rather than 25.84.
+
+They are worked out in doubles, which hold both exactly.
+
+**Tests:** 5 new `CS` cases (1,506 in all), each side of 89.5 megapixels, 108, 180, and
+513 MiB of scan; 4 fail on the previous commit. (The 513 MiB case became two in "Three
+fixes from a review of these changes".)
+
+**Checks,** for this section and the one before it:
+- **14 deliberate breaks** each fail the cases aimed at them.
+- **Other files' reports are unchanged:** with the default options, byte for byte the
+  previous commit's for the 252 case files under 512 MiB and for 3,298 damaged copies.
+- **The groups closest to it pass** (720 cases: decoding, export, offsets, search, MCU
+  lookup, batches and the command line). The whole suite wasn't rerun: its other groups
+  open files in the window, so decode them by the same code.
+- **With ASan/UBSan,** 19 of the new cases pass, and `H`'s 10. Not run with it: the two
+  whole files and the 513 MiB scan, which take minutes there.
+- **cppcheck 2.22** finds nothing new in the changed files.
+- **Not checked:** either fix in the app's own window, or with a real file that large.
+
+**Found meanwhile,** and fixed in the next section: an AVI that is zeros after its
+headers made the report run away.
+
+### AVIs that made the report run away
+
+An AVI that is zeros after its headers (a recording cut off, or padded) was parsed as a
+chunk every 8 bytes: 131,000 report lines and some 320 MB of memory for each MiB, so one
+of 100 MiB would have needed some 32 GB. Empty and junk chunks did the same, and the
+text of IDIT and ISFT ran on to the end of the file (530 MB for 8 MiB). Extract All does
+it again for each frame. Now:
+- **Zeros are passed in one line,** "(24 bytes of zeros at 0x000000e2)", 8 at a time as
+  before, so the chunks after padding are still found.
+- **Parsing stops after 1 MiB of them in all,** with "NOTE: Zeros in place of AVI chunks
+  at ... (over 1 MiB in all). Stopping AVI parsing."
+- **And after 4,096 chunks,** with an error. An AVI normally has some tens outside movi, which
+  is skipped whole. What was found before stopping stays, such as Motion JPEG.
+- **IDIT's and ISFT's text** is cut at 1 KB (and ISFT's at the end of its field too, since
+  "Three fixes from a review of these changes").
+- **A last 1 to 7 bytes of zeros** aren't read past the end of the file any more, which
+  left Extract All without the frames near it (none of 20 in a small AVI).
+
+**Changes from Windows,** whose code has none of these limits: all five.
+
+**Tests:** 22 new `AV` cases (1,528 in all): zeros alone, up to 4 GiB - 1, and in the
+window; padding on each side of the limit and in two runs; the last bytes; frames
+extracted; chunks on each side of their limit; and the two texts. 17 fail on the code
+before, and 12 deliberate breaks each fail the cases aimed at them.
+
+**Checks:**
+- **The same chunks are found:** the 252 case files' reports are byte for byte as before,
+  and of 1,500 made AVIs (with padding, odd sizes, damage and cuts), decoded from the
+  start and 450 from a frame too, only the lines of zeros differ, and 5 frames that are
+  now read to their end.
+- **The groups that parse AVIs pass** (417 cases, with export, batches, the command line,
+  search and offsets). The whole suite wasn't rerun.
+- **With ASan/UBSan,** the `AV`, `H` and `R19` cases pass (38).
+- **cppcheck 2.22** finds nothing new in the changed file.
+- **Not checked:** a real camera's AVI (all were made), or the app's own window.
+
+**Found meanwhile:**
+- **Frames weren't exported near the end of an AVI with other stray bytes there,**
+  fixed in the next section.
+- **A PSD's XMP is shown whole,** at some 55 MB of memory a MiB (480 MB for 8 MiB). Not
+  fixed.
+
+### Frames lost near the end of an AVI
+
+Stray bytes after an AVI's last chunk (other than zeros), or a last chunk cut short,
+were read past the end of the file. That marks the file buffer bad until it next loads a
+window, and the JPEG decoded next was read from the same window, so its scan stopped at
+once: "ERROR: Ran out of buffer before EOI during phase 1 of Scan decode". Extract All,
+and decoding a frame found by Img Search, lost the frames in the file's last 16 KB (the
+window reaches that far back): 5 of 20 were exported from a 21 KB AVI ending in "ab", none
+from a 14 KB one, and 1,477 of 1,500 from one of 1 MiB. `CjfifDecode::DecodeAvi()`
+reloaded the window when it had read past the end; the next section moved that reload to
+the scan's start, which covers these frames too.
+
+**Windows** has the same buffer and parser, so the same bug by its code (not tried there).
+
+**Tests:** 4 new `AV` cases (1,532 in all): Extract All of 20 frames followed by "ab", by
+an IDIT chunk cut short and by a LIST cut short, and the last frame decoded on its own.
+All 4 fail with the reload taken out, which is the code before.
+
+**Checks:**
+- **Nothing else changes:** against the code before, the 255 case files' reports are byte
+  for byte the same, and so are those of 1,500 made AVIs decoded from the start and from
+  2,273 of their frames, and their Extract All exports.
+- **The groups that parse AVIs pass** (421 cases). The whole suite wasn't rerun.
+- **With ASan/UBSan,** the `AV`, `H` and `R19` cases pass (42).
+- **cppcheck 2.22** finds nothing new in the changed file, and a bug planted beside the
+  change shows it was checked.
+- **Not checked:** a real camera's AVI, or the app's own window.
+
+**Found meanwhile,** and fixed in the next section: the same buffer flag broke the
+report and Export JPEG of a small JPEG whose EXIF points past the end of the file.
+
+### An EXIF value past the end of a small JPEG
+
+The flag of the section before hit ordinary JPEGs too. An EXIF value at or just past the
+end of the file (ImageDescription's text, a RATIONAL such as XResolution, or the EXIF
+IFD) was read past the end. In a file under about 16 KB everything read after it came
+from the same window, so nothing cleared the flag. The image was still decoded and shown,
+as its decode loads the window again, but the report said "ERROR: Ran out of buffer
+before EOI during phase 1 of Scan decode" where the scan began. It then said "Expected
+marker 0xFF" there, never reached EOI, and ended with "Data exists after EOF" for the
+whole file. Export JPEG refused with "Missing marker: EOI". Now the scan reloads the
+window at its start when the flag is set. That covers the AVI frames too, so
+`DecodeAvi()`'s own reload is gone. A scan that does run past the end still reports it,
+where it ends.
+
+**Windows** has the same code, so the same bug (not tried there).
+
+**Tests:** 6 new `PE` cases (1,538 in all): ImageDescription 10 bytes past the end and
+across it, XResolution and the EXIF IFD past it, Export JPEG, and a scan cut short, which
+still reports running out one past its last byte. All 6 fail on the code before. The 4
+`AV_stray_*` cases pass without `DecodeAvi()`'s reload, and fail with neither reload.
+
+**Checks:**
+- **Only the reports that ran out change.** These were compared against the code before:
+  - **Case files:** of 260 decoded and exported, the only changes are the 4 new files
+    pointing past the end, now decoded to EOI and exported, and the cut scan, which runs
+    out at its end instead of its start. The 5 other files with a scan cut short are
+    unchanged.
+  - **Made AVIs:** 1,500 of them, decoded from the start and from 2,273 of their frames,
+    and their Extract All exports, are byte for byte the same.
+  - **Made JPEGs:** 650 of them, from 800 bytes to 15 KB, each with one of five kinds of
+    EXIF value placed from 40 bytes before the end to 1 MiB past it. The 350 that ran
+    out now decode to EOI, with the same image, and export. The other 300 are unchanged.
+    The bug never showed with a value 16,000 bytes or more past the end, or 4,000 past
+    it in files of 13 KB or more.
+- **The affected groups pass** (598 cases: those that parse AVIs, export, batches, the
+  command line, search, offsets, MCU lookup, and files cut short). The whole suite wasn't
+  rerun.
+- **With ASan/UBSan,** the `PE`, `AV`, `H` and `R19` cases pass (48).
+- **cppcheck 2.22** finds nothing new in the changed file, and a bug planted beside the
+  change shows it was checked.
+- **Not checked:** a camera's JPEG with such a value (all were made), or the app's own
+  window.
+
+### Three fixes from a review of these changes
+
+A review of the sections above, before they were committed, found:
+- **ISFT's text was read for as long as the list holding it,** counted from where the
+  text starts. So it ran past its own field and 12 bytes past the list, as on Windows;
+  the 1 KB cap kept that. A Software text that didn't end in a 0 took in the next field's
+  name ("AAAAAAICRD"). Now it stops at the end of its field or the list, whichever comes
+  first. It and IDIT's text also stop at the end of the file, which they read a byte past
+  when cut short (marking the buffer bad, as in the sections before).
+- **Fill bytes before a marker ran past the end of the file.** Their last byte was read
+  past it, and the 0 there was taken for a marker. A file ending in 0xFF said "WARNING:
+  Unknown marker [0xFF00]" and "Stopping decode" in place of "ERROR: Early EOF - file may
+  be missing EOI". At the end of the largest file the position also passed 2^32, so with
+  Options > Relaxed Parsing the marker's length was read from the file's start: 65,496
+  for a JPEG there. The marker loop's check caught that, unless the fill bytes began in
+  the file's first 64 KB; then parsing went on once more from near the start (by reading
+  the code). Now the fill bytes stop at the end of the file, which is an Early EOF.
+- **The 513 MiB case** of "The compression figures of large images" required its bits
+  per pixel, but only forbade a wrong ratio, so it passed without the ratio line. It is
+  now two cases, requiring 25.84 bits per pixel and 0.31:1.
+
+**Windows** has the same code for both reads.
+
+**Tests:** 9 new cases (1,547 in all), and one changed:
+- **`AV_isft_long`** now has a 4 KB field, over the cap; it had 5 bytes, and needed the
+  overrun to pass.
+- **`AV_isft_field` and `AV_isft_list`:** a text without a 0 before the next field, and a
+  field longer than its list.
+- **`CS_scan_512mib_ratio`.**
+- **6 `MP` cases:** one and four fill bytes at the end, the count of those, Relaxed
+  Parsing, and both at the end of a file of 4 GiB - 1 bytes. The driver's `decode` takes
+  a new `--relaxed` for them.
+
+7 of the new cases fail on the code before: the 2 `AV` and 5 `MP`. `MP_eof_pads_count`
+guards the count, which is the same as before. Both 513 MiB cases fail on the previous
+commit (439.90:1 and 0.02 bits a pixel). The texts' and the fill bytes' old code, put back
+one at a time, each fail just their own cases. With the scan's reload taken out, the IDIT
+and LIST cut short (`AV_stray_*`) now pass anyway: their text no longer reads past the end.
+
+**Checks:**
+- **Only those reports change.** These were compared against the code before:
+  - **Case files:** of 264 decoded and exported, only the 4 new ones with these faults.
+  - **Cut JPEGs:** a 1.4 KB JPEG cut after each of its bytes, and each cut followed by two
+    fill bytes. The 793 of 2,758 whose fill bytes reached the end now say Early EOF; the
+    rest are unchanged.
+  - **AVIs with ISFT:** 630 made with texts with and without a 0, fields and lists ending
+    before, at and after the text, and the list before or after movi or at the end. 269
+    now show the Software text cut to its field or list. The rest, and all their Extract
+    All exports, are unchanged.
+  - **The made AVIs from before:** of 1,500 decoded from the start and from 2,273 of
+    their frames, and exported, only 2 frames ending in fill bytes change, to Early EOF.
+- **The affected groups pass** (612 cases: those of the sections above, decoding, export,
+  batches, the command line, search, offsets, MCU lookup, and files cut short). The whole
+  suite wasn't rerun.
+- **With ASan/UBSan,** the `AV`, `MP`, `PE`, `H` and `R19` cases pass (56).
+- **cppcheck 2.22** finds nothing new, and catches two bugs planted beside the changes.
+  Its "Variable 'nInfoLen' is assigned a value that is never used" is gone, and so is
+  the compiler's warning about it (385 now): that was ISFT's field length.
+- **Not checked:** fill bytes from the first 64 KB to the end of a file of 4 GiB - 1
+  bytes (it needs 4 GiB of 0xFF written), a real camera's AVI, or the app's own window.
+
+### The tests: cases that passed without their result
+
+After the three fixes above, the suite was gone through for cases that would pass with
+their result missing or wrong. Of the 1,547 cases, 17 checked only the exit status, 9
+only `harness: decoded=1`, and 2 only that a line was absent; 5 GUI cases required only
+`harness: done`. Run against the reports of a plain JPEG with the same flags, 25 decode
+cases' required lines matched there too: 17 of them (some among the 9) are changed, and
+the other 8 compare two decodes of their own file, or are about a label every report has.
+The changed cases now require the line their file gives, worked out from the bytes the
+generator writes:
+- **Crashes and hangs (C1–C5, H1–H8):** the error each fix reports, with the values from
+  the file: "Image too large to decode the scan (65535 x 65535 pixels)", the DHT selectors
+  4 and 15, "Excessive DHT entries (258)", the IFD repeated at 0x00000008, the 8BIM length
+  0xfffffff4 cut to 4 and the EOI after it at 0x24, the marker expected at 0x34 after a
+  short XMP, the AVI size that points backwards, the thumbnail of 195,075 bytes, two
+  layer groups (not a third) and no guide in a block that ends after the count.
+- **H5:** its thumbnail claims 1,000 bytes but only 68 are left, so the file's end stopped
+  the skip with or without the fix's check for it. A new case claims 0xFFFFFF00 bytes,
+  which only that check stops (without it, 4 billion passes).
+- **C3:** with Options > DHT Expand (`--expand-dht`, new in the driver), the 256th code
+  of the 258-code table (16 bits, 0000000100000010) is shown, and the 257th isn't.
+- **C4 and F5:** a white image's histogram is three full bars (`rgb=180`). With 255 one
+  past each array, red's count went into green's first bin and green's into blue's: two
+  bars at 0 (`rgb=120`).
+- **R14:** the file whose table is defined twice decodes to the same pixels (MD5) as the
+  file without the first definition.
+- **F2:** the error naming the string and the offsets where it and its resource end.
+- **PE and the last AVI frame:** the EOI is found at its offset, the file's (or frame's)
+  last 2 bytes. Checking this against the old code showed that the scan's end ("Scan Data
+  encountered marker 0xFFd9") isn't enough: the image decoder reads the scan apart from
+  the marker parser and reaches the EOI even when the parser ran out early.
+- **Valid files (`ok_*`):** each decodes at its SOF's size with no error or warning, the
+  report gives the subsampling its SOF gives, and two pixels are close to libjpeg's
+  (Pillow 13's) decode of the file. Over these images the two differ by up to 4 where
+  nothing is subsampled (IDCT rounding) and up to 11 where chroma is (libjpeg smooths it
+  as it upsamples; JPEGsnoop repeats it), so the windows are 6 and 13; at the points
+  taken they agree within 2. The EXIF file's make, model and GPS values are checked.
+- **GUI (U1–U3, F1):** each also requires its file's line, that it was decoded (or not)
+  before the mouse went over it.
+- **S5:** the driver prints "reprocessed with no file" either way; without the fix,
+  opening "" showed "Couldn't open file: []", which the case now forbids.
+- **Batches:** with hidden files left out, Extract All writes 16 files (9 logs, 7 JPEGs).
+
+43 cases changed and 39 are new (1,586 in all). `tests/README.md` now says how to write a
+case so that it fails when its result is missing or wrong.
+
+**Checks:**
+- **The new patterns aren't loose.** In each passing output, deleting the matched line,
+  or adding 1 to any number in it, fails the case, except where the case allows it (the
+  decode's `status=` count, and pixels within 4; a pixel 9 off fails).
+- **They fail with the bugs back.** In a scratch copy, nine fixes could be switched off
+  one at a time: C3's code limit, C4's bins, C5's zero factor, R14's table clear, F5's
+  64-bit bar height, the PE scan reload, the batch's hidden files, H5's end-of-file stop
+  and S5's check for no file. Each fails its own cases and passes with the switch off.
+  That is how the PE cases' first new line was found wanting (see the PE item above).
+- **An independent review** (an agent given only the diff) re-derived every value from
+  the generator and found the H5 and S5 gaps, pixel windows with no margin at two points,
+  and a wrong comment, all fixed as above. It also noted that some required lines were
+  printed before their fix too (C2's selector error, C3's count, C5's validation error,
+  H2's EOI and H3's marker error); there a crash, a hang or a sibling case is what fails.
+- **All 251 decode cases pass,** and the 82 changed or new ones. The driver change only
+  adds the option; cppcheck finds the same 58 things in it as before.
+
+### Loops and reads past their bounds: an audit (not fixed)
+
+The bugs fixed in the sections above were of two kinds: a loop that moves on toward the
+end of the file without a limit, and a read whose length comes from a field other than
+its own. `JfifDecode.cpp`, `DecodePs.cpp`, `WindowBuf.cpp` and the scan reader in
+`ImgDecode.cpp` were read for both. Each finding below was reproduced with a made-up file
+(made again independently, except where marked "agent's file"). All are inherited from
+Windows unless marked. None is fixed yet.
+
+**Runaway reports from a few bytes** (all six fixed since: see "Six runaway reports"
+below). The report is a text widget that slows as it grows:
+about 65,000 lines take 5 s, two such blocks in one file took over 10 s, and one 64 KB
+segment can hold thousands of them.
+- **Photoshop Layer Select ID** (`DecodePs.cpp` 1700): a 16-bit count with no limit. A
+  2-byte resource gives 65,535 lines (4.3 MB, 5.6 s), read from past its end.
+- **IPTC fields** (`DecodeIptc` 644, `DecodeIptcValue` 595): a field's 16-bit length isn't
+  checked against its resource. A 6-byte resource reads a 65,535-byte caption, NULs and
+  the next resource included. In the agent's run, 100 such resources didn't finish in
+  10 s.
+- **FlashPix contents list** (`DecodeApp2Flashpix` 5118): its 16-bit count isn't checked
+  against the APP2 segment or the file. A 9-byte segment gives 196,954 lines (4.9 MB,
+  7.8 s), nearly all from past the end of the file.
+- **DHT codes over 256** (`DecodeDHT` 5404): C3 left one error line for every code
+  beyond 256. One DHT segment of 15 tables gives 57,360 lines (3.2 s).
+- **EXIF IFD entries** (`DecodeExifIfd` 3071): up to 65,535 entries, checked against
+  neither the APP1 segment nor the file (65,558 lines, 5.1 s; agent's file).
+- **An EXIF thumbnail inside the scan** (`DecodeEmbeddedThumb` 9370): every RST pair
+  adds a blank line; a 400 KB file gives 200,033 (agent's file).
+
+**Offsets that wrap past 2^32:**
+- **IFD0** at an offset of 0xFFFFFFF4 is read from the file's start (the SOI as an entry
+  count of 0xD8FF): `DecodeMarker` 6144 adds the offsets in 32 bits (fixed with the IFD
+  entries, below).
+- **The EXIF thumbnail** at such an offset, with a length of 0xFFFFFFFF, is the main
+  image: its markers and signature are reported as the thumbnail's (`DecodeEmbeddedThumb`).
+- **An AVI chunk size of 0xFFFFFFF9–0xFFFFFFFF** lands 2–8 bytes past the chunk's start,
+  which the port's "points backwards" check misses: a JUNK chunk of 0xFFFFFFFD lists a
+  chunk "AB", and `movi` is never reached (port's check, inherited behaviour).
+
+**Reads past their own field or segment** (wrong values in the report):
+- **DHT:** a table's counts and codes are read past the segment, and DHT isn't checked
+  with `ExpectMarkerEnd`, so parsing goes on where the read stopped: 16 codes taken from
+  a COM after it, then "Expected marker 0xFF, got 0x45" inside the COM, and no image.
+- **DQT** reads 64 (or 128) values whatever its length: with a length of 3 the table is
+  the next segments' bytes, given a quality factor. **SOF** reads 3 bytes per component
+  whatever its length (agent's file).
+- **ICC profile:** the 128-byte header is read from a 20-byte segment (its fields came
+  from the next COM); `nPayloadLen` is computed but unused.
+- **FlashPix stream names** are read up to 510 bytes, past the segment.
+- **XPTitle and the other XP tags:** the byte count is used as a count of UTF-16 units, so
+  "ABC" read on into the next tag ("ABCXYZ"); a value of 4 bytes or fewer, stored in the
+  entry, is used as an offset (shown as "").
+- **CFAPattern** takes its cells from the repeat sizes inside it, not its count; cells
+  past its own come from the previous entry ("[ Yel Mgn ]" from FileSource; agent's file).
+- **COM** text past the end of the file: a length of 0xFFFF with 3 bytes gives "abc" and
+  65,530 dots.
+- **EXIF IFDs after IFD0** and every value offset are never checked against the APP1
+  segment: IFD entries were read from a later APP15 (agent's file). (The IFDs and their
+  entries are, since the fix below; the values they point to still aren't.)
+- **APPn identifiers** are read at a fixed length and the position moves by the printed
+  string's length, which drops non-printing bytes (by reading only).
+- **AVI:** after a stream list (strl) parsing goes on from its strn chunk's end, assuming
+  there is one; without it, the next strl was skipped and a Motion JPEG AVI said "AVI is
+  not MotionJPEG" (agent's file).
+- **Photoshop:** a grid guide starting 1–4 bytes before its block's end reads past it
+  (H7's fix checks only where a guide starts; port's fix); version 6 slices likewise
+  (agent's file); JPEG Quality, Thumbnail and Version Info resources read their fixed
+  fields from the next resource (a thumbnail 943,868,237 pixels wide, "8BIM"); a
+  descriptor item of a type that isn't decoded (`doub`, `UntF`, `obj `, ...) leaves its
+  value unread, which is then taken as the next key's length; in a PSD, `luni`, `lyid`
+  and four other tagged blocks read past their length (agent's files), and section
+  lengths are checked only against the file's end (agent's report only).
+- **Photoshop resources lost:** after a read past an odd-length resource, parsing goes on
+  one byte early and loses every resource after it; an unknown resource (0x03E8) leaves
+  the position inside it, so an "8BIM" in its data was reported as a resource.
+
+**Other things found:**
+- **H5's message** says "runs past the thumbnail length (N bytes)" also when the file's
+  end stopped it (port).
+- **"Data exists after EOF"** counts from offset 0 when decoding stops before an EOI: the
+  whole file is said to be after it.
+- **`Q_ASSERT`** in `CimgDecode::DecodeScanImg` (3523) asserts a nonzero minimum factor
+  that the check after it handles (an SOS with more components than the SOF); a debug
+  build would stop there. Release builds, the only ones made, are unaffected (port).
+- **Past the end of the file,** `CwindowBuf` reloads its window for every byte read within
+  16 KB of it, which slows the runaway reads above (2,000 FlashPix entries took 2.4 s
+  longer past the end than inside the file).
+- **`DecodeDicom.cpp`** isn't built (it isn't in `JPEGsnoopQt.pri`, and `SUPPORT_DICOM` is
+  off), so DICOM files aren't decoded. It has the same kind of read (each value read as
+  200 bytes, not its length).
+
+**Checked and bounded:** the marker loop, DQT tables, XMP, the JFIF thumbnail, DAC, the
+COM vulnerability search, SOF and SOS component loops, the scan's first pass, the AVI
+chunk loop and its text fields, the export copies, `CwindowBuf`'s searches and string
+reads, the scan reader in `ImgDecode.cpp` (it stops at the end of the file), Photoshop
+descriptors and lists (depth 32), strings, layer records, channel data and RLE rows,
+the APP13 resource loop, and the EXIF value loops (at most 4,000 values, 64 printed).
+
+### Six runaway reports
+
+The six "Runaway reports from a few bytes" in the audit above are fixed. Each count or
+length from the file now stops at the end of what holds it, or of the file if that comes
+first (past it every byte reads as 0, which is a valid small entry), and says so:
+- **Photoshop Layer Select ID:** the count and the IDs stop at the end of their resource
+  ("ERROR: Layer ID at [...] runs past the end of its 8BIM resource, at [...].
+  Stopping."), as the other Photoshop parsers do. An ID that would start inside and end
+  past it isn't read either.
+- **IPTC fields:** a field's length is cut to what is left of its resource ("ERROR: IPTC
+  field length [100] at [...] runs past the end of its 8BIM resource, at [...]; using
+  [2]"), and a field whose 5-byte header doesn't fit isn't read. A tag other than 0x1C
+  still ends the list, at the same offset, now without reading the rest of its header.
+- **Photoshop resources** in a segment cut short by the end of the file end there too
+  (the existing "8BIM length [...] runs past the end of its segment; using [...]").
+- **FlashPix contents list:** `DecodeApp2Flashpix` is given the APP2 segment's end (or the
+  file's), and an entry needs 7 bytes of it (size, default and a name's 0). It also stops
+  if an entry takes the position past 2^32, to the file's start.
+- **DHT:** codes past 256 in a table are reported in one line after the table, "Excessive
+  DHT entries (258): only the first 256 are used", in place of one line for each (in the
+  middle of the code listing). A DHT cut short by the end of the file ends there, and is
+  still an Early EOF.
+- **EXIF IFDs:** an IFD, IFD0 and the Exif, GPS, interoperability and maker note IFDs
+  alike, is in its APP1 segment (as far as the file goes), and so is each entry: "ERROR:
+  IFD0 entry #1 at [...] runs past the end of its APP1 segment, at [...]. Stopping." The
+  IFD's position is worked out in 64 bits, so an offset past 2^32 is "outside its APP1
+  segment" and no longer read 4 GiB before (the "IFD0" item under "Offsets that wrap past
+  2^32", fixed too). A maker note outside the segment still counts as maker notes, which
+  the assessment goes by, and an error in a maker note shows even with their decode off.
+  After an IFD stops with an error, the chain no longer reads an "Offset to Next IFD" from
+  where its entries stopped (which also drops that line after an entry of an unsupported
+  format, where it was read from the middle of the entry).
+- **Thumbnail RSTs:** an RST marker outside the thumbnail's scan isn't given a blank line;
+  it reports nothing, as before.
+
+**Windows** has all six.
+
+**Tests:** 36 new `RA` cases and 2 changed (`C3_dht_258` and `C3_dht_4080`, now the one
+line). The driver's `decode` takes a new `--count-lines`, which prints the report's
+number of lines, and each runaway has a case that requires it under 1,000 (the DHT one,
+whose tables are listed, under 10,000), also for files cut short and for FlashPix at the
+end of a file of 4 GiB - 1 bytes. The others require each error with its offsets worked
+out from the file, what is inside the limit (the IDs, the caption "Hi", the stream name,
+the Orientation entry, the thumbnail's EOI), that parsing goes on after it (the next
+resource, the image, Early EOF), the maker notes' summary, and, forbidden, what was read
+past it ("EVIL" entries from a later segment, a third Layer ID of 65536). On the code
+before, 19 of the first 22 fail (8 by running out of time) and both changed ones; the
+other 3 check what was already right. Each of the 7 follow-ups from the review below,
+switched off one at a time in a scratch copy, fails its own cases.
+
+**Checks:**
+- **Only these reports change.** Old against new, on the 269 case files under 64 MB and
+  760 made files with these structures around their limits: 541 unchanged, 61 thumbnails
+  with fewer blank lines and nothing else, and 426 with the new errors, where every other
+  line that changes is the runaway output, entries or fields read past their segment, an
+  old "Parsing exceeded expected length" (after which the next resource was lost, and is
+  now read), or the rest of a report whose old run timed out. 300 of the made files cut
+  short: 139 unchanged, 141 with the new errors, and 20 where only a cut resource has the
+  8BIM length error or an empty DHT table read from past the end is gone; all still say
+  Early EOF where they did. The first fixed build and the last give the same reports on
+  the 1,029 files.
+- **The affected groups pass:** all 624 cases that don't open the window (decoding,
+  export, batches, the command line, file facts, settings), which also go through the
+  decoder.
+- **With ASan/UBSan,** the `RA`, `C3`, `H`, `F2`, `PE`, EXIF, Photoshop and `ok_` cases
+  pass (146).
+- **cppcheck 2.22** finds the same 250 things in the two files as before, and catches a
+  bug planted in each of the 6 functions changed.
+- **An independent review** (an agent given only the diff) re-derived every offset and
+  found the gaps fixed above: the declared ends let files cut short still run away (a
+  15-byte file gave 28,097 lines), FlashPix could wrap at 4 GiB, a maker note pointer
+  outside the APP1 made the assessment say "processed/edited", a 1-byte Layer Select
+  resource read its count past it, and a maker note error was hidden.
+- **Not checked:** the cases that open the window (the reports of valid files don't
+  change), a real camera's file.
+
+**Found, not fixed:**
+- **A file that ends right after a whole segment** says "Expected marker 0xFF, got 0x00 @
+  [its end]" rather than Early EOF: the next marker is read at the end (inherited).
+- **An 8BIM header cut by the segment's end** gives "8BIM length [0x00000000] runs past the
+  end of its segment", naming the length, not the header (port, now also at the file's end).
+- **Empty DHT tables** (17 bytes each) give 21 lines each: a whole 64 KB DHT segment of
+  them is about 81,000 lines. That grows with the file rather than from a few bytes.
+
 ## How this was reviewed
 
 - Six parallel reviews, one per area, each comparing the Qt code against `upstream/master`:

@@ -4625,15 +4625,16 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
     // TODO: Should we use m_nNumSofComps?
     strTmp = QString("  Compression stats:");
     m_pLog->AddLine(strTmp);
-    double nCompressionRatio =
-      static_cast<double>(m_nDimX * m_nDimY * m_nNumSosComps * 8) /
-      static_cast<double>((m_anScanBuffPtr_pos[0] - m_nScanBuffPtr_first) * 8);
+    // Not in 32 bits: the image's bits passed 2^31 at 89.5 megapixels in
+    // colour (the ratio went negative), and the scan's 2^32 at 512 MiB.
+    // Doubles hold both exactly.
+    const double dPixels = static_cast<double>(m_nDimX) * m_nDimY;
+    const double dScanBits = static_cast<double>(m_anScanBuffPtr_pos[0] - m_nScanBuffPtr_first) * 8;
+    double nCompressionRatio = (dPixels * m_nNumSosComps * 8) / dScanBits;
     strTmp = QString("    Compression Ratio: %1:1").arg(nCompressionRatio, 5, 'f', 2);
     m_pLog->AddLine(strTmp);
 
-    double nBitsPerPixel =
-        static_cast<double>((m_anScanBuffPtr_pos[0] - m_nScanBuffPtr_first) * 8) /
-        static_cast<double>(m_nDimX * m_nDimY);
+    double nBitsPerPixel = dScanBits / dPixels;
 
     strTmp = QString("    Bits per pixel:    %1:1").arg(nBitsPerPixel, 5, 'f', 2);
     m_pLog->AddLine(strTmp);

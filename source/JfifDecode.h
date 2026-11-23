@@ -221,9 +221,11 @@ private:
   QByteArray ExportMissingDht(uint32_t nStart, uint32_t nEnd, bool bClean, QString &strInserted, bool &bChecked);
 
   uint32_t DecodeMarker();
+  bool WrappedSince(uint32_t nPosFrom) const;
   bool ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen);
   void DecodeEmbeddedThumb();
   bool DecodeAvi();
+  bool IsZeroAviHeader(uint64_t nPos, uint64_t nPosEof);
 
   bool ValidateValue(uint32_t &nVal, uint32_t nMin, uint32_t nMax, QString strName, bool bOverride, uint32_t nOverrideVal);
 
@@ -234,7 +236,7 @@ private:
   bool DecodeMakerSubType();
   void DecodeDHT(bool bInject);
   uint32_t DecodeApp13Ps(uint32_t nPosEnd);
-  uint32_t DecodeApp2Flashpix();
+  uint32_t DecodeApp2Flashpix(quint64 nPosEnd);
   uint32_t DecodeApp2IccProfile(uint32_t nLen);
   uint32_t DecodeIccHeader(uint32_t nPos);
 
@@ -361,6 +363,7 @@ private:
   QString m_strImgQuantCss;     // Chroma subsampling (e.g. "2x1")
 
   uint32_t m_nImgExifEndian;    // 0=Intel 1=Motorola
+  quint64 m_nPosExifEnd;        // End of the APP1 segment the IFDs are in (one past its last byte)
   uint32_t m_nImgExifSubIfdPtr;
   uint32_t m_nImgExifGpsIfdPtr;
   uint32_t m_nImgExifInteropIfdPtr;

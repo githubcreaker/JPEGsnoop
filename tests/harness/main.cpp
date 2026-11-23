@@ -1,7 +1,7 @@
 // Headless test driver for JPEGsnoopQt.
 //
 // decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y[/X,Y...]] [--start N]
-//     [--detail X,Y,LEN] [--preview-md5]
+//     [--detail X,Y,LEN] [--preview-md5] [--relaxed] [--expand-dht] [--count-lines]
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
@@ -13,7 +13,10 @@
 //     prints a "harness: detail" summary of what it reported, and decodes
 //     the file again without it to check that only the report's detail
 //     lines differ ("harness: detail changes report=0 image=0");
-//     --preview-md5 prints an MD5 of the decoded preview's pixels.
+//     --preview-md5 prints an MD5 of the decoded preview's pixels;
+//     --relaxed turns on Options > Relaxed Parsing; --expand-dht, Options >
+//     DHT Expand; --count-lines prints "harness: report lines=N" after the
+//     report.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
 //     [--cycle-channels] [--repeat N] [--max-growth-mb N] [--zoom PCT]
@@ -557,6 +560,7 @@ static void usage()
   fprintf(stderr,
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
           "                         [--pixels X,Y[/X,Y...]] [--start N] [--detail X,Y,LEN] [--preview-md5]\n"
+          "                         [--relaxed] [--expand-dht] [--count-lines]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
           "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
           "                         [--zoom PCT] [--max-zoom-mb N] [--check-preview] [--check-histo]\n"
@@ -745,7 +749,8 @@ static bool decodeForDetail(const QString &strFile, bool bAc, uint32_t nStart, c
 }
 
 static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strPixels,
-                     uint32_t nStart, const QString &strDetail, bool bPreviewMd5, const QString &strDbDir)
+                     uint32_t nStart, const QString &strDetail, bool bPreviewMd5, bool bRelaxed,
+                     bool bExpandDht, bool bCountLines, const QString &strDbDir)
 {
   QPlainTextEdit edit;
   CDocLog log(&edit);
@@ -762,6 +767,9 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
     cfg.onScansegmentHistogram();
   if(bUnknownExif)
     cfg.onOptionsHideuknownexiftags();  // default hides them; this toggles
+  if(bRelaxed)
+    cfg.onOptionsRelaxedparsing();      // default is off; this toggles
+  cfg.setExpandDht(bExpandDht);
 
   CDbSigs sigs(&log, &cfg);
   CwindowBuf wbuf(&log);
@@ -809,6 +817,8 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
 
   QTextStream out(stdout);
   out << edit.toPlainText() << "\n";
+  if(bCountLines)
+    out << QString("harness: report lines=%1\n").arg(edit.document()->blockCount());
   out << QString("harness: decoded=%1 preview=%2x%3 status=%4\n")
            .arg(img.IsImgDecoded() ? 1 : 0)
            .arg(img.m_bDibTempReady && img.m_pDibTemp ? img.m_pDibTemp->width() : 0)
@@ -7135,6 +7145,9 @@ int main(int argc, char **argv)
   const bool bHisto = args.removeAll("--histo") > 0;
   const bool bUnknownExif = args.removeAll("--unknown-exif") > 0;
   const bool bPreviewMd5 = args.removeAll("--preview-md5") > 0;
+  const bool bRelaxed = args.removeAll("--relaxed") > 0;
+  const bool bExpandDht = args.removeAll("--expand-dht") > 0;
+  const bool bCountLines = args.removeAll("--count-lines") > 0;
   GuiOptions guiOpts;
   guiOpts.bMouse = args.removeAll("--mouse") > 0;
   guiOpts.bLog = args.removeAll("--log") > 0;
@@ -7299,19 +7312,23 @@ int main(int argc, char **argv)
     if(nInd < 0)
       continue;
     bool bOk = false;
-    const int nVal = (nInd + 1 < args.size()) ? args.at(nInd + 1).toInt(&bOk) : 0;
-    if(!bOk || nVal < 0)
+    const QString strVal = (nInd + 1 < args.size()) ? args.at(nInd + 1) : QString();
+    const qlonglong nWide = strVal.toLongLong(&bOk);
+    // --start can be anywhere in the largest file analyzed
+    const bool bStart = (QLatin1String(pszOpt) == QLatin1String("--start"));
+    if(!bOk || (nWide < 0) || (nWide > (bStart ? 0xFFFFFFFFLL : 0x7FFFFFFFLL)))
     {
       usage();
       return 2;
     }
+    const int nVal = static_cast<int>(nWide);
     args.remove(nInd, 2);
     if(QLatin1String(pszOpt) == QLatin1String("--repeat"))
       guiOpts.nRepeat = qMax(1, nVal);
     else if(QLatin1String(pszOpt) == QLatin1String("--max-growth-mb"))
       guiOpts.nMaxGrowthMb = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--start"))
-      nStart = static_cast<uint32_t>(nVal);
+      nStart = static_cast<uint32_t>(nWide);
     else if(QLatin1String(pszOpt) == QLatin1String("--detail-dlg-at"))
       guiOpts.nDetailDlgAt = nVal;
     else if(QLatin1String(pszOpt) == QLatin1String("--overlay-at"))
@@ -7356,7 +7373,8 @@ int main(int argc, char **argv)
   }
 
   if(strMode == "decode" && args.size() == 1)
-    return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, nStart, strDetail, bPreviewMd5, tmpDir.path());
+    return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, nStart, strDetail, bPreviewMd5, bRelaxed,
+                     bExpandDht, bCountLines, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
   {
     guiOpts.strFilesDir = QFileInfo(args.first()).absolutePath();

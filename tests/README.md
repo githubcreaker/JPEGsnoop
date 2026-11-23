@@ -22,13 +22,16 @@ when it is installed, so Pillow needn't be installed separately).
 - `harness/` builds `jpegsnoop-harness` from the app's sources (shared through
   `JPEGsnoopQt.pri`) plus a small driver:
   - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]
-    [--start N] [--detail X,Y,LEN] [--preview-md5]` decodes one file in
-    non-interactive mode and prints the report
+    [--start N] [--detail X,Y,LEN] [--preview-md5] [--relaxed] [--expand-dht]
+    [--count-lines]` decodes one
+    file in non-interactive mode and prints the report
     (`--unknown-exif` also reports unknown EXIF tags, which the app hides by
     default; `--pixels` prints the decoded colour at each point; with
     `--histo` it also counts the pixels drawn in each histogram image;
-    `--start` decodes from file offset N; `--preview-md5` prints an MD5 of the
-    decoded image). `--detail` turns on Options > Scan Segment > Detailed
+    `--start` decodes from file offset N (up to 4294967295); `--preview-md5` prints an MD5 of the
+    decoded image; `--relaxed` turns on Options > Relaxed Parsing, and `--expand-dht` Options > DHT Expand;
+    `--count-lines` prints the report's number of lines).
+    `--detail` turns on Options > Scan Segment > Detailed
     Decode for LEN MCUs from MCU X,Y, prints a `harness: detail blocks=...`
     summary of what the report shows (ending with the DC of the first 8
     blocks' matrices), and decodes the file again without it:
@@ -487,9 +490,18 @@ low-resolution notice, and the image window's title and width" section, and
 `SM` in its "One settings file, named as the bundle ID" section, `ZM` in
 its "The zoom menu: Zoom to Fit Window, and up to 6400%" section, `NS` in
 its "Why an image isn't shown" section, `FF` in its "The file's dates and
-hashes" section, and `SF` in its "Options > Skip Hashes on 4 GiB or Larger
-Files" section);
-`ok_*` cases are valid files that must keep decoding.
+hashes" section, `SF` in its "Options > Skip Hashes on 4 GiB or Larger
+Files" section, `WR` in its "An endless loop at the end of the largest files"
+section, `CS` in its "The compression figures of large images" section,
+`AV` in its "AVIs that made the report run away" and "Frames lost near the end
+of an AVI" sections, `PE` in its "An EXIF value past the end of a small
+JPEG" section, `MP` in its "Three fixes from a review of these changes"
+section, and `RA` in its "Six runaway reports" section);
+`ok_*` cases are valid files that must keep decoding. The plain JPEGs must
+decode at their size, with no error or warning and the subsampling their SOF
+gives, and their pixels must be within 6 of libjpeg's decode of the same file
+(Pillow's), or 13 where chroma is subsampled; the progressive and CMYK ones
+must say why their image isn't drawn.
 
 ## Adding a case
 
@@ -497,3 +509,22 @@ Add the file and a `case(...)` line to `gen_cases.py`: an id, the finding, the
 mode, the file name(s) (`"-"` for the `settings` mode, which takes none),
 driver flags, a timeout in seconds, and optionally an extended regex the output
 must contain (`expect`) or must not contain (`forbid`).
+
+Each pattern is matched line by line, and a case has one of each, so:
+- **Work out the expected line from the file you made,** not from what the
+  driver prints: an offset, count or value comes from the bytes, and copying
+  the output locks in whatever the code does, a bug included. (What the
+  format doesn't give, such as a decoded image's MD5, can come from a control
+  file that the case compares with, as `R14_dht_once` is.)
+- **Require the right line, not just the absence of a wrong one.** A `forbid`
+  alone passes when the line is missing. Pair it with an `expect` for the
+  same line's right form, and when a case can only show one line, add a case.
+- **Make the `expect` specific to the case:** `harness: decoded=1` also
+  appears for a plain file, so it shows little; give what this file makes,
+  such as where its EOI is.
+- **Check that the case fails without the fix:** put the old code back (or
+  the bug, behind a switch in a scratch copy) and see it fail. A line the
+  case requires can be there with the bug too. The scan's end (`Scan Data
+  encountered marker`) comes from the image decoder, which reads the scan
+  apart from the marker parser and reaches the EOI even when the parser ran
+  out early. And some lines the driver prints whatever happened before them.

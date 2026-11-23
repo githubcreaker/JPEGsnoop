@@ -77,6 +77,26 @@ def case(cid, finding, mode, names, flags="-", timeout=20, expect="-", forbid="-
 DECODED = "harness: decoded=1"
 
 
+def near(v, tol):
+    """A grep -E group matching the integers within tol of v (0..255)."""
+    return "(" + "|".join(str(x) for x in range(max(0, v - tol), min(255, v + tol) + 1)) + ")"
+
+
+def sof_css(data):
+    """The report's "Chroma subsampling" for this JPEG, from its SOF0's
+    sampling factors (component 2 against the largest), given as V x H when
+    the image is taller than it is wide."""
+    i = marker_pos(data, 0xC0)
+    height, width = struct.unpack(">HH", data[i + 5:i + 9])
+    n = data[i + 9]
+    fac = [(data[i + 11 + 3 * c] >> 4, data[i + 11 + 3 * c] & 15) for c in range(n)]
+    if n == 1:
+        return "Gray"
+    hmax, vmax = max(h for h, _ in fac), max(v for _, v in fac)
+    h, v = hmax // fac[1][0], vmax // fac[1][1]
+    return f"{v}x{h}" if height > width else f"{h}x{v}"
+
+
 # --- synthetic images ---------------------------------------------------------
 def gradient(w, h):
     r = Image.linear_gradient("L").resize((w, h))
@@ -104,11 +124,38 @@ exif[0x8825] = {1: "N", 2: (37.0, 48.0, 30.12), 3: "W", 4: (122.0, 25.0, 9.5), 6
 exif_gps = jpeg(color, quality=85, exif=exif.tobytes())
 
 # --- valid files: must decode cleanly -----------------------------------------
+# Each decodes at its SOF's size with no error or warning, the report gives the
+# subsampling its SOF gives, and its pixels agree with libjpeg's (Pillow 13's)
+# decode of the same file. Over these images the two differ by up to 4 where
+# nothing is subsampled (IDCT rounding) and by up to 11 where chroma is (libjpeg
+# smooths it as it upsamples; JPEGsnoop repeats it), so the tolerances are 6 and
+# 13. At the points taken they agreed within 2.
+def pixel_near(data, x, y):
+    tol = 6 if sof_css(data) in ("1x1", "Gray") else 13
+    rgb = Image.open(io.BytesIO(data)).convert("RGB").getpixel((x, y))
+    return f"^harness: pixel {x},{y} = " + ",".join(near(v, tol) for v in rgb) + "$"
+
+
 for name, data in (("ok_444.jpg", c444), ("ok_422.jpg", c422), ("ok_420.jpg", c420),
                    ("ok_gray.jpg", gray), ("ok_small.jpg", small), ("ok_black.jpg", black),
                    ("ok_exif_gps.jpg", exif_gps)):
     write(name, data)
-    case(name[:-4], "valid", "decode", name, "--ac --histo", expect=DECODED)
+    w, h = Image.open(io.BytesIO(data)).size
+    case(name[:-4], "valid", "decode", name, "--ac --histo", expect=f"^harness: decoded=1 preview={w}x{h} ",
+         forbid="ERROR|WARNING")
+    case(name[:-4] + "_css", "valid", "decode", name, "--ac", expect=f"^  Chroma subsampling:  {sof_css(data)}$")
+    pts = ((3, 3), (12, 8)) if w < 32 else ((7, 8), (56, 32)) if w > 32 else ((5, 5), (30, 30))
+    for n, (x, y) in enumerate(pts):
+        case(f"{name[:-4]}_pixel_{n + 1}", "valid", "decode", name, f"--ac --pixels {x},{y}",
+             expect=pixel_near(data, x, y))
+# The EXIF and GPS values written above
+for cid, want in (("make", "^  EXIF Make/Model:     OK   \\[TestMake\\] \\[TestModel\\]$"),
+                  ("lat", "^    \\[GPSLatitude +\\] = 37 deg 48' 30\\.120\"$"),
+                  ("lat_ref", "^    \\[GPSLatitudeRef +\\] = \"N\"$"),
+                  ("long", "^    \\[GPSLongitude +\\] = 122 deg 25' 9\\.500\"$"),
+                  ("long_ref", "^    \\[GPSLongitudeRef +\\] = \"W\"$"),
+                  ("alt", "^    \\[GPSAltitude +\\] = 123\\.400 m$")):
+    case("ok_exif_gps_" + cid, "valid", "decode", "ok_exif_gps.jpg", expect=want)
 # Valid files whose scan isn't decoded (progressive, CMYK): the report says
 # so, and there is no image or histogram
 OK_NO_IMAGE = "^harness: decoded=0 preview=0x0 "
@@ -132,37 +179,62 @@ def patch_sof_dims(data, w, h):
     return bytes(d)
 
 
-case("C1_huge_65535", "C1", "decode", write("c1_huge_65535.jpg", patch_sof_dims(gray8, 65535, 65535)), "--ac")
-case("C1_huge_46345", "C1", "decode", write("c1_huge_46345.jpg", patch_sof_dims(gray8, 46345, 46345)), "--ac")
+# (Both are over the 2^28 pixels decoded; 46345^2 is just over 2^31.)
+for side in (65535, 46345):
+    case(f"C1_huge_{side}", "C1", "decode", write(f"c1_huge_{side}.jpg", patch_sof_dims(gray8, side, side)), "--ac",
+         expect=f"^\\*\\*\\* ERROR: Image too large to decode the scan \\({side} x {side} pixels\\); "
+         "skipping image decode \\*\\*\\*$")
 
 d = bytearray(gray)
 i = marker_pos(d, 0xDA)
 assert d[i + 4] == 1
 d[i + 6] = 0x40                       # DC table selector 4 (valid: 0-3)
-case("C2_sos_td4", "C2", "decode", write("c2_sos_td4.jpg", bytes(d)), "--ac")
+case("C2_sos_td4", "C2", "decode", write("c2_sos_td4.jpg", bytes(d)), "--ac",
+     expect="^ERROR: SetDhtTables\\(comp = 1, TblDC = 4 TblAC = 0\\) out of indexed range$")
 d = bytearray(c420)
 i = marker_pos(d, 0xDA)
 d[i + 6] = 0xFF                       # DC and AC selectors 15
-case("C2_sos_sel15", "C2", "decode", write("c2_sos_sel15.jpg", bytes(d)), "--ac")
+case("C2_sos_sel15", "C2", "decode", write("c2_sos_sel15.jpg", bytes(d)), "--ac",
+     expect="^ERROR: SetDhtTables\\(comp = 1, TblDC = 15 TblAC = 15\\) out of indexed range$")
 
+# A table holds at most 256 codes: the rest are left out, and reported in one
+# line (there was one for each, up to 3,824 a table; see RA_dht)
 counts_258 = bytes([0] * 14 + [3, 255])
 case("C3_dht_258", "C3", "decode",
-     write("c3_dht_258.jpg", insert_after_app0(c444, seg(0xC4, bytes([0x13]) + counts_258 + bytes(258)))))
+     write("c3_dht_258.jpg", insert_after_app0(c444, seg(0xC4, bytes([0x13]) + counts_258 + bytes(258)))),
+     expect="^Excessive DHT entries \\(258\\): only the first 256 are used$", forbid="^Excessive DHT entries \\(257\\)")
 case("C3_dht_4080", "C3", "decode",
      write("c3_dht_4080.jpg", insert_after_app0(c444, seg(0xC4, bytes([0x13]) + bytes([255] * 16)
-                                                       + (bytes(range(256)) * 16)[:4080]))))
+                                                       + (bytes(range(256)) * 16)[:4080]))),
+     expect="^Excessive DHT entries \\(4080\\): only the first 256 are used$",
+     forbid="^Excessive DHT entries \\(257\\)")
+# Expanded, the 258-code table's codes are 3 of 15 bits (0-2), then 16-bit ones
+# from 6: the 256th is 258. The 257th (259) was read from past the stored codes.
+C3_EXP = "^      {:016b} = 00 \\(EOB\\) +\\(Total Len = 16\\)$"
+case("C3_dht_258_expanded", "C3", "decode", "c3_dht_258.jpg", "--expand-dht", expect=C3_EXP.format(258),
+     forbid=f"^      {259:016b} = ")
 
-case("C4_white_histo", "C4", "decode", write("c4_white.jpg", white), "--ac --histo", expect=DECODED)
+# One full bar (60 pixels high) at 255 for each of R, G and B. (When 255 went
+# one past each array, R's count landed in G's first bin and G's in B's: two
+# bars at 0, rgb=120.)
+case("C4_white_histo", "C4", "decode", write("c4_white.jpg", white), "--ac --histo",
+     expect="^harness: histogram bars rgb=180 y=-1$")
 
 i = marker_pos(c444, 0xC0)
 end = i + 2 + struct.unpack(">H", c444[i + 2:i + 4])[0]
 sof_h0 = seg(0xC0, bytes([8]) + struct.pack(">HH", 48, 64) + bytes([3, 1, 0x11, 0, 2, 0x01, 1, 3, 0x11, 1]))
+# (A frame that fails validation leaves the subsampling unknown, "?x?")
 case("C5_second_sof_h0", "C5", "decode", write("c5_second_sof_h0.jpg", c444[:end] + sof_h0 + c444[end:]),
-     "--ac", forbid="Chroma subsampling: +0x0")
+     "--ac", expect="^  Chroma subsampling:  \\?x\\?$", forbid="Chroma subsampling: +0x0")
+case("C5_second_sof_h0_error", "C5", "decode", "c5_second_sof_h0.jpg", "--ac",
+     expect="^  ERROR: Horizontal Sampling Factor <Hi> value too small \\(Actual = 0, Expected >= 1\\)$")
 i = marker_pos(gray, 0xDA)
 end = i + 2 + struct.unpack(">H", gray[i + 2:i + 4])[0]
 sos3 = b"\xff\xda" + struct.pack(">H", 12) + bytes([3, 1, 0x00, 2, 0x00, 3, 0x00, 0, 63, 0])
-case("C5_sof1_sos3", "C5", "decode", write("c5_sof1_sos3.jpg", gray[:i] + sos3 + gray[end:]), "--ac")
+# (Components 2 and 3 aren't in the frame: their factors are 0, so the scan
+# isn't decoded. The note gives the largest factors, both 1.)
+case("C5_sof1_sos3", "C5", "decode", write("c5_sof1_sos3.jpg", gray[:i] + sos3 + gray[end:]), "--ac",
+     expect="^  NOTE: Degree of subsampling factor not supported \\[HMax=1, VMax=1\\]$")
 
 
 # C7: a sharp edge coded at quality 100, then decoded with every quantiser
@@ -209,7 +281,8 @@ def ifd_be(entries, next_off):
 
 tiff = b"MM\x00\x2a" + struct.pack(">I", 8) + ifd_be([(0x0112, 3, 1, struct.pack(">HH", 1, 0))], 8)
 case("H1_ifd_loop", "H1", "decode",
-     write("h1_ifd_loop.jpg", insert_after_app0(c444, seg(0xE1, b"Exif\x00\x00" + tiff))), timeout=10)
+     write("h1_ifd_loop.jpg", insert_after_app0(c444, seg(0xE1, b"Exif\x00\x00" + tiff))), timeout=10,
+     expect="^  ERROR: IFD1 at offset 0x00000008 repeats an earlier IFD or the IFD chain is too long\\. Stopping\\.$")
 
 
 def bim(rid, data, length=None):
@@ -222,15 +295,27 @@ def app13_only(blocks):
     return b"\xff\xd8" + seg(0xED, payload) + b"\xff\xd9"
 
 
-case("H2_8bim_wrap", "H2", "decode", write("h2_8bim_wrap.jpg", app13_only(bim(0x7777, b"", 0xFFFFFFF4))), timeout=10)
+# The 4 bytes after the 8BIM header are all that is left of the APP13, and the
+# parse goes on after it, to the EOI at 2 + 2 + 32
+H2_LEN = "^ERROR: 8BIM length \\[0xfffffff4\\] runs past the end of its segment; using \\[0x00000004\\]$"
+case("H2_8bim_wrap", "H2", "decode", write("h2_8bim_wrap.jpg", app13_only(bim(0x7777, b"", 0xFFFFFFF4))), timeout=10,
+     expect=H2_LEN)
+case("H2_8bim_wrap_eoi", "H2", "decode", "h2_8bim_wrap.jpg", timeout=10, expect="^  OFFSET: 0x00000024$")
 case("H2_8bim_wrap_hex", "H2", "decode", write("h2_8bim_wrap_hex.jpg", app13_only(bim(0x03E9, b"", 0xFFFFFFF4))),
-     timeout=10)
+     timeout=10, expect=H2_LEN)
+case("H2_8bim_wrap_hex_dump", "H2", "decode", "h2_8bim_wrap_hex.jpg", timeout=10,
+     expect="record += +\\| 0x00 00 00 00 +\\| \\.\\.\\.\\. +$")
 
 xmp_short = b"\xff\xe1" + struct.pack(">H", 30) + b"http://ns.adobe.com/xap/1.0/\x00" + b"<x/>"
-case("H3_xmp_short", "H3", "decode", write("h3_xmp_short.jpg", insert_after_app0(c444, xmp_short)), timeout=10)
+# The segment ends before the identifier's NUL, which is where the next marker
+# should be: 0x14 + 2 + 30
+case("H3_xmp_short", "H3", "decode", write("h3_xmp_short.jpg", insert_after_app0(c444, xmp_short)), timeout=10,
+     expect="^ERROR: Expected marker 0xFF, got 0x00 @ offset 0x00000034\\. ")
 
 avi = b"RIFF" + struct.pack("<I", 100) + b"AVI " + b"JUNK" + struct.pack("<I", 0xFFFFFFF8) + bytes(64)
-case("H4_avi_loop", "H4", "decode", write("h4_avi_loop.avi", avi), timeout=10)
+# (20 + 0xFFFFFFF8 is 12 in 32 bits)
+case("H4_avi_loop", "H4", "decode", write("h4_avi_loop.avi", avi), timeout=10,
+     expect="^  ERROR: AVI chunk size points backwards\\. Stopping AVI parsing\\.$")
 
 # H5: EXIF IFD1 thumbnail (compression 6) pointing at an SOS with no end marker
 head, rest = after_app0(c444)
@@ -247,34 +332,55 @@ trailer_pos = len(head) + app1_len + len(rest)
 struct.pack_into("<I", tiff, ifd1 + 2 + 12 + 8, trailer_pos - tiff_start)
 trailer = b"\xff\xd8\xff\xda" + bytes(64)
 case("H5_thumb_sos", "H5", "decode",
-     write("h5_thumb_sos.jpg", head + seg(0xE1, b"Exif\x00\x00" + bytes(tiff)) + rest + trailer), timeout=10)
+     write("h5_thumb_sos.jpg", head + seg(0xE1, b"Exif\x00\x00" + bytes(tiff)) + rest + trailer), timeout=10,
+     expect="^ERROR: Thumbnail scan data runs past the thumbnail length \\(1000 bytes\\)$")
+# Only 68 bytes are left, so the file's end stops that skip before the length
+# does. Here only the file's end can: without that check it ran 4 billion times.
+# (The message names the length either way.)
+struct.pack_into("<I", tiff, ifd1 + 2 + 2 * 12 + 8, 0xFFFFFF00)
+case("H5_thumb_sos_eof", "H5", "decode",
+     write("h5_thumb_sos_eof.jpg", head + seg(0xE1, b"Exif\x00\x00" + bytes(tiff)) + rest + trailer), timeout=10,
+     expect="^ERROR: Thumbnail scan data runs past the thumbnail length \\(4294967040 bytes\\)$")
 
 # H6: JFIF APP0 declaring a 255x255 thumbnail with no thumbnail data
 app0 = seg(0xE0, b"JFIF\x00" + bytes([1, 1, 0]) + struct.pack(">HH", 1, 1) + bytes([255, 255]))
 _, rest = after_app0(c444)
-case("H6_app0_thumb", "H6", "decode", write("h6_app0_thumb.jpg", b"\xff\xd8" + app0 + rest), timeout=10)
+# (255 x 255 x 3 bytes)
+case("H6_app0_thumb", "H6", "decode", write("h6_app0_thumb.jpg", b"\xff\xd8" + app0 + rest), timeout=10,
+     expect="^  ERROR: Thumbnail \\(195075 bytes\\) larger than the rest of the APP0 segment\\. Not shown\\.$")
 
+# The block ends right after the count: no guide is in it
 case("H7_psd_guides", "H7", "decode",
-     write("h7_psd_guides.jpg", app13_only(bim(0x0408, struct.pack(">IIII", 1, 576, 576, 0xFFFFFFFF)))), timeout=10)
+     write("h7_psd_guides.jpg", app13_only(bim(0x0408, struct.pack(">IIII", 1, 576, 576, 0xFFFFFFFF)))), timeout=10,
+     expect="^        Number of Guide Resources +=  ?4294967295 $", forbid="Guide #")
+# 4 bytes are left in the APP13: two groups of 2 bytes
 case("H7_psd_layer_groups", "H7", "decode",
-     write("h7_psd_layer_groups.jpg", app13_only(bim(0x0402, b"", 0x7FFFFFFE))), timeout=10)
+     write("h7_psd_layer_groups.jpg", app13_only(bim(0x0402, b"", 0x7FFFFFFE))), timeout=10,
+     expect="^ERROR: 8BIM length \\[0x7ffffffe\\] runs past the end of its segment; using \\[0x00000004\\]$")
+case("H7_psd_layer_groups_two", "H7", "decode", "h7_psd_layer_groups.jpg", timeout=10,
+     expect="^        Layer #1: +$", forbid="Layer #2:")
 
 
 def iptc(rec, ds, data):
     return bytes([0x1C, rec, ds]) + struct.pack(">H", len(data)) + data
 
 
+# A number of 3 bytes is shown as its bytes
 case("H8_iptc_num3", "H8", "decode",
-     write("h8_iptc_num3.jpg", app13_only(bim(0x0404, iptc(2, 0, b"\x00\x00\x04")))), timeout=10)
+     write("h8_iptc_num3.jpg", app13_only(bim(0x0404, iptc(2, 0, b"\x00\x00\x04")))), timeout=10,
+     expect="^        IPTC \\[002:000\\] Record Version += \\[0x00 0x00 0x04 \\]$")
 
 # --- U: GUI -------------------------------------------------------------------
 case("U1_second_file", "U1", "gui", ["ok_444.jpg", "ok_420.jpg"], timeout=30,
      expect="file=ok_420.jpg scan=1")
-case("U1_gray_then_color", "U1", "gui", ["ok_gray.jpg", "ok_444.jpg"], "--mouse", timeout=30,
-     expect="harness: done")
-case("U2_undecodable_after_decoded", "U2", "gui", ["ok_444.jpg", "ok_progressive.jpg"], "--mouse", timeout=30,
-     expect="harness: done")
-case("U3_mouse_small_image", "U3", "gui", ["ok_small.jpg"], "--mouse", timeout=30, expect="harness: done")
+# "done" is printed after the last file's mouse moves; each file's line before
+# them, so it shows the file that the mouse then went over was decoded (or not)
+for cid, finding, names, last, scan in (("U1_gray_then_color", "U1", ["ok_gray.jpg", "ok_444.jpg"], "ok_444", 1),
+                                        ("U2_undecodable_after_decoded", "U2", ["ok_444.jpg", "ok_progressive.jpg"],
+                                         "ok_progressive", 0),
+                                        ("U3_mouse_small_image", "U3", ["ok_small.jpg"], "ok_small", 1)):
+    case(cid, finding, "gui", names, "--mouse", timeout=30, expect="^harness: done$")
+    case(cid + "_file", finding, "gui", names, "--mouse", timeout=30, expect=f"^harness: file={last}\\.jpg scan={scan}$")
 
 
 # --- R: report output (port regressions) --------------------------------------
@@ -401,7 +507,7 @@ case("R4_photoshop_ostype", "R4", "decode", name, expect="OSType key += \"?TEXT"
 
 url = b"http://example.com/abc"
 case("R19_hexdump_header", "R19", "decode", write("r_ps_url.jpg", app13_only(bim(0x040B, url))),
-     forbid="s =$")
+     expect="^        URL +=$", forbid="s =$")
 
 # Canon makernote saying the file came from a RAW converter (edit assessment)
 bo = ">"
@@ -567,6 +673,12 @@ noise444 = jpeg(noise, quality=90, subsampling=0)
 dummy_ac = seg(0xC4, bytes([0x10]) + bytes([0] * 7 + [255] + [0] * 8) + bytes(range(255)))
 case("R14_dht_redefined", "R14", "decode", write("r14_dht_redefined.jpg", insert_after_app0(noise444, dummy_ac)),
      "--ac", expect=DECODED, forbid="ERROR")
+# The table is defined again before the scan uses it, so the image is the
+# same as without the first definition. (The MD5 is that of the file without
+# it, r14_dht_once.jpg: take it again from there if the decoder's output changes.)
+R14_MD5 = "^harness: preview md5=67bc492e5cba17e92df035c5e2f48f32$"
+case("R14_dht_redefined_same", "R14", "decode", "r14_dht_redefined.jpg", "--ac --preview-md5", expect=R14_MD5)
+case("R14_dht_once", "R14", "decode", write("r14_dht_once.jpg", noise444), "--ac --preview-md5", expect=R14_MD5)
 
 # R15: Y 4x1, Cb/Cr 2x1. Cb is high in the left half of each 32-pixel MCU
 # (blue) and low in the right half (yellow). The second chroma block was drawn
@@ -734,14 +846,17 @@ def dc_only_scans(width, height, levels, scans, ids=(1, 2, 3)):
 # the Y map existed, so choosing an image channel read a null chroma map.
 case("F1_later_scan_state", "F1", "gui",
      write("f1_scan1_then_scan3.jpg", dc_only_scans(16, 8, (150, 100, 200), [[0], [0, 1, 2]])),
-     "--cycle-channels", timeout=60, expect="harness: done")
+     "--cycle-channels", timeout=60, expect="^harness: done$")
+case("F1_later_scan_state_file", "F1", "gui", "f1_scan1_then_scan3.jpg", "--cycle-channels", timeout=60,
+     expect="^harness: file=f1_scan1_then_scan3\\.jpg scan=1$")
 
 # F2: Photoshop descriptor whose key length (0xFFFFFFF8) wrapped the cursor back
 # 8 bytes, so the same item repeated for its 2^28 declared items
 desc = uni("") + lstr4(b"null") + struct.pack(">I", 0x10000000) + struct.pack(">I", 0xFFFFFFF8) + bytes(16)
 case("F2_ps_string_wrap", "F2", "decode",
      write("f2_desc_wrap.jpg", app13_only(bim(0x041A, struct.pack(">II", 7, 16) + desc))), timeout=10,
-     expect="harness: decoded=")
+     expect="^ERROR: String of length 4294967288 at \\[0x0000003c\\] runs past the end of its 8BIM resource, "
+     "at \\[0x0000004c\\]\\. Stopping\\.$")
 
 
 # F2 (second review): the limit stopped at the resource's end. A descriptor cut
@@ -755,13 +870,16 @@ def ps_after_resource(name, inside, after):
 
 case("F2_ps_classid_after_end", "F2", "decode",
      ps_after_resource("f2_classid_after.jpg", uni(""), struct.pack(">I", 40000) + b"A" * 40000), timeout=10,
-     expect="harness: decoded=", forbid="AAAAAAAA")
+     expect="^ERROR: String at \\[0x0000002c\\] runs past the end of its 8BIM resource, at \\[0x0000002c\\]\\. "
+     "Stopping\\.$", forbid="AAAAAAAA")
 case("F2_ps_fixed_after_end", "F2", "decode",
      ps_after_resource("f2_fixed_after.jpg", uni("") + struct.pack(">I", 0), b"ZZZZ" + bytes(8)), timeout=10,
-     expect="harness: decoded=", forbid="ZZZZ")
+     expect="^ERROR: String at \\[0x00000030\\] runs past the end of its 8BIM resource, at \\[0x00000030\\]\\. "
+     "Stopping\\.$", forbid="ZZZZ")
 case("F2_ps_name_after_end", "F2", "decode",
      ps_after_resource("f2_name_after.jpg", struct.pack(">I", 200), ("B" * 200).encode("utf-16-be")), timeout=10,
-     expect="harness: decoded=", forbid="BBBBBBBB")
+     expect="^ERROR: Unicode string of length 200 at \\[0x0000002c\\] runs past the end of its 8BIM resource, "
+     "at \\[0x0000002c\\]\\. Stopping\\.$", forbid="BBBBBBBB")
 
 
 # F3: RGB JPEGs (Adobe APP14 transform 0, or no JFIF/APP14 and component IDs
@@ -811,7 +929,7 @@ case("F4_failed_open_report", "F4", "gui", ["f4_no_such_file.jpg"], "--log", tim
 # so the white 6000x6000 image's only bar wasn't drawn
 case("F5_histo_bar_overflow", "F5", "decode",
      write("f5_white_6000.jpg", jpeg(Image.new("L", (6000, 6000), 255), quality=90)), "--histo", timeout=240,
-     expect="histogram bars rgb=[1-9][0-9]* ")
+     expect="^harness: histogram bars rgb=180 y=-1$")
 
 # F6: 9x8 grey image, 8 black columns and 1 white one: 28 on average, but the
 # statistics included the 7 padding columns (white, copied by the encoder)
@@ -871,8 +989,10 @@ case("S4_config_dialog_save", "S4", "settings", "-",
      expect="dialog result=1 maxErrors=7 autoReprocess=1 coachIdct=1 stored=7")
 case("S5_empty_file", "S5", "gui", ["ok_444.jpg", write("s_empty.jpg", b"")], "--log", timeout=30,
      expect="File length is zero")
+# (The driver prints that line either way; without the check, opening "" failed
+# with a message box)
 case("S5_reprocess_no_file", "S5", "gui", ["ok_444.jpg"], "--reprocess-first", timeout=30,
-     expect="harness: done")
+     expect="^harness: reprocessed with no file$", forbid="^harness: message box")
 case("S5_status_messages", "S5", "decode", "ok_444.jpg", "--ac", expect="status=[1-9]")
 
 # --- L: leaks -------------------------------------------------------------------
@@ -1880,7 +2000,9 @@ batch_case("BP_logs", BP_RUN, f"harness: batch 1 files: {BP_FILES}$")
 batch_case("BP_subfolders", "in=in,out=out,subfolders,ok", f"harness: batch 1 files: {BP_SUB_FILES}$")
 batch_case("BP_order", "in=in,out=out,subfolders,ok",
            "^  Batch processing file      5 of      7 \\( 71\\.43 %\\): \\[<batch>/in/photos\\.jpg/e\\.jpg\\]$")
-batch_case("BP_hidden_left_out", "in=in,out=out,subfolders,all,ok", "harness: batch 1 wrote new=", forbid="hidden")
+# 9 logs and 7 JPEGs (the 2 hidden files would add a log and a JPEG each)
+batch_case("BP_hidden_left_out", "in=in,out=out,subfolders,all,ok", "harness: batch 1 wrote new=16 changed=0$",
+           forbid="hidden")
 batch_case("BP_link_not_followed", "in=in,out=out,subfolders,ok", "harness: batch 1 wrote new=7 ", forbid="/loop")
 batch_case("BP_logs_are_reports", "in=in,out=out,subfolders,ok", "harness: batch compared 7 same=7$",
            extra="--batch-compare")
@@ -4862,6 +4984,434 @@ case("SF_batch_cancel", "SF", "batch", ["sf_batch"], SF_BATCH_OFF + " --batch-ca
      expect="^harness: cat:   MD5: " + SF_CANCELED + "$")
 case("SF_batch_stops", "SF", "batch", ["sf_batch"], SF_BATCH_OFF, timeout=60,
      expect="^  Batch processing stopped after 1 of 3 files$")
+
+# --- The end of a file of 4 GiB - 1 bytes ---------------------------------------------------
+# The largest file analyzed has positions to 0xFFFFFFFE, so moving past its end
+# wrapped the 32-bit position around to the start of the file: the JPEG there
+# was decoded again, forever if it reached the end again. Each file here is
+# sparse, and all but two are decoded from near the end, so they take no time.
+WR_SIZE = 0xFFFFFFFF
+WR_JUNK_START = b"\x07" * 200
+WR_EOF = "^ *ERROR: Early EOF - file may be missing EOI$"
+
+
+def wr_file(name, tail, head=b"", size=WR_SIZE):
+    """A sparse file with head at its start and tail at its end; also where the tail starts."""
+    start = size - len(tail)
+    with open(files_dir / name, "wb") as f:
+        f.write(head)
+        f.seek(start)
+        f.write(tail)
+    return name, start
+
+
+def wr_case(cid, made, expect=WR_EOF, forbid="-"):
+    name, start = made
+    case(cid, "WR", "decode", name, f"--start {start}", timeout=20, expect=expect, forbid=forbid)
+
+
+# A scan with no EOI, with a whole JPEG at the start of the file
+wr_scan = wr_file("wr_scan.bin", lm444[:lm_cut], c420)
+wr_case("WR_scan", wr_scan, forbid="OFFSET: 0x00000000$")
+wr_case("WR_scan_where", wr_scan, "^ *ERROR: Ran out of buffer before EOI during phase 1 of Scan decode @ 0x100000000$")
+wr_case("WR_scan_less", wr_file("wr_scan_less.bin", lm444[:lm_cut], c420, WR_SIZE - 1),
+        "^ *ERROR: Ran out of buffer before EOI during phase 1 of Scan decode @ 0xffffffff$")
+wr_case("WR_scan_less_eof", wr_file("wr_scan_less.bin", lm444[:lm_cut], c420, WR_SIZE - 1),
+        forbid="OFFSET: 0x00000000$")
+# A segment whose length lands on the file's first byte
+wr_case("WR_segment", wr_file("wr_segment.bin", b"\xff\xd8\xff\xe4\x00\x13" + bytes(16), c420),
+        forbid="harness: decoded=1")
+# A segment that is checked against its length (DRI), cut short
+wr_case("WR_segment_checked", wr_file("wr_checked.bin", b"\xff\xd8\xff\xdd\x00\x05\x00", WR_JUNK_START),
+        forbid="Marker length (longer|shorter) than expected")
+# The same in a file 1000 bytes smaller: a length can still carry it past 2^32
+wr_case("WR_segment_less", wr_file("wr_segment_less.bin", b"\xff\xd8\xff\xe4\x03\xfb" + bytes(16), c420,
+                                   WR_SIZE - 1000), forbid="harness: decoded=1")
+# And one whose length reaches past the end: it was said to be too short
+wr_case("WR_segment_past", wr_file("wr_past.bin", b"\xff\xd8\xff\xdd\x00\x20\x00\x01", WR_JUNK_START),
+        "^  WARNING: Marker length longer than expected$", forbid="Marker length shorter than expected")
+# Table loops that went on through the start of the file
+WR_JUNK = WR_JUNK_START + b"\xff\xd9"
+wr_case("WR_dht", wr_file("wr_dht.bin", b"\xff\xd8\xff\xc4\x00\x05\x00\x00\x00", WR_JUNK),
+        forbid="Invalid DHT Dest ID")
+wr_case("WR_dqt", wr_file("wr_dqt.bin", b"\xff\xd8\xff\xdb\x00\x05\x00\x00\x00", WR_JUNK),
+        forbid="DQT Destination ID <Tq> value too large")
+# The search for a marker after a comment with a length of 0
+wr_case("WR_comment", wr_file("wr_comment.bin", b"\xff\xd8\xff\xfe\x00", WR_JUNK),
+        forbid="Skipped 20[01] bytes")
+# A scan header cut short: its scan was read from the start of the file
+wr_sos = marker_pos(c444, 0xDA)
+wr_case("WR_scan_header", wr_file("wr_header.bin", c444[:wr_sos + 13], c444[wr_sos + 14:]),
+        forbid="Decoding SCAN Data")
+# An IPTC field's length
+wr_app13 = b"\xff\xd8" + seg(0xED, b"Photoshop 3.0\x00" + bim(0x0404, b"\x1c\x02\x78\xff\xffab"))
+wr_next = WR_SIZE - len(wr_app13) + wr_app13.index(b"\x1c\x02\x78") + 5 + 0xFFFF - 2**32
+wr_case("WR_iptc", wr_file("wr_iptc.bin", wr_app13, bytes(wr_next) + iptc(2, 120, b"WRAPPED")),
+        "IPTC \\[002:120\\] Caption", forbid="WRAPPED")
+
+
+# An Exif thumbnail at the end of the file, of a JPEG at its start
+def wr_thumb(name, tail):
+    com = b"\xff\xd8" + seg(0xFE, b"\x07" * 100)
+    base = len(com) + 10  # the TIFF header, after APP1's marker, length and "Exif\0\0"
+    ifd0 = tiff_ifd("<", 8, [entry(0x0112, shorts("<", 1))], next_off=0x40)
+    ifd1 = tiff_ifd("<", 0x40, [entry(0x0103, shorts("<", 6)),
+                                entry(0x0201, longs("<", WR_SIZE - len(tail) - base)),
+                                entry(0x0202, longs("<", 0xFFFF))])
+    main = com + app1_exif(tiff("<", {8: ifd0, 0x40: ifd1})) + c420[2:]
+    return wr_file(name, tail, main)[0]
+
+
+WR_THUMB_EOF = "^ *ERROR: EXIF thumbnail runs past the end of the file$"
+case("WR_thumb", "WR", "decode", wr_thumb("wr_thumb.bin", b"\xff\xd8\xff\xe4\x00\x13" + bytes(16)),
+     expect=WR_THUMB_EOF, forbid="Embedded Thumb Marker: SOF")
+case("WR_thumb_dqt", "WR", "decode", wr_thumb("wr_thumb_dqt.bin", b"\xff\xd8\xff\xdb\x00\x05\x00\x00\x00"),
+     expect=WR_THUMB_EOF, forbid="nDqtQuantDestId_Tq = 7")
+# The whole of such a file, which never finished (some 20 seconds now): a
+# baseline one, and a progressive one opened in the window
+case("WR_whole", "WR", "decode", wr_file("wr_whole.jpg", b"\x00", lm444[:lm_cut])[0], timeout=120, expect=WR_EOF)
+wr_whole = (b"\xff\xd8" + seg(0xDB, b"\x00" + b"\x01" * 64)
+            + seg(0xC2, struct.pack(">BHHB", 8, 64, 64, 1) + b"\x01\x11\x00")
+            + seg(0xDA, b"\x01\x01\x00\x00\x00\x00"))
+case("WR_gui_whole", "WR", "gui", wr_file("wr_progressive.jpg", b"\x00", wr_whole)[0], "--log", timeout=150,
+     expect=WR_EOF, forbid="Scan decode @ 0x00000000")
+
+# --- The compression figures of large images ------------------------------------------------
+# Products of 32 bits: the ratio's went negative over 89.5 megapixels in colour
+# (2^31 / 24), and wrong again over 179 (2^32 / 24); both figures' scan bits
+# wrapped at 512 MiB. The images are made of one-bit codes of zeros, so the
+# files are sparse.
+
+
+def cs_file(name, w, h, comps, ac=0x00, codelen=1):
+    counts = bytes(codelen - 1) + b"\x01" + bytes(16 - codelen)
+    head = b"\xff\xd8" + seg(0xDB, b"\x00" + b"\x01" * 64)
+    head += seg(0xC0, struct.pack(">BHHB", 8, h, w, comps)
+                + b"".join(bytes((c + 1, 0x11, 0)) for c in range(comps)))
+    head += seg(0xC4, b"\x00" + counts + b"\x00") + seg(0xC4, b"\x10" + counts + bytes((ac,)))
+    head += seg(0xDA, bytes((comps,)) + b"".join(bytes((c + 1, 0)) for c in range(comps)) + b"\x00\x3f\x00")
+    acs = 1 if ac == 0 else 63  # an EOB, or every coefficient
+    bits = (w // 8) * (h // 8) * comps * (codelen + acs * (codelen + (ac & 0x0F)))
+    assert bits % 8 == 0
+    with open(files_dir / name, "wb") as f:
+        f.write(head)
+        f.seek(len(head) + bits // 8)
+        f.write(b"\xff\xd9")
+    return name
+
+
+for cs_id, cs_w, cs_h in (("under_89mp", 9440, 9440), ("over_89mp", 9472, 9472), ("108mp", 12000, 9000),
+                          ("over_179mp", 13504, 13312)):
+    case(f"CS_ratio_{cs_id}", "CS", "decode", cs_file(f"cs_{cs_id}.jpg", cs_w, cs_h, 3), timeout=60,
+         expect=r"^ +Compression Ratio: 256\.00:1$")
+# 513 MiB of scan, 1654 bits a block: its bits per pixel, and its ratio
+cs_512 = cs_file("cs_scan_512mib.jpg", 12896, 12896, 1, ac=0x0A, codelen=16)
+case("CS_scan_512mib", "CS", "decode", cs_512, timeout=120, expect=r"^ +Bits per pixel: +25\.84:1$")
+case("CS_scan_512mib_ratio", "CS", "decode", cs_512, timeout=120, expect=r"^ +Compression Ratio: +0\.31:1$")
+
+# --- AVIs that made the report run away ------------------------------------------------------
+# Zeros where chunks should be (a recording cut short, padding, preallocated
+# space) were a chunk every 8 bytes: 131,000 lines and 320 MB a MiB. So were
+# empty and junk chunks, and IDIT's and ISFT's text ran to the end of the file.
+AV_HDR = chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56))) + chunk(b"LIST", strl)
+AV_AT = 12 + len(AV_HDR)  # where what follows the headers starts
+AV_IDIT = chunk(b"IDIT", b"THU OCT 13 12:00:00 2016\n\x00")
+AV_FOUND = "Timestamp\\] = \\[THU OCT 13 12:00:00 2016\\]$"
+AV_MANY = "^  ERROR: More than 4096 AVI chunks\\. Stopping AVI parsing\\.$"
+AV_BLANK = "^  $"  # a chunk with no name
+
+
+def av_file(name, body=b"", size=None, hdr=AV_HDR):
+    """An AVI of hdr and body, zeros on to size (sparse)."""
+    body = hdr + body
+    with open(files_dir / name, "wb") as f:
+        f.write(b"RIFF" + struct.pack("<I", len(body) + 4) + b"AVI " + body)
+        if size:
+            f.truncate(size)
+    return name
+
+
+def av_stop(at):
+    return (f"^  NOTE: Zeros in place of AVI chunks at 0x{at:08x} \\(over 1 MiB in all\\)\\. "
+            "Stopping AVI parsing\\.$")
+
+
+def av_case(cid, name, expect, forbid="-"):
+    case(cid, "AV", "decode", name, timeout=20, expect=expect, forbid=forbid)
+
+
+# Nothing but zeros after the headers
+av_case("AV_zeros", av_file("av_zeros.avi", size=2 << 20), av_stop(AV_AT), AV_BLANK)
+av_case("AV_zeros_huge", av_file("av_zeros_huge.avi", size=WR_SIZE), av_stop(AV_AT), AV_BLANK)
+case("AV_gui_zeros", "AV", "gui", "av_zeros.avi", "--log", timeout=20, expect=av_stop(AV_AT), forbid=AV_BLANK)
+# Padding: skipped in one line, and the chunks after it are still found
+av_case("AV_padding", av_file("av_pad.avi", bytes(24) + AV_IDIT),
+        f"^  \\(24 bytes of zeros at 0x{AV_AT:08x}\\)$", AV_BLANK)
+av_case("AV_padding_after", "av_pad.avi", AV_FOUND, "Stopping AVI parsing")
+av_case("AV_padding_stream", av_file("av_pad_strl.avi", bytes(65536) + chunk(b"LIST", strl), hdr=b""),
+        "^  AVI is MotionJPEG$", AV_BLANK)
+av_case("AV_padding_most", av_file("av_pad_most.avi", bytes(1 << 20) + AV_IDIT), AV_FOUND, "Stopping AVI parsing")
+av_case("AV_padding_over", av_file("av_pad_over.avi", bytes((1 << 20) + 8) + AV_IDIT), av_stop(AV_AT), AV_FOUND)
+av_two = chunk(b"JUNK", b"")
+av_case("AV_padding_in_all", av_file("av_pad_all.avi", bytes(600 << 10) + av_two + bytes(600 << 10) + AV_IDIT),
+        av_stop(AV_AT + (600 << 10) + len(av_two)), AV_FOUND)
+# Not padding: no name, but a size
+av_case("AV_unnamed", av_file("av_unnamed.avi", bytes(4) + struct.pack("<I", 4) + b"abcd" + AV_IDIT),
+        AV_FOUND, "bytes of zeros")
+# A last few bytes, which were read past the end of the file
+av_case("AV_tail", av_file("av_tail.avi", bytes(3)), f"^  \\(3 bytes of zeros at 0x{AV_AT:08x}\\)$", AV_BLANK)
+av_last = WR_SIZE - 13
+av_case("AV_tail_huge", av_file("av_tail_huge.avi", b"JUNK" + struct.pack("<I", av_last - AV_AT - 8), WR_SIZE),
+        f"^  \\(13 bytes of zeros at 0x{av_last:08x}\\)$", "points backwards")
+av_frames = chunk(b"LIST", b"movi" + chunk(b"00dc", c420) * 20)
+case("AV_tail_frames", "AV", "export-jpeg", av_file("av_tail_frames.avi", av_frames + bytes(3)), "--all", timeout=20,
+     expect=exported(*[c420] * 20))
+case("AV_zeros_frames", "AV", "export-jpeg", av_file("av_zeros_frames.avi", av_frames, size=1 << 20), "--all",
+     timeout=20, expect=exported(*[c420] * 20))
+# Stray bytes after the last chunk, or a last chunk cut short, were read past
+# the end of the file. That left the buffer marked bad, and the frames in the
+# file's last 16 KB then stopped at once ("Ran out of buffer"): 5 of these 20
+# were exported.
+for av_id, av_end in (("bytes", b"ab"), ("idit_cut", b"IDIT" + struct.pack("<I", 100) + b"THU"),
+                      ("list_cut", b"LIST" + struct.pack("<I", 40) + b"INFOISFT" + struct.pack("<I", 20) + b"ab")):
+    case(f"AV_stray_{av_id}", "AV", "export-jpeg", av_file(f"av_stray_{av_id}.avi", av_frames + av_end), "--all",
+         timeout=20, expect=exported(*[c420] * 20))
+av_last_frame = AV_AT + 12 + 19 * len(chunk(b"00dc", c420)) + 8
+# (The frame's EOI is found, where it is)
+case("AV_stray_last_frame", "AV", "decode", "av_stray_bytes.avi", f"--start {av_last_frame}", timeout=20,
+     expect=f"^  OFFSET: 0x{av_last_frame + len(c420) - 2:08x}$",
+     forbid="Ran out of buffer")
+# Chunks by the thousand
+av_empty = chunk(b"JUNK", b"")
+av_case("AV_chunks", av_file("av_chunks.avi", av_empty * 20000), AV_MANY)
+av_case("AV_chunks_kept", "av_chunks.avi", "^  AVI is MotionJPEG$", "AVI is not MotionJPEG")
+av_case("AV_chunks_most", av_file("av_chunks_most.avi", av_empty * 4094), "^  AVI is MotionJPEG$",
+        "More than 4096 AVI chunks")
+av_case("AV_chunks_over", av_file("av_chunks_over.avi", av_empty * 4095), AV_MANY)
+av_case("AV_chunks_junk", av_file("av_chunks_junk.avi", (b"\x01" + bytes(7)) * 20000), AV_MANY)
+av_case("AV_chunks_lists", av_file("av_chunks_lists.avi", chunk(b"LIST", b"xxxx") * 20000), AV_MANY)
+# Text as long as the file
+av_1024 = "\\[" + "A{255}" * 4 + "A{4}\\]$"
+av_case("AV_idit_long", av_file("av_idit.avi", b"IDIT" + struct.pack("<I", 0xFFFFFFF0) + b"A" * 4096),
+        "Timestamp\\] = " + av_1024)
+av_case("AV_isft_long", av_file("av_isft.avi", chunk(b"LIST", b"INFO" + chunk(b"ISFT", b"A" * 4096))),
+        "Software\\] = " + av_1024)
+# ISFT's text was read for as long as the list holding it, from the text: past
+# its field (here into the next field's name), and past the list
+av_case("AV_isft_field", av_file("av_isft_field.avi", chunk(b"LIST", b"INFO" + chunk(b"ISFT", b"AAAAAA")
+                                                            + chunk(b"ICRD", b"2016-10-13\x00"))),
+        "Software\\] = \\[AAAAAA\\]$")
+av_case("AV_isft_list", av_file("av_isft_list.avi", b"LIST" + struct.pack("<I", 16) + b"INFOISFT"
+                                + struct.pack("<I", 100) + b"AAAA" + chunk(b"JUNK", b"BBBB")),
+        "Software\\] = \\[AAAA\\]$")
+
+
+# --- PE: a read past the end of the file before the scan ----------------------
+# An EXIF value just past the end left the buffer marked bad, as the AVIs'
+# stray bytes did (AV_stray_*). In a file under 16 KB nothing read after it
+# cleared that, and the scan stopped at once: "Ran out of buffer", then a wrong
+# marker error, no EOI, all of the file "after EOF", and Export JPEG refused.
+def pe_file(name, entries_at, base=c444):
+    """base with an EXIF IFD0 of entries_at(eof), eof being the file's end as a TIFF offset."""
+    made = lambda eof: insert_after_app0(base, app1_exif(tiff("<", {8: tiff_ifd("<", 8, entries_at(eof))})))
+    eof = len(made(0x1000)) - (len(after_app0(base)[0]) + 10)
+    return write(name, made(eof))
+
+
+# (The EOI is found where it is, the file's last 2 bytes. The image decoder
+# reads the scan apart from this and reaches it even with the bug.)
+PE_BAD = "Ran out of buffer|Expected marker|Data exists after EOF"
+for pe_id, pe_entry in (("text_past", lambda e: (0x010E, 2, 20, struct.pack("<I", e + 10))),
+                        ("text_across", lambda e: (0x010E, 2, 20, struct.pack("<I", e - 5))),
+                        ("rational_past", lambda e: (0x011A, 5, 1, struct.pack("<I", e + 10))),
+                        ("ifd_past", lambda e: (0x8769, 4, 1, struct.pack("<I", e + 10)))):
+    pe_name = pe_file(f"pe_{pe_id}.jpg", lambda e, f=pe_entry: [f(e)])
+    pe_eoi = len((files_dir / pe_name).read_bytes()) - 2
+    case(f"PE_{pe_id}", "PE", "decode", pe_name,
+         expect=f"^  OFFSET: 0x{pe_eoi:08x}$", forbid=PE_BAD)
+case("PE_export", "PE", "export-jpeg", "pe_text_past.jpg",
+     expect=exported((files_dir / "pe_text_past.jpg").read_bytes()))
+# A scan that does run past the end still says so, where it ends (one past the
+# last byte, as with the EXIF value inside the file)
+pe_cut = c444[:-300]
+case("PE_scan_cut", "PE", "decode",
+     pe_file("pe_scan_cut.jpg", lambda e: [(0x010E, 2, 20, struct.pack("<I", e + 10))], pe_cut),
+     expect="^ *ERROR: Ran out of buffer before EOI during phase 1 of Scan decode @ 0x%08x$" % (
+         len((files_dir / "pe_scan_cut.jpg").read_bytes()) + 1))
+
+
+# --- MP: fill bytes before a marker, on to the end of the file -----------------
+# They were read one byte past the end, and the 0 there taken for a marker
+# ("Unknown marker [0xFF00]") in place of the file's end. At the end of the
+# largest file that also passed 2^32, so in Relaxed Parsing the marker's
+# length was read from the file's start.
+MP_EOF = "^ *ERROR: Early EOF - file may be missing EOI$"
+MP_NOT = "Unknown marker|Header length"
+mp_head = after_app0(c444)[0]
+case("MP_eof_one", "MP", "decode", write("mp_eof_one.jpg", mp_head + b"\xff"), expect=MP_EOF, forbid=MP_NOT)
+case("MP_eof_pads", "MP", "decode", write("mp_eof_pads.jpg", mp_head + b"\xff" * 4), expect=MP_EOF, forbid=MP_NOT)
+case("MP_eof_pads_count", "MP", "decode", "mp_eof_pads.jpg", expect="^\\*\\*\\* Skipped 3 marker pad bytes \\*\\*\\*$")
+case("MP_eof_relaxed", "MP", "decode", "mp_eof_pads.jpg", "--relaxed", expect=MP_EOF, forbid=MP_NOT)
+mp_wrap, mp_at = wr_file("mp_wrap.bin", mp_head + b"\xff" * 4, c420)
+for mp_id, mp_flags in (("wrap", ""), ("wrap_relaxed", " --relaxed")):
+    case(f"MP_{mp_id}", "MP", "decode", mp_wrap, f"--start {mp_at}{mp_flags}", expect=MP_EOF, forbid=MP_NOT)
+
+
+# --- RA: reports that ran away ------------------------------------------------
+# A count or length from the file that nothing compared with its segment or
+# resource, so a few bytes gave tens of thousands of report lines (taking
+# seconds each). Each now stops at the end of what holds it, or of the file
+# if that comes first, and says so. --count-lines prints the report's length:
+# these stay under 1,000 lines (the DHT one, whose tables are listed, under
+# 10,000); before, several ran past their time limit.
+RA_SMALL = "^harness: report lines=[0-9]{1,3}$"
+
+
+def ra_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "RA", "decode", name, (flags + " --count-lines").strip(), timeout=timeout, expect=expect, forbid=forbid)
+
+
+def ra_past(what, at, end, container="8BIM resource"):
+    return f"^ERROR: {what} at \\[0x{at:08x}\\] runs past the end of its {container}, at \\[0x{end:08x}\\]\\. Stopping\\.$"
+
+
+# An APP13 of app13_only(): SOI, marker, length, "Photoshop 3.0\0", then the
+# first resource's 12-byte header, so its data starts at 0x20
+RA_PS = 2 + 4 + 14 + 12
+# Photoshop Layer Select ID: a 16-bit count of 4-byte IDs
+ra_case("RA_layersel_lines", write("ra_layersel.jpg", app13_only(bim(0x042D, b"\xff\xff"))), RA_SMALL)
+ra_case("RA_layersel", "ra_layersel.jpg", ra_past("Layer ID", RA_PS + 2, RA_PS + 2), forbid="Layer ID +=")
+# 3 IDs said, 2 there and 2 bytes: the third would take 2 of app13_only()'s zeros (65536)
+ra_sel = struct.pack(">H", 3) + struct.pack(">II", 7, 9) + b"\x00\x01"
+ra_case("RA_layersel_part", write("ra_layersel_part.jpg", app13_only(bim(0x042D, ra_sel))),
+        ra_past("Layer ID", RA_PS + 10, RA_PS + 12))
+ra_case("RA_layersel_part_ids", "ra_layersel_part.jpg", "^ +Layer ID += 9 $", forbid="Layer ID += 65536")
+
+# IPTC: a field's 16-bit length. "Hi" is all of the caption there is; the
+# Global Angle resource after it is still read
+ra_iptc = b"\x1c\x02\x78" + struct.pack(">H", 100) + b"Hi"
+RA_ANGLE = bim(0x040D, struct.pack(">I", 30))
+ra_case("RA_iptc", write("ra_iptc.jpg", app13_only(bim(0x0404, ra_iptc) + RA_ANGLE)),
+        f"^ERROR: IPTC field length \\[100\\] at \\[0x{RA_PS + 5:08x}\\] runs past the end of its 8BIM resource, "
+        f"at \\[0x{RA_PS + 7:08x}\\]; using \\[2\\]$")
+ra_case("RA_iptc_value", "ra_iptc.jpg", '^ +IPTC \\[002:120\\] Caption/Abstract += "Hi"$')
+ra_case("RA_iptc_next", "ra_iptc.jpg", "^ +Global Angle += 30 degrees$")
+# 40 resources of 6 bytes, each claiming 65,535 (one took 0.45 s)
+ra_case("RA_iptc_many", write("ra_iptc_many.jpg", app13_only(bim(0x0404, b"\x1c\x02\x78\xff\xffA") * 40)),
+        '^ +IPTC \\[002:120\\] Caption/Abstract += "A"$', forbid='Caption/Abstract += "[^"]{2}')
+# A header (5 bytes) cut by the resource's end
+ra_case("RA_iptc_header", write("ra_iptc_header.jpg", app13_only(bim(0x0404, b"\x1c\x02\x78") + RA_ANGLE)),
+        ra_past("IPTC field header", RA_PS, RA_PS + 3))
+
+# FlashPix contents list: a 16-bit count of entries of 7 bytes or more. The
+# APP2's data ends after the count, at 2 + 4 + 5 + 2 + 2
+RA_FPX = 2 + 4 + 5 + 2 + 2
+ra_fpx = b"\xff\xd8" + seg(0xE2, b"FPXR\x00\x00\x01\xff\xff") + c444[2:]
+ra_case("RA_fpx_lines", write("ra_fpx.jpg", ra_fpx), RA_SMALL)
+ra_case("RA_fpx", "ra_fpx.jpg", ra_past("FlashPix entry #0", RA_FPX, RA_FPX, "APP2 segment"), forbid="Entity Index #")
+ra_case("RA_fpx_image", "ra_fpx.jpg", "^harness: decoded=1 preview=64x48 ")
+# 3 entries said, 1 there: size, default, then "AB" in UTF-16 with its 0
+ra_one = struct.pack(">I", 16) + b"\x00" + "AB\x00".encode("utf-16-le")
+ra_case("RA_fpx_one", write("ra_fpx_one.jpg", b"\xff\xd8" + seg(0xE2, b"FPXR\x00\x00\x01\x00\x03" + ra_one) + c444[2:]),
+        ra_past("FlashPix entry #1", RA_FPX + len(ra_one), RA_FPX + len(ra_one), "APP2 segment"))
+ra_case("RA_fpx_one_name", "ra_fpx_one.jpg", "^ +Stream Name = \\[AB\\]$", forbid="Entity Index #1")
+
+# DHT: one line for a table's codes past 256, not one for each of them. One
+# segment of 15 tables of 4,080 codes (each listed, 16 to a line, as before)
+ra_dht = b"".join(bytes([0x10 | (n % 4)]) + b"\xff" * 16 + bytes(4080) for n in range(15))
+ra_case("RA_dht_lines", write("ra_dht.jpg", b"\xff\xd8" + seg(0xC4, ra_dht) + c444[2:]),
+        "^harness: report lines=[0-9]{1,4}$")
+ra_case("RA_dht", "ra_dht.jpg", "^Excessive DHT entries \\(4080\\): only the first 256 are used$",
+        forbid="^Excessive DHT entries \\(257\\)")
+
+# EXIF: up to 65,535 IFD entries of 12 bytes, read on past the APP1. Here IFD0
+# says 0xFFFF and has 1 entry; the APP1 ends after it, and an APP15 after that
+# holds 63 ImageDescription entries "EVIL" (its first 4 bytes, read as the next
+# entry's tag and type, give 0xEFFF and SHORT: its length is 0x0300)
+ra_tiff = b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 0xFFFF) + struct.pack("<HHIHH", 0x0112, 3, 1, 1, 0)
+ra_app1 = seg(0xE1, b"Exif\x00\x00" + ra_tiff)
+ra_evil = struct.pack("<II", 1, 1) + (struct.pack("<HHI", 0x010E, 2, 4) + b"EVIL") * 63 + bytes(2)
+assert len(ra_evil) + 2 == 0x0300
+RA_IFD_END = 2 + len(ra_app1)
+ra_case("RA_ifd", write("ra_ifd.jpg", b"\xff\xd8" + ra_app1 + seg(0xEF, ra_evil) + c444[2:]),
+        ra_past("IFD0 entry #1", RA_IFD_END, RA_IFD_END, "APP1 segment"), forbid="EVIL")
+ra_case("RA_ifd_entry", "ra_ifd.jpg", "^ +\\[Orientation +\\] = 1 = Row 0: top, Col 0: left$")
+ra_case("RA_ifd_image", "ra_ifd.jpg", "^harness: decoded=1 preview=64x48 ")
+# An IFD0 offset that takes it past 2^32 (here to 0x100000000) was read, in 32
+# bits, from the file's start: the SOI as an entry count of 0xD8FF
+ra_wrap = seg(0xE1, b"Exif\x00\x00II*\x00" + struct.pack("<I", (1 << 32) - 12) + bytes(8))
+ra_case("RA_ifd_wrap", write("ra_ifd_wrap.jpg", b"\xff\xd8" + ra_wrap + c444[2:]),
+        f"^ERROR: IFD0 at \\[0x100000000\\] is outside its APP1 segment, which ends at \\[0x{2 + len(ra_wrap):08x}\\]\\. "
+        "Skipping\\.$", forbid="Dir Length = 0xd8ff")
+
+# An EXIF thumbnail of RST markers: each added a blank line to the report (one
+# for every 2 bytes of the file, in the agent's 400 KB file 200,033). Here the
+# thumbnail is SOI, 4,000 RST pairs and EOI, in a COM after the APP1.
+ra_rst = b"\xff\xd8" + bytes(b for n in range(4000) for b in (0xFF, 0xD0 + n % 8)) + b"\xff\xd9"
+ra_t_head = after_app0(c444)[0]
+ra_t_ifd1 = 8 + 6                  # IFD0 (no entries), then IFD1
+ra_t_tiff = bytearray(b"II*\x00" + struct.pack("<I", 8) + struct.pack("<HI", 0, ra_t_ifd1)
+                      + struct.pack("<H", 3) + struct.pack("<HHII", 0x0103, 3, 1, 6)
+                      + struct.pack("<HHII", 0x0201, 4, 1, 0) + struct.pack("<HHII", 0x0202, 4, 1, len(ra_rst))
+                      + struct.pack("<I", 0))
+ra_t_app1 = 4 + 6 + len(ra_t_tiff)
+# The thumbnail's offset: from the TIFF header to the COM's data
+struct.pack_into("<I", ra_t_tiff, ra_t_ifd1 + 2 + 12 + 8, ra_t_app1 - 10 + 4)
+ra_thumb = ra_t_head + seg(0xE1, b"Exif\x00\x00" + bytes(ra_t_tiff)) + seg(0xFE, ra_rst) + after_app0(c444)[1]
+ra_case("RA_thumb_rst_lines", write("ra_thumb_rst.jpg", ra_thumb), RA_SMALL)
+ra_case("RA_thumb_rst", "ra_thumb_rst.jpg", "^  \\* Embedded Thumb Marker: EOI$")
+
+# Cut short by the end of the file: past it every byte reads as 0, so the
+# segments' own ends (here 64 KB on) still let a count of 0xFFFF run on (28,097,
+# 16,391 and 80,967 lines). They end at the file's end too.
+ra_case("RA_fpx_cut_lines", write("ra_fpx_cut.jpg", b"\xff\xd8\xff\xe2\xff\xff" + b"FPXR\x00\x00\x01\xff\xff"), RA_SMALL)
+ra_case("RA_fpx_cut", "ra_fpx_cut.jpg", ra_past("FlashPix entry #0", RA_FPX, RA_FPX, "APP2 segment"))
+ra_cut = (b"\xff\xd8\xff\xed\xff\xff" + b"Photoshop 3.0\x00" + b"8BIM" + struct.pack(">H", 0x042D) + b"\x00\x00"
+          + struct.pack(">I", 0xFFE0) + b"\xff\xff")
+ra_case("RA_layersel_cut_lines", write("ra_layersel_cut.jpg", ra_cut), RA_SMALL)
+ra_case("RA_layersel_cut", "ra_layersel_cut.jpg", ra_past("Layer ID", RA_PS + 2, RA_PS + 2))
+ra_case("RA_layersel_cut_len", "ra_layersel_cut.jpg",
+        "^ERROR: 8BIM length \\[0x0000ffe0\\] runs past the end of its segment; using \\[0x00000002\\]$")
+ra_case("RA_dht_cut_lines", write("ra_dht_cut.jpg", b"\xff\xd8\xff\xc4\xff\xff\x00"), RA_SMALL)
+# A DHT whose last whole table (1 code of 1 bit) ends where the file does is
+# still an Early EOF; stopping there, the next marker was read at the end
+ra_case("RA_dht_cut_eof", write("ra_dht_cut_eof.jpg", b"\xff\xd8\xff\xc4\x01\x00" + b"\x00\x01" + bytes(15) + b"\x00"),
+        "^ERROR: Early EOF - file may be missing EOI$", forbid="Expected marker")
+# A 1-byte Layer Select ID resource: no room for its count. The resource after
+# it is still read.
+ra_case("RA_layersel_one", write("ra_layersel_one.jpg", app13_only(bim(0x042D, b"\x05") + RA_ANGLE)),
+        ra_past("Layer count", RA_PS, RA_PS + 1))
+ra_case("RA_layersel_one_next", "ra_layersel_one.jpg", "^ +Global Angle += 30 degrees$")
+# FlashPix at the end of a file of 4 GiB - 1 bytes: entry #0 (a storage, with
+# an empty name) ends at the file's end, and its 16-byte class takes the
+# position past 2^32, to 15. The entries went on from the file's start.
+ra_wrap_tail = b"\xff\xd8\xff\xe2\xff\xff" + b"FPXR\x00\x00\x01\xff\xff" + b"\xff\xff\xff\xff\x00" + b"\x00\x00"
+ra_fpx_wrap, ra_wrap_at = wr_file("ra_fpx_wrap.bin", ra_wrap_tail, c420)
+ra_case("RA_fpx_wrap_lines", ra_fpx_wrap, RA_SMALL, flags=f"--start {ra_wrap_at}", timeout=20)
+ra_case("RA_fpx_wrap", ra_fpx_wrap, ra_past("FlashPix entry #1", (1 << 32) + 15, WR_SIZE, "APP2 segment"),
+        flags=f"--start {ra_wrap_at}", timeout=20)
+
+# Maker notes. IFD0: Make "Canon" and the Exif IFD, which has a MakerNote at an
+# offset: here 0x4000, outside the APP1. The file still has maker notes, which
+# the summary (and the assessment) goes by.
+def ra_maker(note_off, note=b""):
+    t = (b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 2) + struct.pack("<HHII", 0x010F, 2, 6, 56)
+         + struct.pack("<HHII", 0x8769, 4, 1, 38) + struct.pack("<I", 0)
+         + struct.pack("<H", 1) + struct.pack("<HHII", 0x927C, 7, len(note) or 16, note_off) + struct.pack("<I", 0)
+         + b"Canon\x00" + note)
+    return seg(0xE1, b"Exif\x00\x00" + t)
+
+
+ra_mk = ra_maker(0x4000)
+ra_case("RA_maker_out", write("ra_maker_out.jpg", b"\xff\xd8" + ra_mk + c444[2:]),
+        f"^ERROR: MakerIFD at \\[0x{12 + 0x4000:08x}\\] is outside its APP1 segment, which ends at "
+        f"\\[0x{2 + len(ra_mk):08x}\\]\\. Skipping\\.$")
+ra_case("RA_maker_out_summary", "ra_maker_out.jpg", "^  EXIF Makernotes: +OK +$")
+# A maker note IFD inside the APP1 saying 0xFFFF entries, with 1: the error
+# shows even though maker notes aren't decoded (the driver's default)
+ra_mk = ra_maker(62, struct.pack("<H", 0xFFFF) + struct.pack("<HHII", 0x000C, 4, 1, 1234))
+ra_case("RA_maker_entries", write("ra_maker_entries.jpg", b"\xff\xd8" + ra_mk + c444[2:]),
+        ra_past("MakerIFD entry #1", 2 + len(ra_mk), 2 + len(ra_mk), "APP1 segment"))
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
