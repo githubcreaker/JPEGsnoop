@@ -2,6 +2,7 @@
 //
 // decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y[/X,Y...]] [--start N]
 //     [--detail X,Y,LEN] [--preview-md5] [--relaxed] [--expand-dht] [--count-lines]
+//     [--maker-notes]
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
@@ -16,7 +17,7 @@
 //     --preview-md5 prints an MD5 of the decoded preview's pixels;
 //     --relaxed turns on Options > Relaxed Parsing; --expand-dht, Options >
 //     DHT Expand; --count-lines prints "harness: report lines=N" after the
-//     report.
+//     report; --maker-notes turns on Options > Maker Notes.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
 //     [--cycle-channels] [--repeat N] [--max-growth-mb N] [--zoom PCT]
@@ -560,7 +561,7 @@ static void usage()
   fprintf(stderr,
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
           "                         [--pixels X,Y[/X,Y...]] [--start N] [--detail X,Y,LEN] [--preview-md5]\n"
-          "                         [--relaxed] [--expand-dht] [--count-lines]\n"
+          "                         [--relaxed] [--expand-dht] [--count-lines] [--maker-notes]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
           "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
           "                         [--zoom PCT] [--max-zoom-mb N] [--check-preview] [--check-histo]\n"
@@ -750,7 +751,7 @@ static bool decodeForDetail(const QString &strFile, bool bAc, uint32_t nStart, c
 
 static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknownExif, const QString &strPixels,
                      uint32_t nStart, const QString &strDetail, bool bPreviewMd5, bool bRelaxed,
-                     bool bExpandDht, bool bCountLines, const QString &strDbDir)
+                     bool bExpandDht, bool bCountLines, bool bMakerNotes, const QString &strDbDir)
 {
   QPlainTextEdit edit;
   CDocLog log(&edit);
@@ -770,6 +771,7 @@ static int runDecode(const QString &strFile, bool bAc, bool bHisto, bool bUnknow
   if(bRelaxed)
     cfg.onOptionsRelaxedparsing();      // default is off; this toggles
   cfg.setExpandDht(bExpandDht);
+  cfg.setDecodeMaker(bMakerNotes);
 
   CDbSigs sigs(&log, &cfg);
   CwindowBuf wbuf(&log);
@@ -7147,6 +7149,7 @@ int main(int argc, char **argv)
   const bool bPreviewMd5 = args.removeAll("--preview-md5") > 0;
   const bool bRelaxed = args.removeAll("--relaxed") > 0;
   const bool bExpandDht = args.removeAll("--expand-dht") > 0;
+  const bool bMakerNotes = args.removeAll("--maker-notes") > 0;
   const bool bCountLines = args.removeAll("--count-lines") > 0;
   GuiOptions guiOpts;
   guiOpts.bMouse = args.removeAll("--mouse") > 0;
@@ -7374,7 +7377,7 @@ int main(int argc, char **argv)
 
   if(strMode == "decode" && args.size() == 1)
     return runDecode(args.first(), bAc, bHisto, bUnknownExif, strPixels, nStart, strDetail, bPreviewMd5, bRelaxed,
-                     bExpandDht, bCountLines, tmpDir.path());
+                     bExpandDht, bCountLines, bMakerNotes, tmpDir.path());
   if(strMode == "gui" && !args.isEmpty())
   {
     guiOpts.strFilesDir = QFileInfo(args.first()).absolutePath();

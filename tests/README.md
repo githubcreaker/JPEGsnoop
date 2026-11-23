@@ -23,14 +23,15 @@ when it is installed, so Pillow needn't be installed separately).
   `JPEGsnoopQt.pri`) plus a small driver:
   - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]
     [--start N] [--detail X,Y,LEN] [--preview-md5] [--relaxed] [--expand-dht]
-    [--count-lines]` decodes one
+    [--count-lines] [--maker-notes]` decodes one
     file in non-interactive mode and prints the report
     (`--unknown-exif` also reports unknown EXIF tags, which the app hides by
     default; `--pixels` prints the decoded colour at each point; with
     `--histo` it also counts the pixels drawn in each histogram image;
     `--start` decodes from file offset N (up to 4294967295); `--preview-md5` prints an MD5 of the
     decoded image; `--relaxed` turns on Options > Relaxed Parsing, and `--expand-dht` Options > DHT Expand;
-    `--count-lines` prints the report's number of lines).
+    `--count-lines` prints the report's number of lines, and `--maker-notes`
+    turns on Options > Maker Notes).
     `--detail` turns on Options > Scan Segment > Detailed
     Decode for LEN MCUs from MCU X,Y, prints a `harness: detail blocks=...`
     summary of what the report shows (ending with the DC of the first 8
@@ -496,7 +497,8 @@ section, `CS` in its "The compression figures of large images" section,
 `AV` in its "AVIs that made the report run away" and "Frames lost near the end
 of an AVI" sections, `PE` in its "An EXIF value past the end of a small
 JPEG" section, `MP` in its "Three fixes from a review of these changes"
-section, and `RA` in its "Six runaway reports" section);
+section, `RA` in its "Six runaway reports" section, and `RP` in its "Reads
+past their own field" section);
 `ok_*` cases are valid files that must keep decoding. The plain JPEGs must
 decode at their size, with no error or warning and the subsampling their SOF
 gives, and their pixels must be within 6 of libjpeg's decode of the same file

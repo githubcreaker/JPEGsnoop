@@ -3886,7 +3886,8 @@ segment can hold thousands of them.
   which the port's "points backwards" check misses: a JUNK chunk of 0xFFFFFFFD lists a
   chunk "AB", and `movi` is never reached (port's check, inherited behaviour).
 
-**Reads past their own field or segment** (wrong values in the report):
+**Reads past their own field or segment** (wrong values in the report; all fixed since: see
+"Reads past their own field" below):
 - **DHT:** a table's counts and codes are read past the segment, and DHT isn't checked
   with `ExpectMarkerEnd`, so parsing goes on where the read stopped: 16 codes taken from
   a COM after it, then "Expected marker 0xFF, got 0x45" inside the COM, and no image.
@@ -4026,8 +4027,201 @@ switched off one at a time in a scratch copy, fails its own cases.
   [its end]" rather than Early EOF: the next marker is read at the end (inherited).
 - **An 8BIM header cut by the segment's end** gives "8BIM length [0x00000000] runs past the
   end of its segment", naming the length, not the header (port, now also at the file's end).
+  (Fixed since: see "Reads past their own field".)
 - **Empty DHT tables** (17 bytes each) give 21 lines each: a whole 64 KB DHT segment of
   them is about 81,000 lines. That grows with the file rather than from a few bytes.
+
+### Reads past their own field
+
+The "Reads past their own field or segment" in the audit above are fixed, with the rest
+of their class found in the same functions. A length or count from the file, or a field
+of a fixed size, is now read only inside what holds it: its segment, resource, value,
+list or section, or the file if that ends first. Where one doesn't fit, an error says
+where it would have run past, as for the runaway reports ("ERROR: DQT table at [...] runs
+past the end of its DQT segment, at [...]."). What happens then depends on the field:
+
+- **Tables and headers the image needs** (DHT, DQT, SOF, SOS, DRI, DNL, EXP, DAC and
+  APP0's JFIF header): decoding stops, as it already did for a length that doesn't match
+  its fields ("Marker length shorter than expected"), and as libjpeg does. With Options >
+  Relaxed Parsing they are read as before, after the error, so a file whose length is
+  wrong but whose fields are right still decodes. Cut short by the end of the file, they
+  end there, and the file is an Early EOF.
+- **Metadata** (APPn identifiers, EXIF, ICC, FlashPix, Photoshop resources, comments):
+  that field is skipped, or the list it is in stops, and parsing goes on after the segment
+  or resource.
+
+**The JPEG segments:**
+- **DHT:** a table (its class, 16 counts and as many codes as they add up to) is checked
+  whole before anything of it is read. Its counts and codes were read on into the next
+  segment, and parsing went on where they stopped: inside it ("Expected marker 0xFF").
+  DHT never had a length check after its tables, so a length a little short of whole
+  tables decoded; it now stops, unless Relaxed Parsing is on.
+- **DQT** read 64 (or 128) values whatever its length: with a length of 3 the table was
+  the next segments' bytes, given a quality factor, and used.
+- **SOF** read 6 bytes and 3 for each component whatever its length (the next segment's
+  "FF C4 00" gave a sampling factor of 12 x 4). **SOS** likewise: a length short of its
+  components was ignored, and the image decoded; it now stops, unless Relaxed Parsing is
+  on. A length longer than its fields is still ignored, as before.
+- **DRI, DNL, EXP and DAC:** their values were read from the next marker (an interval of
+  65,499). EXP read 2 bytes for its 1-byte Eh and Ev (T.81 B.3.3: the segment is 3
+  bytes), the second the next marker's 0xFF, which gave 15 and 15 and an error: a valid
+  EXP stopped the decode.
+- **APP0's JFIF header** (version, units, density, thumbnail size) was read past an APP0
+  of only "JFIF".
+- **APPn identifiers** were read 255 bytes on whatever the segment's length ("Duck" with
+  no 0 ran on into the next segment's bytes), and the position moved on by the length of
+  what was shown, which leaves out bytes that don't print: "Ex\x01if" was taken for
+  "Exif", and its TIFF header read a byte early. They now end at the segment's end, and
+  are compared as they are; one whose 0 isn't in the segment is an error, and matches
+  nothing. A byte that doesn't print is shown as a dot ("Ex.if"), as in a comment.
+- **A segment's length cut by the end of the file** (its first byte the file's last):
+  the second byte was read as 0, and the segment parsed on. It is now an Early EOF.
+- **APP12's Photoshop Save for Web quality**, 6 bytes after "Ducky", and **APP1's EXIF TIFF
+  header** (8 bytes after "Exif\0\0") were read past short segments.
+- **COM** text past the end of the file was shown as dots (65,530 of them).
+- **At the end of a file of 4 GiB - 1 bytes,** a field past the end is past 2^32, where
+  the 32-bit position wraps to the file's start, which was then read (a JFIF version of
+  255.216, an interval of 65,496). Fields are checked in 64 bits.
+
+**EXIF:**
+- **Values at an offset** (those of more than 4 bytes) were never checked against the APP1
+  segment. One that runs past it is now an error and its entry is skipped, and the next
+  entry is read ("ERROR: IFD0 entry #0 (ImageDescription) value at [...] runs past the end
+  of its APP1 segment, at [...]. Skipping."). A MakerNote's bytes aren't shown, so its value
+  isn't checked: its IFD is, where it is decoded.
+- **The offset to the next IFD** was read past an APP1 that ends with an IFD's entries,
+  from the next segment, and that IFD looked for.
+- **XPTitle and the other XP tags:** their count is of bytes, which was taken as a count
+  of characters, so "ABC" read on into the next value ("ABCXYZ"); and a value of 4 bytes
+  or fewer, in the entry itself, was read at those bytes taken as an offset (as ""). Both
+  are fixed; **UserComment** had the second, and read 8 bytes of character code from a
+  value of fewer.
+- **Values from the entry before:** an entry's values weren't cleared, so decodes that
+  use more values than an entry has took the previous entry's. **CFAPattern** took its
+  cells from the sizes inside it, not its count ("[ Yel Mgn ]" from the entry before): a
+  pattern needing more bytes than it has is now an error, and left in hex.
+  **ComponentsConfiguration** shows 4 values whatever its count: with 2, after ExifVersion
+  ("0230"), it showed "[Y Cb ? ?]", and now "[Y Cb . .]". A **Canon maker note** list of
+  more than 150 SHORTs wasn't read at all, and listed the entry before's values.
+
+**ICC and FlashPix:**
+- **ICC:** the marker number and count, and in the first marker the profile's 128-byte
+  header, were read past a short APP2 (a header from the next COM).
+- **FlashPix:** a stream name was read up to 255 characters, past the segment, and the
+  position moved on as if its 0 had been there; a storage's 16-byte class, the stream data
+  header (32 bytes), and the version and count were read past it too.
+
+**AVI:**
+- **Stream lists:** after a stream header and format (strh, strf), parsing went on as if a
+  name (strn) followed. Without one, the chunk after was taken for it and skipped: the
+  next stream list, so a Motion JPEG AVI whose audio stream came first said "AVI is not
+  MotionJPEG". Parsing now goes on after the list, whatever it holds (strn, strd, or an
+  OpenDML index).
+- **A stream header of fewer than 28 bytes** had its codec and rate read from the format
+  chunk after it ("[strf]"): an error now says so, and what isn't in it isn't shown.
+
+**Photoshop resources (APP13, and a PSD's image resources):**
+- **Fixed-size resources** (Thumbnail, Version Info, JPEG Quality, Grid and Guides, Slices,
+  Print Scale, Print Flags, Print Flags Information, Pixel Aspect Ratio, Global Angle and
+  Altitude, Document-specific IDs seed, Resolution Info, Layer State) read their fields
+  from the next resource (a thumbnail 943,868,237 pixels wide, "8BIM"). Each field group
+  is now checked against its resource (as Layer Select ID's were), and a guide or slice
+  field that would start inside and end past it isn't read either. JPEG Quality reads its
+  fields as far as its resource goes (one of 2 bytes, the quality alone, has been seen).
+- **Descriptor items** of a type that wasn't decoded (`doub`, `UntF`, `type`, `GlbC`,
+  `alis`, `tdta`) left their value unread, and it was taken for the next key's length.
+  They are now read (or, for data, skipped by its length). A reference (`obj `) or a type
+  not known can't be skipped: "NOTE: Descriptor item type [obj ] at [...] isn't decoded,
+  so the rest of its 8BIM resource isn't either", and parsing goes on after the resource.
+- **Resources lost:** a resource read short (with bytes after its fields) left the position
+  where its fields ended, inside it, so the resources after it were lost; one read past
+  an odd length left it a byte early, with the same result; and a resource of a type not
+  decoded (0x03E8) left it inside, so an "8BIM" in its data was reported as the next
+  resource. Each is now skipped by its length. (Since every field is now checked, none is
+  read past its length any more; that path is kept as it was, for safety.) Where nothing
+  starts at the end its length gives, but a resource starts where its fields ended, the
+  length is taken to be wrong, as it always was: "NOTE: No 8BIM resource where its length
+  ends, at [...], but one where its fields do, at [...]: going on there".
+- **A resource's header** (ID, name and length) was read past the end of its segment, and
+  a cut one said "8BIM length [0x00000000] runs past the end of its segment" (listed as
+  found, not fixed, above): now "ERROR: 8BIM header at [...] runs past the end of its
+  segment, at [...]. Stopping."
+
+**PSD layers:**
+- **Tagged blocks:** `luni`'s name and the 4-byte values of `lnsr`, `lyid`, `clbl`, `infx` and
+  `knko` were read past their block's length ("ERROR: [lyid] value at [...] runs past the
+  end of its additional layer info, at [...]. Stopping.").
+- **Section lengths** were only compared with the end of the file. The layer info (its
+  length too), the global layer mask info and the tagged blocks are now in the layer and
+  mask section; the layer count, a layer record's fields and its channels' data in the
+  layer info (a channel 8 bytes too long was decoded from the image data after it); and a
+  record's mask, blending ranges, name and tagged blocks in its extra data ("ERROR: Layer
+  name at [...] runs past the end of the layer's extra data, at [...]. Stopping."). The
+  name's pad to a multiple of 4 isn't required, for writers that don't pad.
+- **What happens then:** a problem inside a record's extra data, whose length was
+  checked, is reported and the record ends where its extra data does, so the other layers
+  are still read (as they were, after wrong values). Past the layer info or the section,
+  the rest of the layers can't be found: they are skipped, as for the other layer
+  problems, and the image decoded.
+
+**Windows** has all of these (by reading its code), but for the grid guide's: a guide's
+start was checked by an earlier fix in this port, not its end.
+
+**Tests:** 126 new `RP` cases (1,748 in all), and 2 changed: `RA_fpx_wrap` now stops at
+the storage class it ends on, before the position can pass 2^32, and `PSD_addtl_wrap` at
+the end of its section, before the end of the file. Each fix has a case with the error it
+reports, its offsets worked out from the bytes the generator writes, and, forbidden, what
+was read past it; the guards check what goes on after it (the next entry or resource, the
+image, the layers), what Relaxed Parsing still decodes, and the Early EOFs. 5 are at the
+end of a file of 4 GiB - 1 bytes. The driver's `decode` takes a new `--maker-notes` for the
+Canon case. On the code before, 110 of the 128 fail; the other 18 are the guards. Each of
+the 88 fixes, switched off on its own in a scratch copy, fails its own cases, and passes
+with it on (one switch, the old path for a resource read past its length, has no case:
+nothing reads past now). In each passing output, deleting the matched line or adding 1 to
+a number in it fails the case, but for the decode's `status=` count.
+
+**Checks:**
+- **Only these reports change.** Old against new:
+  - **Case files:** of the 400 under 64 MB, 307 are unchanged. The others are the new
+    ones; the 4 `PE` files, whose EXIF values past the end of the file are now errors in
+    place of empty values; `ra_dht_cut`, whose empty table read from past the end is
+    gone; `psd_addtl_wrap`; and `h3_xmp_short`, whose XMP identifier is cut by its APP1's
+    end (it showed "XMP =" with nothing after it).
+  - **Made files:** 2,088 with these structures around their limits: each of a JPEG's
+    segments from 6 bytes short to 6 long, small segments of each kind at each length,
+    FlashPix, EXIF (values, XP, CFAPattern, counts), each Photoshop resource and descriptor
+    item type at each length, AVI stream lists, and a file with most of them cut after
+    each byte. 203 are unchanged. Every changed line is a new error, a value no longer
+    read from past its field (or now read from its own), a resource or entry now read
+    after one that used to lose it, or the image no longer decoded where a DHT or SOS is
+    shorter than its fields (24 and 6 files; Relaxed Parsing decodes them as before).
+    One change was a regression, and is the fallback above: a resource whose length says
+    more than its fields had its next resource found where the fields ended.
+- **The affected groups pass:** all 750 cases that don't open the window (decoding,
+  export, batches, the command line, file facts, settings).
+- **With ASan/UBSan,** the `RP`, `RA`, `C3`, `H`, `F2`, `PE`, `PSD` and `ok_` cases pass (251).
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds nothing new in the two files or
+  the driver (287 things before, 276 after: those gone were in code removed or
+  rewritten). At the default level it skipped the value flow of `DecodeExifIfd`, about
+  1,700 lines: a null pointer planted there was found only at the exhaustive level.
+- **No new compiler warnings,** and one fewer (`nPayloadLen`, the ICC length not used).
+- **The PE cases** now pass without the scan's window reload too, since EXIF values aren't
+  read past the end of the file any more; `AV_stray_bytes` and `AV_stray_last_frame`
+  still need it.
+- **An independent review** (an agent given only the diff) re-derived the offsets of 40
+  cases, and found what is fixed above: positions near the end of a file of 4 GiB - 1
+  bytes that wrapped past 2^32 inside the new checks (a JFIF version of 255.216), a PSD
+  layer's channel data bounded by the file only, the layer count and the layer info's
+  length unchecked, a record problem that dropped the other layers, and identifiers shown
+  without their bytes that don't print.
+- **Not checked:** the cases that open the window, a real camera's or Photoshop's file.
+
+**Found, not fixed:**
+- **A resource's name** is read but not shown: every 8BIM line says Name="" (inherited).
+- **The global layer mask info's** 17 fixed bytes are read whatever its length; they aren't
+  shown, and the position goes by the length, so nothing changes in the report.
+- **"8BIM header ... runs past the end of its segment"** says "segment" for a PSD's image
+  resources section too, as the existing "8BIM length" error does.
 
 ## How this was reviewed
 

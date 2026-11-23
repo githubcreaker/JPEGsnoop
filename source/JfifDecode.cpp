@@ -2933,6 +2933,16 @@ QString CjfifDecode::PrintAsHex32(uint32_t *anWords, uint32_t nCount)
 // NOTE:
 // - IFD1 typically contains the thumbnail
 //
+// Bytes in one value of an EXIF format that DecodeExifIfd() decodes (1 BYTE, 2
+// ASCII, 3 SHORT, 4 LONG, 5 RATIONAL, 7 UNDEFINED, 8 SSHORT, 10 SRATIONAL),
+// or 0 for the others, which stop the IFD
+static uint32_t ExifFormatSize(uint32_t nFormat)
+{
+  static const uint32_t anSize[] = {0, 1, 1, 2, 4, 8, 0, 1, 2, 0, 8};
+
+  return (nFormat < sizeof(anSize) / sizeof(anSize[0])) ? anSize[nFormat] : 0;
+}
+
 uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint32_t nStartIfdPtr)
 {
   // Temp variables
@@ -3107,6 +3117,16 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
       return 2;
     }
 
+    // Each entry's values are its own: the decodes below took values past an
+    // entry's own from the entry before it (a CFAPattern's cells, a Canon
+    // maker note list of more than 150 values)
+    for(uint32_t ind = 0; ind < MAX_anValues; ind++)
+    {
+      anValues[ind] = 0;
+      anValuesS[ind] = 0;
+      afValues[ind] = 0;
+    }
+
     // By default, show single-line value summary
     // bExtraDecode is used to indicate that additional special
     // parsing output is available for this entry
@@ -3182,6 +3202,30 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
     nIfdOffset = ReadSwap4(m_nPos);
     strTmp = QString("      # Val/Offset = 0x%1").arg(nIfdOffset, 8, 16, QChar('0'));
     DbgAddLine(strTmp);
+
+    // Values of 4 bytes or fewer are in the entry; the others are at its
+    // offset, and are in the APP1 segment too. (Offsets were never checked:
+    // values were read from what followed the segment, or past the end of the
+    // file, and shown as the entry's.) A MakerNote's bytes aren't shown: its
+    // IFD is checked where it is decoded.
+    const quint64 nValBytes = quint64(nIfdNumComps) * ExifFormatSize(nIfdFormat);
+    const bool bValInline = (nValBytes <= 4);
+    quint64 nPosValue = bValInline ? m_nPos : (quint64(nPosExifStart) + nIfdOffset);
+
+    // (Nikon's type 3 maker notes: see the ASCII decode below)
+    if((nIfdFormat == 2) && !bValInline && (strIfd == "MakerIFD") && (m_strImgExifMake == "NIKON") &&
+       (m_nImgExifMakeSubtype == 3))
+    {
+      nPosValue += quint64(m_nImgExifMakerPtr) + 10;
+    }
+
+    if(!bValInline && (strIfdTag != "MakerNote") && (nPosValue + nValBytes > m_nPosExifEnd))
+    {
+      SegPastErr(QString("%1 entry #%2 (%3) value").arg(strIfd).arg(nIfdEntryInd).arg(strIfdTag), nPosValue,
+                 m_nPosExifEnd, "APP1 segment", ". Skipping.");
+      m_nPos += 4;
+      continue;
+    }
 
     // =========== EXIF IFD Interoperability entry (End) ===========
 
@@ -3361,6 +3405,13 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
         }
         else if(nIfdNumComps > MAX_IFD_COMPS)
         {
+          // The first values are still read, for the decodes that use them (a
+          // Canon maker note list showed the entry before's)
+          for(uint32_t nInd = 0; nInd < nCompsToDisplay; nInd++)
+          {
+            anValues[nInd] = ReadSwap2(nPosExifStart + nIfdOffset + (2 * nInd));
+          }
+
           strValTmp = QString("    Unsigned Short=[Too many entries (%1) to display]").arg(nIfdNumComps);
           DbgAddLine(strValTmp);
           strValOut = QString("[Too many entries (%1) to display]").arg(nIfdNumComps);
@@ -3537,6 +3588,12 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
         }
         else if(nIfdNumComps > MAX_IFD_COMPS)
         {
+          // (As for unsigned shorts)
+          for(uint32_t nInd = 0; nInd < nCompsToDisplay; nInd++)
+          {
+            anValuesS[nInd] = static_cast<int16_t>(ReadSwap2(nPosExifStart + nIfdOffset + (2 * nInd)));
+          }
+
           // Only print it out if it has less than MAX_IFD_COMPS entries
           strValTmp = QString("    Signed Short=[Too many entries (%1) to display]").arg(nIfdNumComps);
           DbgAddLine(strValTmp);
@@ -3953,7 +4010,11 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
       strValOut = "\"";
       QString strVal;
 
-      strVal = m_pWBuf->BufReadUniStr2(nPosExifStart + nIfdOffset, nIfdNumComps);
+      // The count is of bytes, so half as many UTF-16 characters (as many
+      // characters were read, on into the next value: "ABCXYZ" for "ABC"),
+      // and a value of 4 bytes or fewer is in the entry (it was read at the
+      // entry's bytes taken as an offset)
+      strVal = m_pWBuf->BufReadUniStr2(static_cast<uint32_t>(nPosValue), nIfdNumComps / 2);
       strValOut += strVal;
       strValOut += "\"";
     }
@@ -3962,14 +4023,16 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
       // An 8-byte character code ("ASCII", "JIS", "UNICODE", or zeros for
       // undefined), then the text. (With a count below 8, nIfdNumComps - 8
       // wrapped and the text loop read whatever followed.)
-      const uint32_t nPosText = nPosExifStart + nIfdOffset + 8;
+      // (A value of 4 bytes or fewer, in the entry, has no text, and a count
+      // below 8 no whole character code: they were read past the value)
+      const uint32_t nPosText = static_cast<uint32_t>(nPosValue) + 8;
       const uint32_t nTextLen = (nIfdNumComps > 8) ? (nIfdNumComps - 8) : 0;
 
       QByteArray abCharCode;
 
-      for(uint32_t vInd = 0; vInd < 8; vInd++)
+      for(uint32_t vInd = 0; vInd < qMin<uint32_t>(8, nIfdNumComps); vInd++)
       {
-        abCharCode.append(static_cast<char>(Buf(nPosExifStart + nIfdOffset + vInd)));
+        abCharCode.append(static_cast<char>(Buf(static_cast<uint32_t>(nPosValue) + vInd)));
       }
 
       strValOut = "\"";
@@ -4310,7 +4373,17 @@ uint32_t CjfifDecode::DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint
       nVertRepeat = anValues[nInd + 2] * 256 + anValues[nInd + 3];
       nInd += 4;
 
-      if((nHorzRepeat < 16) && (nVertRepeat < 16))
+      // The cells come after the two sizes, in the entry's own value. (Its
+      // count wasn't used: cells past it came from the entry before.) A
+      // pattern of more cells than are read (60) is left in hex.
+      const uint32_t nCfaBytes = 4 + nHorzRepeat * nVertRepeat;
+
+      if((nHorzRepeat < 16) && (nVertRepeat < 16) && (nCfaBytes > nIfdNumComps))
+      {
+        m_pLog->AddLineErr(QString("ERROR: CFAPattern of %1 x %2 cells needs %3 bytes, but has %4")
+                             .arg(nHorzRepeat).arg(nVertRepeat).arg(nCfaBytes).arg(nIfdNumComps));
+      }
+      else if((nHorzRepeat < 16) && (nVertRepeat < 16) && (nCfaBytes <= MAX_anValues))
       {
         bExtraDecode = true;
         strTmp = QString("    [%1] =").arg(strIfdTag, -36);
@@ -5074,7 +5147,9 @@ QString CjfifDecode::DecodeIccDateTime(uint32_t anVal[])
 
 //-----------------------------------------------------------------------------
 // Parser for APP2 ICC profile marker
-uint32_t CjfifDecode::DecodeApp2IccProfile(uint32_t nLen)
+// - nPosEnd = where the APP2 segment ends (one past its last byte), or the
+//   file, if that ends first
+uint32_t CjfifDecode::DecodeApp2IccProfile(quint64 nPosEnd)
 {
   QString strTmp;
 
@@ -5082,18 +5157,28 @@ uint32_t CjfifDecode::DecodeApp2IccProfile(uint32_t nLen)
 
   uint32_t nNumMarkers;         // Byte
 
-  uint32_t nPayloadLen;         // Len of this ICC marker payload
-
   uint32_t nMarkerPosStart;
+
+  // The marker's number and count, and in the first marker the profile's
+  // 128-byte header, are in the segment. (The header was read whatever the
+  // segment's length: a 20-byte segment gave fields from the next segment.)
+  if(!SegHas(m_nPos, 2, nPosEnd))
+  {
+    SegPastErr("ICC marker number", m_nPos, nPosEnd, "APP2 segment", ". Skipping.");
+    return 1;
+  }
 
   nMarkerSeqNum = Buf(m_nPos++);
   nNumMarkers = Buf(m_nPos++);
-  nPayloadLen = nLen - 2 - 12 - 2;      // TODO: check?
 
   strTmp = QString("      Marker Number = %1 of %2").arg(nMarkerSeqNum).arg(nNumMarkers);
   m_pLog->AddLine(strTmp);
 
-  if(nMarkerSeqNum == 1)
+  if((nMarkerSeqNum == 1) && !SegHas(m_nPos, 128, nPosEnd))
+  {
+    SegPastErr("ICC profile header", m_nPos, nPosEnd, "APP2 segment", ". Skipping.");
+  }
+  else if(nMarkerSeqNum == 1)
   {
     nMarkerPosStart = m_nPos;
     DecodeIccHeader(nMarkerPosStart);
@@ -5136,10 +5221,22 @@ uint32_t CjfifDecode::DecodeApp2Flashpix(quint64 nPosEnd)
 
   QString streamStr;
 
+  if(!SegHas(m_nPos, 2, nPosEnd))
+  {
+    SegPastErr("FlashPix version", m_nPos, nPosEnd, "APP2 segment", ". Skipping.");
+    return 1;
+  }
+
   nFpxVer = Buf(m_nPos++);
   nFpxSegType = Buf(m_nPos++);
 
   // FlashPix segments: Contents List or Stream Data
+
+  if((nFpxSegType == 1) && !SegHas(m_nPos, 2, nPosEnd))
+  {
+    SegPastErr("FlashPix interoperability count", m_nPos, nPosEnd, "APP2 segment", ". Skipping.");
+    return 1;
+  }
 
   if(nFpxSegType == 1)
   {
@@ -5204,11 +5301,50 @@ uint32_t CjfifDecode::DecodeApp2Flashpix(quint64 nPosEnd)
 
       // BUG: #1112
       //streamStr = m_pWBuf->BufReadUniStr(m_nPos);
-      streamStr = m_pWBuf->BufReadUniStr2(m_nPos, MAX_BUF_READ_STR);
-      m_nPos += 2 * (static_cast<uint32_t>(streamStr.length()) + 1);        // 2x because unicode
+      // The name is UTF-16 up to its 0, all in the segment. (Up to 255
+      // characters were read, past the segment, and the position moved on as
+      // if the 0 had been found.)
+      const uint32_t nPosName = m_nPos;
+      bool bNameEnds = false;
+
+      streamStr = "";
+
+      for(uint32_t nInd = 0; (nInd < MAX_BUF_READ_STR) && SegHas(m_nPos, 2, nPosEnd); nInd++)
+      {
+        const char16_t nUnit = static_cast<char16_t>(Buf(m_nPos) | (Buf(m_nPos + 1) << 8));
+
+        m_nPos += 2;
+
+        if(nUnit == 0)
+        {
+          bNameEnds = true;
+          break;
+        }
+
+        streamStr += QChar(nUnit);
+      }
 
       strTmp = QString("        Stream Name = [%1]").arg(streamStr);
       m_pLog->AddLine(strTmp);
+
+      if(!bNameEnds && !SegHas(m_nPos, 2, nPosEnd))
+      {
+        SegPastErr("FlashPix stream name", nPosName, nPosEnd, "APP2 segment", ". Stopping.");
+        break;
+      }
+
+      // (A name of 255 characters without its 0 went on as before)
+      if(!bNameEnds)
+      {
+        m_nPos += 2;
+      }
+
+      // The class of a storage, 16 bytes, is in the segment too
+      if(bFpxStorage && !SegHas(m_nPos, 16, nPosEnd))
+      {
+        SegPastErr("FlashPix storage class", m_nPos, nPosEnd, "APP2 segment", ". Stopping.");
+        break;
+      }
 
       // In the case of "storage", we decode the next 16 bytes as the class
       if(bFpxStorage)
@@ -5247,6 +5383,13 @@ uint32_t CjfifDecode::DecodeApp2Flashpix(quint64 nPosEnd)
     // Stream Data
     strTmp = "    Segment: STREAM DATA";
     m_pLog->AddLine(strTmp);
+
+    // Its index, offset and property set header (32 bytes) are in the segment
+    if(!SegHas(m_nPos, 32, nPosEnd))
+    {
+      SegPastErr("FlashPix stream header", m_nPos, nPosEnd, "APP2 segment", ". Skipping.");
+      return 1;
+    }
 
     nFpxStIndexCont = ReadBe2(m_nPos);
     m_nPos += 2;
@@ -5332,17 +5475,19 @@ uint32_t CjfifDecode::DecodeApp2Flashpix(quint64 nPosEnd)
 //
 // ITU-T standard indicates that we can expect up to a
 // maximum of 16-bit huffman code bitstrings.
-void CjfifDecode::DecodeDHT(bool bInject)
+// Returns false where decoding should stop (see SegOverrun())
+bool CjfifDecode::DecodeDHT(bool bInject)
 {
   uint32_t nLength;
   uint32_t nTmpVal;
 
   QString strTmp, strFull;
 
-  uint32_t nPosEnd;
   uint32_t nPosSaved = 0;
 
   bool bRet;
+  bool bGoOn = true;
+  bool bSegShown = false;       // (See SegOverrun())
 
   if(bInject)
   {
@@ -5358,16 +5503,12 @@ void CjfifDecode::DecodeDHT(bool bInject)
 
   nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
   const uint32_t nPosLength = m_nPos;
-  nPosEnd = m_nPos + nLength;
 
   // A segment cut short by the end of the file ends there: past it every byte
-  // reads as 0, which is an empty table (7 bytes gave 80,000 report lines)
-  const bool bCutByEof = !bInject && (nPosEnd >= nPosLength) && (nPosEnd > m_pWBuf->GetPosEof());
-
-  if(bCutByEof)
-  {
-    nPosEnd = m_pWBuf->GetPosEof();
-  }
+  // reads as 0, which is an empty table (7 bytes gave 80,000 report lines).
+  // (The built-in table of a Motion JPEG frame isn't in the file.)
+  const bool bCutByEof = !bInject && (quint64(nPosLength) + nLength > m_pWBuf->GetPosEof());
+  const quint64 nPosEnd = bInject ? (quint64(nPosLength) + nLength) : SegEnd(nPosLength, nLength);
 
   m_nPos += 2;
   strTmp = QString("  Huffman table length = %1").arg(nLength);
@@ -5382,6 +5523,32 @@ void CjfifDecode::DecodeDHT(bool bInject)
 
   while((!m_bStateAbort) && (nPosEnd > m_nPos) && !WrappedSince(nPosLength))
   {
+    // A table is its class and destination, 16 counts, and as many codes as
+    // they add up to, all in the segment. (They were read on into the next
+    // segment, and parsing went on from where they stopped: inside it, which
+    // gave "Expected marker 0xFF" and no image.)
+    const uint32_t nPosTable = m_nPos;
+    quint64 nTableLen = 1 + MAX_DHT_CODELEN;
+
+    if(SegHas(nPosTable, nTableLen, nPosEnd))
+    {
+      for(uint32_t i = 1; i <= MAX_DHT_CODELEN; i++)
+      {
+        nTableLen += Buf(nPosTable + i);
+      }
+    }
+
+    if(!SegHas(nPosTable, nTableLen, nPosEnd) && !bInject)
+    {
+      const teSegOverrun eSeg = SegOverrun("DHT table", nPosTable, nPosEnd, "DHT", bSegShown);
+
+      if(eSeg != SEG_READ_ON)
+      {
+        bGoOn = (eSeg == SEG_STOP_EOF);
+        break;
+      }
+    }
+
     m_pLog->AddLine("  ----");
 
     nTmpVal = Buf(m_nPos++);
@@ -5397,7 +5564,7 @@ void CjfifDecode::DecodeDHT(bool bInject)
     {
       strTmp = QString("ERROR: Invalid DHT Class (%1). Aborting DHT Load.").arg(nDhtClass_Tc);
       m_pLog->AddLineErr(strTmp);
-      m_nPos = nPosEnd;
+      m_nPos = static_cast<uint32_t>(nPosEnd);
       //m_bStateAbort = true; // Stop decoding
       break;
     }
@@ -5406,7 +5573,7 @@ void CjfifDecode::DecodeDHT(bool bInject)
     {
       strTmp = QString("ERROR: Invalid DHT Dest ID (%1). Aborting DHT Load.").arg(nDhtHuffTblId_Th);
       m_pLog->AddLineErr(strTmp);
-      m_nPos = nPosEnd;
+      m_nPos = static_cast<uint32_t>(nPosEnd);
       //m_bStateAbort = true; // Stop decoding
       break;
     }
@@ -5606,6 +5773,8 @@ void CjfifDecode::DecodeDHT(bool bInject)
     m_nPos = nPosSaved;
     m_bBufFakeDHT = false;
   }
+
+  return bGoOn;
 }
 
 //-----------------------------------------------------------------------------
@@ -5720,6 +5889,147 @@ bool CjfifDecode::ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen)
 }
 
 //-----------------------------------------------------------------------------
+// The bounds of a segment's fields. Lengths and counts read from the file were
+// followed without comparing them with the segment, so a field could be read
+// from whatever came after it (the next segment, or past the end of the file,
+// where every byte reads as 0) and reported as the segment's own.
+
+// One past the last byte of the segment whose length (which counts itself) is
+// at nPosLength, or the end of the file if that comes first. (In 64 bits: near
+// the end of the largest file, a segment's end passes 2^32.)
+quint64 CjfifDecode::SegEnd(uint32_t nPosLength, uint32_t nLength) const
+{
+  return qMin<quint64>(quint64(nPosLength) + nLength, m_pWBuf->GetPosEof());
+}
+
+// Whether nLen bytes at nPos are before nPosEnd. (In 64 bits: a field near the
+// end of the largest file is past 2^32, where a 32-bit position wraps to the
+// file's start, which was then read.)
+bool CjfifDecode::SegHas(quint64 nPos, quint64 nLen, quint64 nPosEnd)
+{
+  return (nPos <= nPosEnd) && (nLen <= nPosEnd - nPos);
+}
+
+// "ERROR: <what> at [<pos>] runs past the end of its <container>, at [<end>]",
+// then strThen: ". Stopping.", ". Skipping.", "; using [N]" or "."
+void CjfifDecode::SegPastErr(const QString &strWhat, quint64 nPos, quint64 nPosEnd, const QString &strIn,
+                             const QString &strThen)
+{
+  m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of its %3, at [0x%4]%5")
+                       .arg(strWhat)
+                       .arg(nPos, 8, 16, QChar('0'))
+                       .arg(strIn)
+                       .arg(nPosEnd, 8, 16, QChar('0'))
+                       .arg(strThen));
+}
+
+// A field of a marker segment the image needs (a table or a header) that
+// doesn't fit in the rest of it (nPosEnd, from SegEnd()): it was read from
+// whatever followed, and shown and used as the segment's. Says so (once a
+// segment: bShown). Then, as where a length doesn't match the fields
+// (ExpectMarkerEnd()):
+// - SEG_STOP: decoding stops, without reading it.
+// - SEG_READ_ON, with Relaxed Parsing: it is read as before, so that a file
+//   whose length is wrong but whose fields are right still decodes.
+// - SEG_STOP_EOF: a segment cut short by the end of the file isn't read past
+//   it, and ProcessFile() reports an Early EOF.
+CjfifDecode::teSegOverrun CjfifDecode::SegOverrun(const QString &strWhat, quint64 nPos, quint64 nPosEnd,
+                                                   const QString &strSeg, bool &bShown)
+{
+  const quint64 nPosEof = m_pWBuf->GetPosEof();
+
+  if(!bShown)
+  {
+    SegPastErr(strWhat, nPos, nPosEnd, strSeg + " segment", ".");
+    bShown = true;
+  }
+
+  if(nPosEnd >= nPosEof)
+  {
+    // (0 past the end of the largest file, which ProcessFile() also catches)
+    m_nPos = static_cast<uint32_t>(nPosEof + 1);
+    return SEG_STOP_EOF;
+  }
+
+  if(m_pAppConfig->relaxedParsing())
+  {
+    return SEG_READ_ON;
+  }
+
+  m_nPos = static_cast<uint32_t>(nPosEnd);
+  m_pLog->AddLineErr("  Stopping decode");
+  m_pLog->AddLineErr("  Use [Img Search Fwd/Rev] to locate other valid embedded JPEGs");
+  return SEG_STOP;
+}
+
+// An APPn segment's identifier: its bytes up to the 0 that ends it, inside the
+// segment (nPosEnd, one past its end) and at most MAX_IDENTIFIER - 1 of them.
+// bEnds is false where the segment ends first. (It was read 255 bytes on,
+// whatever the segment's length, and the position then moved on by the length
+// of what was shown, which leaves out bytes that don't print: "Ex\x01if" was
+// taken for "Exif", read a byte early.)
+QByteArray CjfifDecode::ReadIdentifier(quint64 nPos, quint64 nPosEnd, bool &bEnds)
+{
+  QByteArray abId;
+
+  bEnds = false;
+
+  for(quint64 nInd = nPos; nInd < nPosEnd; nInd++)
+  {
+    // (As long as one is shown)
+    if(abId.size() >= MAX_IDENTIFIER - 1)
+    {
+      bEnds = true;
+      break;
+    }
+
+    const char cByte = static_cast<char>(Buf(static_cast<uint32_t>(nInd)));
+
+    if(cByte == 0)
+    {
+      bEnds = true;
+      break;
+    }
+
+    abId.append(cByte);
+  }
+
+  return abId;
+}
+
+// The identifier as it is shown: a byte that doesn't print as a dot (as in a
+// comment). They were left out, so "Ex\x01if" was shown as "Exif".
+static QString IdentifierShown(const QByteArray &abId)
+{
+  QString strId;
+
+  for(const char cByte : abId)
+  {
+    strId += IsPrintAscii(static_cast<uint8_t>(cByte)) ? QChar(static_cast<uint8_t>(cByte)) : QChar('.');
+  }
+
+  return strId;
+}
+
+// Take the identifier read at m_nPos for acId (of MAX_IDENTIFIER bytes), and
+// move on past it and nAfter bytes (its 0). One that runs past the end of its
+// segment (strIn) is reported, and matches nothing; the position doesn't move
+// (at the end of the largest file it passed 2^32, to the file's start).
+void CjfifDecode::TakeIdentifier(const QByteArray &abId, bool bEnds, quint64 nPosEnd, const QString &strIn, char *acId,
+                                 uint32_t nAfter)
+{
+  if(!bEnds)
+  {
+    SegPastErr("Identifier", m_nPos, nPosEnd, strIn, ". Skipping.");
+    acId[0] = 0;
+    return;
+  }
+
+  strcpy(acId, abId.constData());
+  m_nPos += static_cast<uint32_t>(abId.size()) + nAfter;
+}
+
+//-----------------------------------------------------------------------------
 // Validate an unsigned value to ensure it is in allowable range
 // - If the value is outside the range, an error is shown and
 //   the parsing stops if relaxed parsing is not enabled
@@ -5802,6 +6112,12 @@ bool CjfifDecode::ValidateValue(uint32_t &nVal, uint32_t nMin, uint32_t nMax, QS
 uint32_t CjfifDecode::DecodeMarker()
 {
   char acIdentifier[MAX_IDENTIFIER];
+  QByteArray abIdentifier;      // (See ReadIdentifier())
+  bool bIdEnds;
+
+  // A field past its segment's end (see SegOverrun()): reported once
+  bool bSegShown = false;
+  teSegOverrun eSeg;
 
   QString strTmp;
   QString strFull;              // Used for concatenation
@@ -5814,7 +6130,6 @@ uint32_t CjfifDecode::DecodeMarker()
   uint16_t nTmpVal2;
 
   uint32_t nCode;
-  uint32_t nPosEnd;
   uint32_t nPosSaved;      // General-purpose saved position in file
   uint32_t nPosExifStart;
   uint32_t nRet;                // General purpose return value
@@ -5823,6 +6138,12 @@ uint32_t CjfifDecode::DecodeMarker()
 
   uint32_t nPosMarkerStart;        // Offset for current marker
   uint32_t nColTransform = 0;   // Color Transform from APP14 marker
+
+  // Where a segment ends (one past it), or the file, if that ends first (see
+  // SegEnd()), and where a table or field in it starts
+  quint64 nPosDqtEnd;
+  quint64 nPosSegEnd;
+  uint32_t nPosDqtTable;
 
   // For DQT
   QString strDqtPrecision = "";
@@ -5904,6 +6225,17 @@ uint32_t CjfifDecode::DecodeMarker()
 
   AddHeader(nCode);
 
+  // A segment's length (that of every marker from 0xC0 on, but RSTn, SOI and
+  // EOI) cut by the end of the file: what was past it read as 0, or at the end
+  // of the largest file was read from its start, as the position passed 2^32.
+  // ProcessFile() reports an Early EOF.
+  if((nCode >= JFIF_SOF0) && (nCode <= JFIF_COM) && !((nCode >= JFIF_RST0) && (nCode <= JFIF_EOI)) &&
+     (quint64(m_nPos) + 2 > nPosEof))
+  {
+    m_nPos = nPosEof + 1;
+    return DECMARK_OK;
+  }
+
   switch (nCode)
   {
     case JFIF_SOI:             // SOI
@@ -5918,18 +6250,23 @@ uint32_t CjfifDecode::DecodeMarker()
       m_pLog->AddLine(strTmp);
 
       nPosSaved = m_nPos;
+      nPosSegEnd = SegEnd(nPosSaved, nLength);
 
       m_nPos += 2;              // Move past length now that we've used it
 
-      strcpy(acIdentifier, m_pWBuf->BufReadStrn(m_nPos, MAX_IDENTIFIER - 1).toLatin1().data());
-      acIdentifier[MAX_IDENTIFIER - 1] = 0;     // Null terminate just in case
-      strTmp = QString("  Identifier      = [%1]").arg(acIdentifier);
+      abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
+      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
       m_pLog->AddLine(strTmp);
-      m_nPos += static_cast<uint32_t>(strlen(acIdentifier)) + 1;
+      TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP12 segment", acIdentifier, 1);
 
       if(strcmp(acIdentifier, "Ducky") != 0)
       {
         m_pLog->AddLine("    Not Photoshop DUCKY. Skipping remainder.");
+      }
+      else if(!SegHas(quint64(m_nPos) + 6, 1, nPosSegEnd))
+      {
+        // (It was taken from the next segment, and shown with the summary)
+        SegPastErr("Photoshop Save For Web Quality", quint64(m_nPos) + 6, nPosSegEnd, "APP12 segment", ". Skipping.");
       }
       else                      // Photoshop
       {
@@ -6025,11 +6362,11 @@ uint32_t CjfifDecode::DecodeMarker()
 
       m_nPos += 2;              // Move past length now that we've used it
 
-      strcpy(acIdentifier, m_pWBuf->BufReadStrn(m_nPos, MAX_IDENTIFIER - 1).toLatin1().data());
-      acIdentifier[MAX_IDENTIFIER - 1] = 0;     // Null terminate just in case
-      strTmp = QString("  Identifier      = [%1]").arg(acIdentifier);
+      nPosSegEnd = SegEnd(nPosSaved, nLength);
+      abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
+      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
       m_pLog->AddLine(strTmp);
-      m_nPos += static_cast<uint32_t>(strlen(acIdentifier)) + 1;
+      TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP13 segment", acIdentifier, 1);
 
       if(strcmp(acIdentifier, "Photoshop 3.0") != 0)
       {
@@ -6052,14 +6389,14 @@ uint32_t CjfifDecode::DecodeMarker()
       m_pLog->AddLine(strTmp);
 
       nPosSaved = m_nPos;
+      nPosSegEnd = SegEnd(nPosSaved, nLength);
 
       m_nPos += 2;              // Move past length now that we've used it
 
-      strcpy(acIdentifier, m_pWBuf->BufReadStrn(m_nPos, MAX_IDENTIFIER - 1).toLatin1().data());
-      acIdentifier[MAX_IDENTIFIER - 1] = 0;     // Null terminate just in case
-      strTmp = QString("  Identifier      = [%1]").arg(acIdentifier);
+      abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
+      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
       m_pLog->AddLine(strTmp);
-      m_nPos += static_cast<uint32_t>(strlen(acIdentifier));
+      TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP1 segment", acIdentifier, 0);
 
       if(strncmp(acIdentifier, "http://ns.adobe.com/xap/1.0/\x00", 29) == 0)
       {                         //@@
@@ -6121,6 +6458,12 @@ uint32_t CjfifDecode::DecodeMarker()
         // The last line has no linefeed after it (it was never printed, so a
         // single-line packet showed nothing)
         flushLine();
+      }
+      else if((strcmp(acIdentifier, "Exif") == 0) && !SegHas(quint64(m_nPos) + 2, 8, nPosSegEnd))
+      {
+        // After its two 0 bytes, the TIFF header (byte order and IFD0's offset)
+        // was read from the next segment
+        SegPastErr("EXIF TIFF header", quint64(m_nPos) + 2, nPosSegEnd, "APP1 segment", ". Skipping.");
       }
       else if(strcmp(acIdentifier, "Exif") == 0)        //@@
       {
@@ -6252,6 +6595,13 @@ uint32_t CjfifDecode::DecodeMarker()
             // entries stopped isn't where the offset to the next IFD is
             nOffsetIfd1 = 0x00000000;
           }
+          else if(!SegHas(m_nPos, 4, m_nPosExifEnd))
+          {
+            // (It was read from the next segment, and that IFD looked for)
+            SegPastErr(QString("IFD%1's offset to the next IFD").arg(nIfdCount), m_nPos, m_nPosExifEnd, "APP1 segment",
+                       ". Stopping.");
+            nOffsetIfd1 = 0x00000000;
+          }
           else
           {
             // Now that we have gone through all entries in the IFD directory,
@@ -6302,7 +6652,7 @@ uint32_t CjfifDecode::DecodeMarker()
       }
       else
       {
-        strTmp = QString("Identifier [%1] not supported. Skipping remainder.").arg(acIdentifier);
+        strTmp = QString("Identifier [%1] not supported. Skipping remainder.").arg(IdentifierShown(abIdentifier));
         m_pLog->AddLine(strTmp);
       }
 
@@ -6348,26 +6698,26 @@ uint32_t CjfifDecode::DecodeMarker()
       m_pLog->AddLine(strTmp);
 
       nPosSaved = m_nPos;
+      nPosSegEnd = SegEnd(nPosSaved, nLength);
 
       m_nPos += 2;              // Move past length now that we've used it
 
-      strcpy(acIdentifier, m_pWBuf->BufReadStrn(m_nPos, MAX_IDENTIFIER - 1).toLatin1().data());
-      acIdentifier[MAX_IDENTIFIER - 1] = 0;     // Null terminate just in case
-      strTmp = QString("  Identifier      = [%1]").arg(acIdentifier);
+      abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
+      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
       m_pLog->AddLine(strTmp);
-      m_nPos += static_cast<uint32_t>(strlen(acIdentifier)) + 1;
+      TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP2 segment", acIdentifier, 1);
 
       if(strcmp(acIdentifier, "FPXR") == 0)
       {
         // Photoshop
         m_pLog->AddLine("    FlashPix:");
-        DecodeApp2Flashpix(qMin<quint64>(quint64(nPosSaved) + nLength, m_pWBuf->GetPosEof()));
+        DecodeApp2Flashpix(nPosSegEnd);
       }
       else if(strcmp(acIdentifier, "ICC_PROFILE") == 0)
       {
         // ICC Profile
         m_pLog->AddLine("    ICC Profile:");
-        DecodeApp2IccProfile(nLength);
+        DecodeApp2IccProfile(nPosSegEnd);
       }
       else
       {
@@ -6469,10 +6819,26 @@ uint32_t CjfifDecode::DecodeMarker()
       strTmp = QString("  Length     = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
 
-      strcpy(m_acApp0Identifier, m_pWBuf->BufReadStrn(m_nPos, MAX_IDENTIFIER - 1).toLatin1().data());
-      m_acApp0Identifier[MAX_IDENTIFIER - 1] = 0;       // Null terminate just in case
-      strTmp = QString("  Identifier = [%1]").arg(m_acApp0Identifier);
+      nPosSegEnd = SegEnd(nPosSaved, nLength);
+      abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
+      strTmp = QString("  Identifier = [%1]").arg(IdentifierShown(abIdentifier));
       m_pLog->AddLine(strTmp);
+      {
+        // (The position moves on in the JFIF decode below)
+        const uint32_t nPosId = m_nPos;
+
+        TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP0 segment", m_acApp0Identifier, 0);
+        m_nPos = nPosId;
+      }
+
+      // The version, units, density and thumbnail size (9 bytes) are in the
+      // segment too (they were read from the next one, and the file taken
+      // for JFIF)
+      if(!strcmp(m_acApp0Identifier, "JFIF") && !SegHas(quint64(m_nPos) + 5, 9, nPosSegEnd) &&
+         ((eSeg = SegOverrun("JFIF header", quint64(m_nPos) + 5, nPosSegEnd, "APP0", bSegShown)) != SEG_READ_ON))
+      {
+        return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+      }
 
       if(!strcmp(m_acApp0Identifier, "JFIF"))
       {
@@ -6482,7 +6848,7 @@ uint32_t CjfifDecode::DecodeMarker()
         // (A JFIF file's three components are YCbCr; see the SOS handling)
         m_bImgJfif = true;
 
-        m_nPos += static_cast<uint32_t>((strlen(m_acApp0Identifier)) + 1);
+        m_nPos += static_cast<uint32_t>(abIdentifier.size()) + 1;
 
         m_nImgVersionMajor = Buf(m_nPos++);
         m_nImgVersionMinor = Buf(m_nPos++);
@@ -6628,15 +6994,16 @@ uint32_t CjfifDecode::DecodeMarker()
       uint32_t nDqtQuantDestId_Tq;
 
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Lq
-      nPosEnd = m_nPos + nLength;
+      nPosDqtEnd = SegEnd(m_nPos, nLength);
       m_nPos += 2;
       strTmp = QString("  Table length = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
 
-      while((nPosEnd > m_nPos) && !WrappedSince(nPosMarkerStart))
+      while((nPosDqtEnd > m_nPos) && !WrappedSince(nPosMarkerStart))
       {
         m_pLog->AddLine("  ----");
 
+        nPosDqtTable = m_nPos;
         nTmpVal = Buf(m_nPos++);        // Pq | Tq
         nDqtPrecision_Pq = (nTmpVal & 0xF0) >> 4;       // Pq, range 0-1
         nDqtQuantDestId_Tq = nTmpVal & 0x0F;    // Tq, range 0-3
@@ -6781,6 +7148,15 @@ uint32_t CjfifDecode::DecodeMarker()
             m_nPos = nPosMarkerStart + nLength;
             return DECMARK_OK;
           }
+        }
+
+        // The table's 64 values, of 1 or 2 bytes, are in the segment too.
+        // (They were read on into the next segments, given a quality factor
+        // and used: a length of 3 gave a table of the segments after it.)
+        if(!SegHas(m_nPos, 64 * (nDqtPrecision_Pq + 1), nPosDqtEnd) &&
+           ((eSeg = SegOverrun("DQT table", nPosDqtTable, nPosDqtEnd, "DQT", bSegShown)) != SEG_READ_ON))
+        {
+          return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
         }
 
         bool bQuantAllOnes = true;
@@ -6928,6 +7304,14 @@ uint32_t CjfifDecode::DecodeMarker()
 
       m_bStateDqtOk = true;
 
+      // Cut short by the end of the file, where the tables stopped: the next
+      // marker would be read there (ProcessFile() says Early EOF)
+      if(quint64(nPosMarkerStart) + nLength > m_pWBuf->GetPosEof())
+      {
+        m_nPos = m_pWBuf->GetPosEof() + 1;
+        return DECMARK_OK;
+      }
+
       if(!ExpectMarkerEnd(nPosMarkerStart, nLength))
         return DECMARK_ERR;
 
@@ -6944,9 +7328,18 @@ uint32_t CjfifDecode::DecodeMarker()
       uint32_t nDAC_Cs;
 
       nDAC_n = (nLength > 2) ? (nLength - 2) / 2 : 0;
+      nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
 
       for(uint32_t nInd = 0; nInd < nDAC_n; nInd++)
       {
+        // (Cut short by the end of the file, the entries ran on past it)
+        if(!SegHas(m_nPos, 2, nPosSegEnd) &&
+           ((eSeg = SegOverrun(QString("DAC entry #%1").arg(nInd + 1), m_nPos, nPosSegEnd, "DAC", bSegShown)) !=
+            SEG_READ_ON))
+        {
+          return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+        }
+
         nTmpVal = Buf(m_nPos++);        // Tc,Tb
         nDAC_Tc = (nTmpVal & 0xF0) >> 4;
         nDAC_Tb = (nTmpVal & 0x0F);
@@ -6996,6 +7389,14 @@ uint32_t CjfifDecode::DecodeMarker()
       strTmp = QString("  Header length = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
 
+      nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
+
+      if(!SegHas(m_nPos, 2, nPosSegEnd) &&
+         ((eSeg = SegOverrun("Number of lines", m_nPos, nPosSegEnd, "DNL", bSegShown)) != SEG_READ_ON))
+      {
+        return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+      }
+
       nTmpVal = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // NL
       m_nPos += 2;
       strTmp = QString("  Number of lines = %1").arg(nTmpVal);
@@ -7017,10 +7418,21 @@ uint32_t CjfifDecode::DecodeMarker()
 
       uint32_t nEXP_Eh, nEXP_Ev;
 
-      nTmpVal = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Eh,Ev
+      nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
+
+      if(!SegHas(m_nPos, 1, nPosSegEnd) &&
+         ((eSeg = SegOverrun("Expansion", m_nPos, nPosSegEnd, "EXP", bSegShown)) != SEG_READ_ON))
+      {
+        return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+      }
+
+      // Eh and Ev are one byte (T.81 B.3.3: the segment is 3 bytes). Two were
+      // read, the second from the next segment, which gave Eh and Ev, and the
+      // segment was then said to be shorter than expected.
+      nTmpVal = Buf(m_nPos);    // Eh,Ev
       nEXP_Eh = (nTmpVal & 0xF0) >> 4;
       nEXP_Ev = (nTmpVal & 0x0F);
-      m_nPos += 2;
+      m_nPos += 1;
       strTmp = QString("  Expand horizontally = %1").arg(nEXP_Eh);
       m_pLog->AddLine(strTmp);
       strTmp = QString("  Expand vertically   = %1").arg(nEXP_Ev);
@@ -7086,6 +7498,19 @@ uint32_t CjfifDecode::DecodeMarker()
       strTmp = QString("  Frame header length = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
 
+      // The precision, size and number of components (6 bytes), and then 3
+      // bytes for each component, are in the segment. (They were read on into
+      // the next segment and used.)
+      nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
+
+      if(!SegHas(m_nPos, 6, nPosSegEnd) &&
+         ((eSeg = SegOverrun("Frame header", m_nPos, nPosSegEnd, "SOF", bSegShown)) != SEG_READ_ON))
+      {
+        m_bStateSofOk = false;
+        m_bImgOK = false;
+        return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+      }
+
       m_nSofPrecision_P = Buf(m_nPos++);        // P
       strTmp = QString("  Precision = %1").arg(m_nSofPrecision_P);
       m_pLog->AddLine(strTmp);
@@ -7149,6 +7574,16 @@ uint32_t CjfifDecode::DecodeMarker()
 
       for(uint32_t nCompInd = 1; ((!m_bStateAbort) && (nCompInd <= m_nSofNumComps_Nf)); nCompInd++)
       {
+        if(!SegHas(m_nPos, 3, nPosSegEnd) &&
+           ((eSeg = SegOverrun(QString("Component[%1]").arg(nCompInd), m_nPos, nPosSegEnd, "SOF", bSegShown)) !=
+            SEG_READ_ON))
+        {
+          // What was read of this frame header doesn't describe an image
+          m_bStateSofOk = false;
+          m_bImgOK = false;
+          return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+        }
+
         nCompIdent = Buf(m_nPos++);     // Ci, range 0..255
         m_anSofQuantCompId[nCompInd] = nCompIdent;
 
@@ -7374,8 +7809,19 @@ uint32_t CjfifDecode::DecodeMarker()
       strFull = "    Comment=";
       m_strComment = "";
 
+      // The text stops at the end of the file, which ProcessFile() then reports
+      // as an Early EOF. (Past it, every byte was shown as a dot: 65,530 for a
+      // length of 0xFFFF in a file that ended 3 bytes on.)
+      nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
+
       for(uint32_t ind = 0; ind < nLength - 2; ind++)
       {
+        if(m_nPos >= nPosSegEnd)
+        {
+          m_nPos = nPosMarkerStart + nLength;
+          break;
+        }
+
         nTmpVal1 = Buf(m_nPos++);
 
         if(IsPrintAscii(nTmpVal1))
@@ -7395,7 +7841,10 @@ uint32_t CjfifDecode::DecodeMarker()
 
     case JFIF_DHT:             // DHT
       m_bStateDht = true;
-      DecodeDHT(false);
+
+      if(!DecodeDHT(false))
+        return DECMARK_ERR;
+
       m_bStateDhtOk = true;
       break;
 
@@ -7427,6 +7876,17 @@ uint32_t CjfifDecode::DecodeMarker()
       strTmp = QString("  Scan header length = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
 
+      // The number of components, 2 bytes for each, and the 3 bytes after them
+      // are in the segment. (They were read on into the scan data, whose
+      // decode then started that much later.)
+      nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
+
+      if(!SegHas(m_nPos, 1, nPosSegEnd) &&
+         ((eSeg = SegOverrun("Number of img components", m_nPos, nPosSegEnd, "SOS", bSegShown)) != SEG_READ_ON))
+      {
+        return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+      }
+
       m_nSosNumCompScan_Ns = Buf(m_nPos++);     // Ns, range 1..4
       strTmp = QString("  Number of img components = %1").arg(m_nSosNumCompScan_Ns);
       m_pLog->AddLine(strTmp);
@@ -7449,6 +7909,13 @@ uint32_t CjfifDecode::DecodeMarker()
       // Max range of components indices is between 1..4
       for(uint32_t nScanCompInd = 1; ((nScanCompInd <= m_nSosNumCompScan_Ns) && (!m_bStateAbort)); nScanCompInd++)
       {
+        if(!SegHas(m_nPos, 2, nPosSegEnd) &&
+           ((eSeg = SegOverrun(QString("Component[%1]").arg(nScanCompInd), m_nPos, nPosSegEnd, "SOS", bSegShown)) !=
+            SEG_READ_ON))
+        {
+          return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+        }
+
         strFull = QString("    Component[%1]: ").arg(nScanCompInd);
         nSosCompSel_Cs = Buf(m_nPos++); // Cs, range 0..255
         nSosHuffTblSel = Buf(m_nPos++);
@@ -7464,6 +7931,12 @@ uint32_t CjfifDecode::DecodeMarker()
         bRet = m_pImgDec->SetDhtTables(nScanCompInd, nSosHuffTblSelDc_Td, nSosHuffTblSelAc_Ta);
 
         DecodeErrCheck(bRet);
+      }
+
+      if(!SegHas(m_nPos, 3, nPosSegEnd) &&
+         ((eSeg = SegOverrun("Spectral selection", m_nPos, nPosSegEnd, "SOS", bSegShown)) != SEG_READ_ON))
+      {
+        return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
       }
 
       m_nSosSpectralStart_Ss = Buf(m_nPos++);
@@ -7710,6 +8183,16 @@ uint32_t CjfifDecode::DecodeMarker()
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       strTmp = QString("  Length     = %1").arg(nLength);
       m_pLog->AddLine(strTmp);
+
+      // (An interval past the segment was taken from the next one, and used)
+      nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
+
+      if(!SegHas(quint64(m_nPos) + 2, 2, nPosSegEnd) &&
+         ((eSeg = SegOverrun("Restart interval", quint64(m_nPos) + 2, nPosSegEnd, "DRI", bSegShown)) != SEG_READ_ON))
+      {
+        return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
+      }
+
       nVal = Buf(m_nPos + 2) * 256 + Buf(m_nPos + 3);
 
       // According to ITU-T spec B.2.4.4, we only expect
@@ -9765,6 +10248,28 @@ bool CjfifDecode::DecodeAvi()
         xdwSampleSize = m_pWBuf->BufX(m_nPos, 4, bSwap);
         m_nPos += 4;
 
+        // The fields shown (type and codec, 8 bytes, and the scale and rate up
+        // to 28) are in the stream header: past it they were read from the
+        // format chunk after it
+        if(nStrhLen < 28)
+        {
+          m_pLog->AddLineErr(QString("  ERROR: AVI stream header (strh) at 0x%1 is %2 bytes, too short for the type, "
+                                     "codec and rate (28)")
+                               .arg(nPosStrlStart - 8, 8, 16, QChar('0'))
+                               .arg(nStrhLen));
+          dwScale = 0;
+
+          if(nStrhLen < 8)
+          {
+            fccHandler = "";
+          }
+
+          if(nStrhLen < 4)
+          {
+            fccType = "";
+          }
+        }
+
         QString fccTypeDecode = "";
 
         if(fccType == "vids")
@@ -9810,97 +10315,22 @@ bool CjfifDecode::DecodeAvi()
 
         m_pLog->AddLine(strTmp);
 
-        m_nPos = nPosStrlStart + nStrhLen;      // Skip
-
         strTmp = QString("      %1").arg(fccType);
         m_pLog->AddLine(strTmp);
 
-        if(fccType == "vids")
+        // Is it MJPEG? (The format chunk, strf, isn't decoded: it and the rest
+        // of the list are skipped below.)
+        if((fccType == "vids") && ((fccHandler == "mjpg") || (fccHandler == "MJPG")))
         {
-          // --- vids ---
-
-          // Is it MJPEG?
-          //strTmp = QString("      -[Video Stream FourCC]=[%s]"),fccHandler;
-          //m_pLog->AddLine(strTmp);
-          if(fccHandler == "mjpg")
-          {
-            m_bAviMjpeg = true;
-          }
-
-          if(fccHandler == "MJPG")
-          {
-            m_bAviMjpeg = true;
-          }
-
-          // strfHEADER_BIH
-          QString strSkipId;
-
-          uint32_t nSkipLen;
-          uint32_t nSkipStart;
-
-          strSkipId = m_pWBuf->BufReadStrn(m_nPos, 4);
-          m_nPos += 4;
-          nSkipLen = m_pWBuf->BufX(m_nPos, 4, bSwap);
-          m_nPos += 4;
-          nSkipStart = m_nPos;
-
-          m_nPos = nSkipStart + nSkipLen;       // Skip
-        }
-        else if(fccType == "auds")
-        {
-          // --- auds ---
-
-          // strfHEADER_WAVE
-
-          QString strSkipId;
-
-          uint32_t nSkipLen;
-          uint32_t nSkipStart;
-
-          strSkipId = m_pWBuf->BufReadStrn(m_nPos, 4);
-          m_nPos += 4;
-          nSkipLen = m_pWBuf->BufX(m_nPos, 4, bSwap);
-          m_nPos += 4;
-          nSkipStart = m_nPos;
-
-          m_nPos = nSkipStart + nSkipLen;       // Skip
-        }
-        else
-        {
-          // strfHEADER
-
-          QString strSkipId;
-
-          uint32_t nSkipLen;
-
-          uint32_t nSkipStart;
-
-          strSkipId = m_pWBuf->BufReadStrn(m_nPos, 4);
-          m_nPos += 4;
-          nSkipLen = m_pWBuf->BufX(m_nPos, 4, bSwap);
-          m_nPos += 4;
-          nSkipStart = m_nPos;
-
-          m_nPos = nSkipStart + nSkipLen;       // Skip
+          m_bAviMjpeg = true;
         }
 
-        // strnHEADER
-        uint32_t nPosStrnStart;
-
-        QString strStrnId;
-
-        strStrnId = m_pWBuf->BufReadStrn(m_nPos, 4);
-        m_nPos += 4;
-        uint32_t nStrnLen;
-
-        nStrnLen = m_pWBuf->BufX(m_nPos, 4, bSwap);
-        m_nPos += 4;
-        nPosStrnStart = m_nPos;
-
-        // FIXME: Can we rewrite in terms of ChunkSize and ChunkDataStart?
-        //Q_ASSERT ((nPosStrnStart + nStrnLen + (nStrnLen%2)) == (nChunkDataStart + nChunkSize + (nChunkSize%2)));
-        //m_nPos = nChunkDataStart + nChunkSize + (nChunkSize%2);
-        m_nPos = nPosStrnStart + nStrnLen + (nStrnLen % 2);     // Skip
+        // The rest of the list (the format, a name, strn, which is optional,
+        // or an OpenDML index) isn't decoded: parsing goes on after the list.
+        // (The chunk after the format was taken for a strn and skipped, so
+        // without one the next stream list was lost: a Motion JPEG AVI whose
+        // audio stream came first said "AVI is not MotionJPEG".)
+        m_nPos = nChunkDataStart + nChunkSize + (nChunkSize % 2);
       }
       else if(strListType == "movi")
       {

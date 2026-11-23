@@ -223,6 +223,14 @@ private:
   uint32_t DecodeMarker();
   bool WrappedSince(uint32_t nPosFrom) const;
   bool ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen);
+  quint64 SegEnd(uint32_t nPosLength, uint32_t nLength) const;
+  static bool SegHas(quint64 nPos, quint64 nLen, quint64 nPosEnd);
+  enum teSegOverrun { SEG_READ_ON, SEG_STOP_EOF, SEG_STOP };
+  teSegOverrun SegOverrun(const QString &strWhat, quint64 nPos, quint64 nPosEnd, const QString &strSeg, bool &bShown);
+  void SegPastErr(const QString &strWhat, quint64 nPos, quint64 nPosEnd, const QString &strSeg, const QString &strThen);
+  QByteArray ReadIdentifier(quint64 nPos, quint64 nPosEnd, bool &bEnds);
+  void TakeIdentifier(const QByteArray &abId, bool bEnds, quint64 nPosEnd, const QString &strIn, char *acId,
+                      uint32_t nAfter);
   void DecodeEmbeddedThumb();
   bool DecodeAvi();
   bool IsZeroAviHeader(uint64_t nPos, uint64_t nPosEof);
@@ -234,10 +242,10 @@ private:
   uint32_t DecodeExifIfd(QString strIfd, uint32_t nPosExifStart, uint32_t nStartIfdPtr);
 //      uint32_t                DecodeMakerIfd(uint32_t ifd_tag,uint32_t ptr,uint32_t len);
   bool DecodeMakerSubType();
-  void DecodeDHT(bool bInject);
+  bool DecodeDHT(bool bInject);
   uint32_t DecodeApp13Ps(uint32_t nPosEnd);
   uint32_t DecodeApp2Flashpix(quint64 nPosEnd);
-  uint32_t DecodeApp2IccProfile(uint32_t nLen);
+  uint32_t DecodeApp2IccProfile(quint64 nPosEnd);
   uint32_t DecodeIccHeader(uint32_t nPos);
 
   // DQT / DHT

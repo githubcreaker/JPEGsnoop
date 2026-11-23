@@ -1166,12 +1166,16 @@ huge = huge[:12] + struct.pack(">HII", 32768, 1 << 20, 1 << 29) + huge[22:]  # c
 case("PSD_size_overflow", "PSD", "decode", write("psd_size_overflow.psd", huge), timeout=20,
      expect="ERROR: An image of 536870912x1048576 pixels, 32768 channels and 8 bits a sample is outside")
 # An additional layer info length of 0xFFFFFFF4 wrapped the position back to
-# the same block: the decode never ended
+# the same block: the decode never ended. It runs past the end of its section
+# (here from 38, after the header and two empty sections, for 28 bytes), and
+# the file. Its data would start after the 12-byte headers of the layer info,
+# the global mask and the block.
 addtl = b"8BIMabcd" + struct.pack(">I", 0xFFFFFFF4)
 lm = struct.pack(">II", 0, 0) + addtl + b"\0" * 8
 case("PSD_addtl_wrap", "PSD", "decode",
      write("psd_addtl_wrap.psd", psd(1, 1, [b"\0"] * 3, layers=lm)), timeout=20,
-     expect="ERROR: Additional layer info \\[abcd\\] at .* runs past the end of the file")
+     expect=f"^ERROR: Additional layer info \\[abcd\\] at \\[0x{38 + 4 + 4 + 12:08x}\\] runs past the end of the layer and "
+            f"mask information, at \\[0x{38 + len(lm):08x}\\]\\. Stopping\\.$")
 # A layer whose bottom is above its top: a height near 4 billion, and a 16 GB
 # row length table
 tall = struct.pack(">iiiiH", 0, 0, -16, 1, 1) + struct.pack(">HI", 0, 2) + b"8BIMnorm" + bytes([255, 0, 0, 0])
@@ -5383,13 +5387,14 @@ ra_case("RA_layersel_one", write("ra_layersel_one.jpg", app13_only(bim(0x042D, b
         ra_past("Layer count", RA_PS, RA_PS + 1))
 ra_case("RA_layersel_one_next", "ra_layersel_one.jpg", "^ +Global Angle += 30 degrees$")
 # FlashPix at the end of a file of 4 GiB - 1 bytes: entry #0 (a storage, with
-# an empty name) ends at the file's end, and its 16-byte class takes the
-# position past 2^32, to 15. The entries went on from the file's start.
+# an empty name) ends at the file's end, and its 16-byte class took the
+# position past 2^32, to 15. The entries went on from the file's start. (The
+# class is now checked first: see RP.)
 ra_wrap_tail = b"\xff\xd8\xff\xe2\xff\xff" + b"FPXR\x00\x00\x01\xff\xff" + b"\xff\xff\xff\xff\x00" + b"\x00\x00"
 ra_fpx_wrap, ra_wrap_at = wr_file("ra_fpx_wrap.bin", ra_wrap_tail, c420)
 ra_case("RA_fpx_wrap_lines", ra_fpx_wrap, RA_SMALL, flags=f"--start {ra_wrap_at}", timeout=20)
-ra_case("RA_fpx_wrap", ra_fpx_wrap, ra_past("FlashPix entry #1", (1 << 32) + 15, WR_SIZE, "APP2 segment"),
-        flags=f"--start {ra_wrap_at}", timeout=20)
+ra_case("RA_fpx_wrap", ra_fpx_wrap, ra_past("FlashPix storage class", WR_SIZE, WR_SIZE, "APP2 segment"),
+        forbid="FlashPix entry #1", flags=f"--start {ra_wrap_at}", timeout=20)
 
 # Maker notes. IFD0: Make "Canon" and the Exif IFD, which has a MakerNote at an
 # offset: here 0x4000, outside the APP1. The file still has maker notes, which
@@ -5412,6 +5417,601 @@ ra_case("RA_maker_out_summary", "ra_maker_out.jpg", "^  EXIF Makernotes: +OK +$"
 ra_mk = ra_maker(62, struct.pack("<H", 0xFFFF) + struct.pack("<HHII", 0x000C, 4, 1, 1234))
 ra_case("RA_maker_entries", write("ra_maker_entries.jpg", b"\xff\xd8" + ra_mk + c444[2:]),
         ra_past("MakerIFD entry #1", 2 + len(ra_mk), 2 + len(ra_mk), "APP1 segment"))
+
+# --- RP: reads past their own field ----------------------------------------------------
+# A length or count from the file, or a field of a fixed size, that nothing
+# compared with the segment, resource or value holding it: the field was read
+# from whatever came after (the next segment, or past the end of the file,
+# where every byte reads as 0), and shown or used as its own. Each is now read
+# only inside what holds it, and an error says where it would have run past it
+# ("at [its end]"). A table or header the image needs then stops the decode, as
+# a length that doesn't match its fields does, unless Relaxed Parsing is on:
+# then it is read as before, so a wrong length with the right fields still
+# decodes. Cut short by the end of the file, it is an Early EOF.
+def rp_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "RP", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def ere(text):
+    """text as a grep -E pattern that matches it literally."""
+    return "".join("\\" + c if c in ".[]()*+?{}|^$\\" else c for c in text)
+
+
+def rp_past(what, at, end, container, then="."):
+    return (f"^ERROR: {ere(what)} at \\[0x{at:08x}\\] runs past the end of its {container}, "
+            f"at \\[0x{end:08x}\\]{ere(then)}$")
+
+
+def psd_past(what, at, end, part):
+    """A part of a PSD past the end of the part holding it (not just the file)."""
+    return f"^ERROR: {ere(what)} at \\[0x{at:08x}\\] runs past the end of {part}, at \\[0x{end:08x}\\]\\. Stopping\\.$"
+
+
+RP_STOP = "^  Stopping decode$"
+RP_EOF = "^ERROR: Early EOF - file may be missing EOI$"
+RP_IMAGE = "^harness: decoded=1 preview=64x48 "
+# c444 split after its APP0 (20 bytes): a segment put there starts at RP_AT,
+# its length at RP_AT + 2 and its data at RP_AT + 4
+RP_HEAD, RP_REST = after_app0(c444)
+RP_AT = len(RP_HEAD)
+
+
+def rp_file(name, extra):
+    """c444 with segments put after its APP0."""
+    return write(name, RP_HEAD + extra + RP_REST)
+
+
+# DHT: a table of 12 codes with 4 of them in the segment, and a COM after it.
+# The rest were read from the COM, and parsing went on inside it ("Expected
+# marker 0xFF, got 0x45", the E of the comment)
+rp_dht = seg(0xC4, b"\x00" + bytes([0, 12] + [0] * 14) + bytes(range(4)))
+rp_case("RP_dht", rp_file("rp_dht.jpg", rp_dht + seg(0xFE, b"ABCDEFGHIJKL")),
+        rp_past("DHT table", RP_AT + 4, RP_AT + len(rp_dht), "DHT segment"), forbid="41 42 43")
+rp_case("RP_dht_stop", "rp_dht.jpg", RP_STOP, forbid="Expected marker")
+# A whole table of 2 codes with a length 2 short of it, the next segment right
+# after it: read as before with Relaxed Parsing, and the image decodes
+rp_tab = b"\x00" + bytes([0, 2] + [0] * 14) + b"\x00\x01"
+rp_dht_short = b"\xff\xc4" + struct.pack(">H", len(rp_tab)) + rp_tab
+rp_case("RP_dht_short", rp_file("rp_dht_short.jpg", rp_dht_short),
+        rp_past("DHT table", RP_AT + 4, RP_AT + len(rp_dht_short) - 2, "DHT segment"), forbid=RP_IMAGE)
+rp_case("RP_dht_short_relaxed", "rp_dht_short.jpg",
+        rp_past("DHT table", RP_AT + 4, RP_AT + len(rp_dht_short) - 2, "DHT segment"), flags="--relaxed")
+rp_case("RP_dht_short_relaxed_image", "rp_dht_short.jpg", RP_IMAGE, flags="--relaxed")
+# Cut short by the end of the file in its codes (10 said, 3 there): they were
+# read on past it, as zeros
+rp_case("RP_dht_cut", write("rp_dht_cut.jpg", b"\xff\xd8\xff\xc4\x00\x20\x00" + bytes([0, 10] + [0] * 14) + b"\x01\x02\x03"),
+        rp_past("DHT table", 6, 7 + 16 + 3, "DHT segment"), forbid="01 02 03 00")
+rp_case("RP_dht_cut_eof", "rp_dht_cut.jpg", RP_EOF, forbid="Stopping decode")
+
+# DQT: a length of 3 holds the table's precision and destination (2) but none
+# of its 64 values, which were the next segments' bytes, given a quality factor
+rp_dqt = seg(0xDB, b"\x02")
+RP_DQT = rp_past("DQT table", RP_AT + 4, RP_AT + len(rp_dqt), "DQT segment")
+rp_case("RP_dqt", rp_file("rp_dqt.jpg", rp_dqt), RP_DQT, forbid="Marker length shorter than expected")
+rp_case("RP_dqt_relaxed", "rp_dqt.jpg", RP_DQT, flags="--relaxed")
+rp_case("RP_dqt_relaxed_image", "rp_dqt.jpg", RP_IMAGE, flags="--relaxed")
+# 16-bit values (precision 1): 64 bytes there, 128 needed
+rp_dqt16 = seg(0xDB, b"\x10" + bytes(range(1, 65)))
+rp_case("RP_dqt16", rp_file("rp_dqt16.jpg", rp_dqt16),
+        rp_past("DQT table", RP_AT + 4, RP_AT + len(rp_dqt16), "DQT segment"),
+        forbid="Marker length shorter than expected")
+# Cut short by the end of the file: 10 of the 64 values there
+rp_case("RP_dqt_cut", write("rp_dqt_cut.jpg", b"\xff\xd8\xff\xdb\x00\x43\x00" + bytes(range(1, 11))),
+        rp_past("DQT table", 6, 7 + 10, "DQT segment"), forbid="DQT, Row #0")
+rp_case("RP_dqt_cut_eof", "rp_dqt_cut.jpg", RP_EOF)
+# Two tables said, one there, whole: the second was read from past the end
+# (destination 0, of zeros)
+rp_case("RP_dqt_cut_whole", write("rp_dqt_cut_whole.jpg", b"\xff\xd8\xff\xdb\x00\x84\x01" + bytes(range(1, 65))),
+        RP_EOF, forbid="Destination ID=0")
+
+# SOF0: 3 components and a length for one. The next two were read from the
+# DHT after it (FF C4 00: a sampling factor of 0xC4, 12 x 4)
+rp_sof_at = marker_pos(c444, 0xC0)
+rp_sof_end = rp_sof_at + 2 + struct.unpack(">H", c444[rp_sof_at + 2:rp_sof_at + 4])[0]
+rp_sof = c444[:rp_sof_at] + b"\xff\xc0" + struct.pack(">H", 11) + c444[rp_sof_at + 4:rp_sof_at + 13] + c444[rp_sof_end:]
+rp_case("RP_sof", write("rp_sof.jpg", rp_sof), rp_past("Component[2]", rp_sof_at + 13, rp_sof_at + 13, "SOF segment"),
+        forbid="Sampling Factor <Hi> value too large")
+# A length of 5: the precision and number of lines (3 bytes), not the width,
+# which was read from the DHT's marker (0xFFC4)
+rp_sof_hdr = c444[:rp_sof_at] + b"\xff\xc0\x00\x05" + c444[rp_sof_at + 4:rp_sof_at + 7] + c444[rp_sof_end:]
+rp_case("RP_sof_header", write("rp_sof_header.jpg", rp_sof_hdr),
+        rp_past("Frame header", rp_sof_at + 4, rp_sof_at + 7, "SOF segment"), forbid="Samples per Line = 65476")
+
+# SOS: a length of 8 for 3 components (12): the third, and the spectral
+# selection, were read on, and the image decoded. It stops now, but decodes
+# as before with Relaxed Parsing.
+rp_sos_at = marker_pos(c444, 0xDA)
+rp_sos = bytearray(c444)
+struct.pack_into(">H", rp_sos, rp_sos_at + 2, 8)
+RP_SOS = rp_past("Component[3]", rp_sos_at + 9, rp_sos_at + 10, "SOS segment")
+rp_case("RP_sos", write("rp_sos.jpg", bytes(rp_sos)), RP_SOS, forbid=RP_IMAGE)
+rp_case("RP_sos_relaxed", "rp_sos.jpg", RP_SOS, flags="--relaxed")
+rp_case("RP_sos_relaxed_image", "rp_sos.jpg", RP_IMAGE, flags="--relaxed")
+
+# DRI, DNL, EXP: no room for their value, which came from the DQT's marker
+# after them (0xFFDB)
+rp_case("RP_dri", rp_file("rp_dri.jpg", seg(0xDD, b"")),
+        rp_past("Restart interval", RP_AT + 4, RP_AT + 4, "DRI segment"), forbid="interval += 65499")
+rp_case("RP_dnl", rp_file("rp_dnl.jpg", seg(0xDC, b"")),
+        rp_past("Number of lines", RP_AT + 4, RP_AT + 4, "DNL segment"), forbid="Number of lines = 65499")
+rp_case("RP_exp_short", rp_file("rp_exp_short.jpg", seg(0xDF, b"")),
+        rp_past("Expansion", RP_AT + 4, RP_AT + 4, "EXP segment"), forbid="Expand horizontally = 13")
+# EXP's Eh and Ev are one byte (T.81 B.3.3, a segment of 3 bytes). Two were read,
+# 0x11 and the next marker's 0xFF, which gave 15 and 15, and an error
+rp_case("RP_exp", rp_file("rp_exp.jpg", seg(0xDF, b"\x11")), "^  Expand vertically   = 1$", forbid="value too large")
+rp_case("RP_exp_h", "rp_exp.jpg", "^  Expand horizontally = 1$", forbid="Marker length shorter than expected")
+rp_case("RP_exp_image", "rp_exp.jpg", RP_IMAGE)
+# DAC cut short by the end of the file in its second entry
+rp_case("RP_dac_cut", write("rp_dac_cut.jpg", b"\xff\xd8\xff\xcc\x00\x06\x00\x01\x10"),
+        rp_past("DAC entry #2", 8, 9, "DAC segment"), forbid="#02: Table class")
+rp_case("RP_dac_cut_eof", "rp_dac_cut.jpg", RP_EOF)
+# A JFIF APP0 of only its identifier: the version and the rest were read from
+# the DQT after it (version 255.219)
+rp_case("RP_jfif", write("rp_jfif.jpg", b"\xff\xd8" + seg(0xE0, b"JFIF\x00") + RP_REST),
+        rp_past("JFIF header", 11, 11, "APP0 segment"), forbid="version += \\[255\\.219\\]")
+
+# APPn identifiers. "Duck" with no 0 in its APP12 ran on into the COM after it,
+# whose length (0x4142) and text give "ABCD"
+rp_id = seg(0xEC, b"Duck") + seg(0xFE, b"CD\x00" + bytes(0x4142 - 2 - 3))
+rp_case("RP_id_past", rp_file("rp_id_past.jpg", rp_id), "^  Identifier      = \\[Duck\\]$", forbid="DuckAB")
+# (Its 0 isn't in the segment: it matches nothing)
+rp_case("RP_id_past_err", "rp_id_past.jpg",
+        rp_past("Identifier", RP_AT + 4, RP_AT + 8, "APP12 segment", ". Skipping."), forbid="DuckAB")
+# "Ex\x01if" was shown and taken as "Exif" (bytes that don't print were left
+# out), and its TIFF header read a byte early. Such a byte is shown as a dot.
+rp_case("RP_id_unprintable", rp_file("rp_id_unprintable.jpg", seg(0xE1, b"Ex\x01if\x00\x00II*\x00" + struct.pack("<I", 8) + bytes(6))),
+        "^Identifier \\[Ex\\.if\\] not supported\\. Skipping remainder\\.$", forbid="Identifier TIFF")
+rp_case("RP_id_unprintable_shown", "rp_id_unprintable.jpg", "^  Identifier      = \\[Ex\\.if\\]$",
+        forbid="Identifier      = \\[Exif\\]")
+# Photoshop's Save for Web quality, 6 bytes after "Ducky", past a 9-byte APP12
+rp_duck = seg(0xEC, b"Ducky\x00" + b"\x00\x01\x00")
+rp_case("RP_ducky", rp_file("rp_ducky.jpg", rp_duck),
+        rp_past("Photoshop Save For Web Quality", RP_AT + 4 + 6 + 6, RP_AT + len(rp_duck), "APP12 segment", ". Skipping."),
+        forbid="Save For Web Quality = \\[")
+# The EXIF TIFF header (8 bytes) in an APP1 that ends 4 bytes into it
+rp_tiffh = seg(0xE1, b"Exif\x00\x00II*\x00")
+rp_case("RP_exif_header", rp_file("rp_exif_header.jpg", rp_tiffh),
+        rp_past("EXIF TIFF header", RP_AT + 4 + 6, RP_AT + len(rp_tiffh), "APP1 segment", ". Skipping."),
+        forbid="Identifier TIFF")
+
+# EXIF values at an offset. IFD0: ImageDescription, 20 characters at 38 (after
+# the IFD), of which the APP1 holds 12: the rest came from the APP15 after it
+# ("EVIL"). Orientation after it is still read.
+rp_t = (b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 2) + struct.pack("<HHII", 0x010E, 2, 20, 38)
+        + struct.pack("<HHIHH", 0x0112, 3, 1, 1, 0) + struct.pack("<I", 0) + b"Hello world!")
+rp_val = seg(0xE1, b"Exif\x00\x00" + rp_t)
+RP_TIFF = RP_AT + 4 + 6   # where the TIFF header starts, from which offsets count
+rp_case("RP_exif_value", rp_file("rp_exif_value.jpg", rp_val + seg(0xEF, b"EVILEVIL")),
+        rp_past("IFD0 entry #0 (ImageDescription) value", RP_TIFF + 38, RP_AT + len(rp_val), "APP1 segment", ". Skipping."),
+        forbid="EVIL")
+rp_case("RP_exif_value_next", "rp_exif_value.jpg", "^ +\\[Orientation +\\] = 1 = Row 0: top, Col 0: left$")
+# An APP1 that ends with IFD0's one entry: the offset to the next IFD was read
+# from the DQT after it
+rp_next = seg(0xE1, b"Exif\x00\x00II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 1)
+              + struct.pack("<HHIHH", 0x0112, 3, 1, 1, 0))
+rp_case("RP_exif_next", rp_file("rp_exif_next.jpg", rp_next),
+        rp_past("IFD0's offset to the next IFD", RP_AT + len(rp_next), RP_AT + len(rp_next), "APP1 segment", ". Stopping."),
+        forbid="Offset to Next IFD")
+# XP tags count bytes: XPTitle "ABC" (6 bytes, no 0) was read as 6 characters,
+# on into XPComment after it ("XYZ"). XPAuthor "AB" (4 bytes) is in the entry
+# itself, and was read at those bytes taken as an offset (as "").
+rp_xp_off = 8 + 2 + 3 * 12 + 4
+rp_xp = (b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 3)
+         + struct.pack("<HHII", 0x9C9B, 1, 6, rp_xp_off) + struct.pack("<HHII", 0x9C9C, 1, 8, rp_xp_off + 6)
+         + struct.pack("<HHI", 0x9C9D, 1, 4) + "AB".encode("utf-16-le") + struct.pack("<I", 0)
+         + "ABC".encode("utf-16-le") + "XYZ\x00".encode("utf-16-le"))
+rp_case("RP_xp_title", rp_file("rp_xp.jpg", seg(0xE1, b"Exif\x00\x00" + rp_xp)), '^    \\[XPTitle +\\] = "ABC"$',
+        forbid='"ABCX')
+rp_case("RP_xp_author", "rp_xp.jpg", '^    \\[XPAuthor +\\] = "AB"$', forbid='\\[XPAuthor +\\] = ""')
+rp_case("RP_xp_comment", "rp_xp.jpg", '^    \\[XPComment +\\] = "XYZ"$')
+
+
+# CFAPattern (in the Exif IFD): 2 x 2 cells, after the two sizes, need 8 bytes.
+# With 6, its second row was the previous entry's values (5 and 4: Yel Mgn).
+def rp_cfa(cfa):
+    other = bytes([9, 9, 9, 9, 5, 4, 5, 4])
+    sub_at = 8 + 2 + 12 + 4
+    vals = sub_at + 2 + 2 * 12 + 4
+    t = (b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 1) + struct.pack("<HHII", 0x8769, 4, 1, sub_at)
+         + struct.pack("<I", 0) + struct.pack("<H", 2)
+         + struct.pack("<HHII", 0xA2F0, 7, len(other), vals) + struct.pack("<HHII", 0xA302, 7, len(cfa), vals + 8)
+         + struct.pack("<I", 0) + other + cfa)
+    return seg(0xE1, b"Exif\x00\x00" + t)
+
+
+rp_case("RP_cfa", rp_file("rp_cfa.jpg", rp_cfa(bytes([0, 2, 0, 2, 0, 1]))),
+        "^ERROR: CFAPattern of 2 x 2 cells needs 8 bytes, but has 6$", forbid="Yel Mgn")
+rp_case("RP_cfa_whole", rp_file("rp_cfa_whole.jpg", rp_cfa(bytes([0, 2, 0, 2, 0, 1, 1, 2]))), "= \\[ Grn Blu \\]$")
+
+
+# A Canon maker note: an entry of 200 SHORTs (7), more than are shown, listed
+# the entry before's values (11, 22, ...): its own weren't read
+def rp_canon():
+    ifd0_len = 2 + 2 * 12 + 4
+    make_off = 8 + ifd0_len
+    sub_off = make_off + 6
+    mk_off = sub_off + 2 + 12 + 4
+    a_vals = mk_off + 2 + 2 * 12 + 4
+    b_vals = a_vals + 16
+    t = (b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 2) + struct.pack("<HHII", 0x010F, 2, 6, make_off)
+         + struct.pack("<HHII", 0x8769, 4, 1, sub_off) + struct.pack("<I", 0) + b"Canon\x00"
+         + struct.pack("<H", 1) + struct.pack("<HHII", 0x927C, 7, 2 + 2 * 12 + 4 + 16 + 400, mk_off) + struct.pack("<I", 0)
+         + struct.pack("<H", 2) + struct.pack("<HHII", 0x0001, 3, 8, a_vals) + struct.pack("<HHII", 0x0004, 3, 200, b_vals)
+         + struct.pack("<I", 0) + struct.pack("<8H", 11, 22, 33, 44, 55, 66, 77, 88) + struct.pack("<200H", *([7] * 200)))
+    return seg(0xE1, b"Exif\x00\x00" + t)
+
+
+write("rp_canon.jpg", RP_HEAD + rp_canon() + RP_REST)
+rp_case("RP_canon_list", "rp_canon.jpg", "^      \\[Canon\\.Cs2\\.ISOSpeed +\\] = 7$",
+        forbid="Canon\\.Cs2\\.ISOSpeed +\\] = 33", flags="--maker-notes")
+
+# ICC: a first marker of 20 bytes, whose 128-byte header was read from the
+# segments after it; and one with no marker number at all
+rp_icc = seg(0xE2, b"ICC_PROFILE\x00\x01\x01" + bytes(20))
+rp_case("RP_icc", rp_file("rp_icc.jpg", rp_icc),
+        rp_past("ICC profile header", RP_AT + 4 + 14, RP_AT + len(rp_icc), "APP2 segment", ". Skipping."),
+        forbid="Profile Size")
+rp_icc0 = seg(0xE2, b"ICC_PROFILE\x00")
+rp_case("RP_icc_number", rp_file("rp_icc_number.jpg", rp_icc0),
+        rp_past("ICC marker number", RP_AT + 4 + 12, RP_AT + len(rp_icc0), "APP2 segment", ". Skipping."),
+        forbid="Marker Number =")
+
+# FlashPix. A contents list entry (size, default) whose stream name has no 0
+# in the segment ("ABCD"): up to 255 characters were read, on into the DQT after it
+RP_FPX_ENTRY = RP_AT + 4 + 5 + 4   # after "FPXR\0", the version, type and count
+rp_fpx_name = seg(0xE2, b"FPXR\x00\x00\x01\x00\x01" + struct.pack(">I", 16) + b"\x00" + "ABCD".encode("utf-16-le"))
+rp_case("RP_fpx_name", rp_file("rp_fpx_name.jpg", rp_fpx_name),
+        rp_past("FlashPix stream name", RP_FPX_ENTRY + 5, RP_AT + len(rp_fpx_name), "APP2 segment", ". Stopping."),
+        forbid="Stream Name = \\[ABCD[^]]")
+rp_case("RP_fpx_name_shown", "rp_fpx_name.jpg", "^        Stream Name = \\[ABCD\\]$")
+# A storage ("A") whose 16-byte class has 8 bytes in the segment
+rp_fpx_st = seg(0xE2, b"FPXR\x00\x00\x01\x00\x01" + b"\xff\xff\xff\xff\x00" + "A\x00".encode("utf-16-le") + bytes(8))
+rp_case("RP_fpx_storage", rp_file("rp_fpx_storage.jpg", rp_fpx_st),
+        rp_past("FlashPix storage class", RP_FPX_ENTRY + 5 + 4, RP_AT + len(rp_fpx_st), "APP2 segment", ". Stopping."),
+        forbid="Storage Class =")
+# Stream data whose header (32 bytes) has 10 in the segment
+rp_fpx_sd = seg(0xE2, b"FPXR\x00\x00\x02" + bytes(10))
+rp_case("RP_fpx_stream", rp_file("rp_fpx_stream.jpg", rp_fpx_sd),
+        rp_past("FlashPix stream header", RP_AT + 4 + 7, RP_AT + len(rp_fpx_sd), "APP2 segment", ". Skipping."),
+        forbid="ByteOrder =")
+
+# A comment of length 0xFFFF in a file that ends 3 bytes into it: the rest
+# was shown as 65,530 dots
+rp_case("RP_com_eof", write("rp_com_eof.jpg", b"\xff\xd8\xff\xfe\xff\xffabc"), "^    Comment=abc$",
+        forbid="Comment=abc\\.")
+rp_case("RP_com_eof_eof", "rp_com_eof.jpg", RP_EOF)
+
+# AVI: an audio stream list with no name (strn) before the Motion JPEG one. The
+# chunk after its format was taken for a strn and skipped: the video's list
+rp_strl_a = (b"strl" + chunk(b"strh", b"audsNONE" + struct.pack("<11I", 0, 0, 0, 1, 8000, 0, 10, 0, 0, 0, 0) + bytes(4))
+             + chunk(b"strf", bytes(18)))
+rp_avi = (b"AVI " + chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56))) + chunk(b"LIST", rp_strl_a)
+          + chunk(b"LIST", strl) + AV_IDIT)
+write("rp_avi_strl.avi", b"RIFF" + struct.pack("<I", len(rp_avi)) + rp_avi)
+rp_case("RP_avi_strl", "rp_avi_strl.avi", "^  AVI is MotionJPEG$", forbid="AVI is not MotionJPEG")
+rp_case("RP_avi_strl_rate", "rp_avi_strl.avi", "Sample Rate\\]  = \\[30\\.00\\] frames/sec$")
+# A stream header (strh) of 4 bytes, the type: the codec and rate were read
+# from the format chunk after it ("strf")
+rp_avi_s = (b"AVI " + chunk(b"LIST", b"hdrl" + chunk(b"avih", bytes(56)))
+            + chunk(b"LIST", b"strl" + chunk(b"strh", b"vids") + chunk(b"strf", bytes(40))))
+write("rp_avi_strh.avi", b"RIFF" + struct.pack("<I", len(rp_avi_s)) + rp_avi_s)
+RP_STRH = 12 + 8 + 4 + 8 + 56 + 12   # RIFF, the hdrl list, then LIST strl's header
+rp_case("RP_avi_strh", "rp_avi_strh.avi",
+        f"^  ERROR: AVI stream header \\(strh\\) at 0x{RP_STRH:08x} is 4 bytes, too short for the type, codec and "
+        "rate \\(28\\)$", forbid="FourCC Codec\\] = \\[strf\\]")
+rp_case("RP_avi_strh_type", "rp_avi_strh.avi", "FourCC Type\\]  = \\[vids\\] Video$")
+
+# Photoshop resources (APP13: see RA_PS). A thumbnail resource of 4 bytes: its
+# 28-byte header came from the next resource ("8BIM" as the width)
+rp_case("RP_ps_thumb", write("rp_ps_thumb.jpg", app13_only(bim(0x040C, b"\x00\x00\x00\x01") + RA_ANGLE)),
+        ra_past("Thumbnail header", RA_PS, RA_PS + 4), forbid="Width of thumbnail")
+rp_case("RP_ps_thumb_next", "rp_ps_thumb.jpg", "^ +Global Angle += 30 degrees$")
+# JPEG quality of 2 bytes (the quality, 0x0005): the format and scans were the
+# next resource's ("8B")
+rp_case("RP_ps_quality", write("rp_ps_quality.jpg", app13_only(bim(0x0406, b"\x00\x05") + RA_ANGLE)),
+        "^ +Photoshop Save As Quality += 9 $", forbid="Photoshop Save Format")
+# With 3 bytes (odd, so padded) the read past it put the position a byte early,
+# and every resource after it was lost. (It now reads 2, short of its length,
+# and is skipped by that length and its pad.)
+rp_case("RP_ps_lost", write("rp_ps_lost.jpg", app13_only(bim(0x0406, b"\x00\x05\x00") + RA_ANGLE)),
+        "^ +Global Angle += 30 degrees$")
+# Resolution info (16 bytes) with 2 more: a block read short stopped the
+# parsing inside it, also losing the rest
+rp_case("RP_ps_short_read", write("rp_ps_short_read.jpg", app13_only(bim(0x03ED, bytes(18)) + RA_ANGLE)),
+        "^ +Global Angle += 30 degrees$")
+# A Global Angle (4 bytes) whose length says 5, with Global Altitude (7) right
+# after its value: nothing starts where the length ends (and its pad), so it
+# goes on where the value did, as it always had
+rp_long = app13_only(bim(0x040D, struct.pack(">I", 30), 5) + bim(0x0419, struct.pack(">I", 7)))
+rp_case("RP_ps_long", write("rp_ps_long.jpg", rp_long), "^ +Global Altitude += 7 $")
+rp_case("RP_ps_long_note", "rp_ps_long.jpg",
+        f"^NOTE: No 8BIM resource where its length ends, at \\[0x{RA_PS + 6:08x}\\], but one where its fields do, at "
+        f"\\[0x{RA_PS + 4:08x}\\]: going on there$")
+# Version info: its version and flag (5 bytes), and 1 more; no room for the
+# writer's name length, and the file version came from past it
+rp_case("RP_ps_version", write("rp_ps_version.jpg", app13_only(bim(0x0421, struct.pack(">IB", 1, 1) + b"\x00") + RA_ANGLE)),
+        ra_past("Unicode string", RA_PS + 5, RA_PS + 6), forbid="File version")
+# Grid and guides: 2 guides said, 1 there and 3 bytes of the second
+rp_case("RP_ps_guides", write("rp_ps_guides.jpg", app13_only(
+    bim(0x0408, struct.pack(">IIII", 1, 576, 576, 2) + struct.pack(">IB", 100, 0) + b"\x00\x00\x01"))),
+        ra_past("Guide #1", RA_PS + 21, RA_PS + 24), forbid="Guide #1:")
+# Slices (version 6): a slice whose fixed fields after its name (20 bytes) have
+# 8 in the resource
+rp_slice = (struct.pack(">I", 6) + struct.pack(">IIII", 0, 0, 48, 64) + struct.pack(">I", 0) + struct.pack(">I", 1)
+            + struct.pack(">III", 1, 0, 0) + struct.pack(">I", 0) + bytes(8))
+rp_case("RP_ps_slices", write("rp_ps_slices.jpg", app13_only(bim(0x041A, rp_slice))),
+        ra_past("Slice type", RA_PS + len(rp_slice) - 8, RA_PS + len(rp_slice)), forbid="Position \\(right\\)")
+
+
+# A descriptor (in slices of version 7): items "Wdth" (a double, 2.5) and
+# "Hght" (a long, 5). A double was left unread, and its first 4 bytes taken for
+# the next key's length (0x40040000)
+def rp_desc(items):
+    return (struct.pack(">II", 7, 16) + struct.pack(">I", 0) + struct.pack(">I", 0) + b"null"
+            + struct.pack(">I", len(items)) + b"".join(struct.pack(">I", 0) + k + t + v for k, t, v in items))
+
+
+rp_dbl = rp_desc([(b"Wdth", b"doub", struct.pack(">d", 2.5)), (b"Hght", b"long", struct.pack(">I", 5))])
+rp_case("RP_ps_double", write("rp_ps_double.jpg", app13_only(bim(0x041A, rp_dbl))), "^ +Value += 5 $",
+        forbid="String of length")
+rp_case("RP_ps_double_value", "rp_ps_double.jpg", "^ +Value += 2\\.50000 $")
+# A reference ("obj "), which isn't decoded: the rest of the resource isn't
+# either (its first 4 bytes, a count, were taken for the next key's length)
+rp_obj = rp_desc([(b"Wdth", b"obj ", struct.pack(">I", 1) + b"prop"), (b"Hght", b"long", struct.pack(">I", 5))])
+RP_OBJ = RA_PS + 4 + 4 + 4 + 8 + 4 + 8   # the item's type
+rp_case("RP_ps_reference", write("rp_ps_reference.jpg", app13_only(bim(0x041A, rp_obj) + RA_ANGLE)),
+        f"^NOTE: Descriptor item type \\[obj \\] at \\[0x{RP_OBJ:08x}\\] isn't decoded, so the rest of its 8BIM resource "
+        "isn't either$", forbid="Descriptor item #1:")
+rp_case("RP_ps_reference_next", "rp_ps_reference.jpg", "^ +Global Angle += 30 degrees$")
+# A resource of a type not decoded (0x03E8) holding an "8BIM" Global Angle
+# (77): parsing went on inside it, and the angle was reported
+rp_case("RP_ps_unknown", write("rp_ps_unknown.jpg", app13_only(bim(0x03E8, bim(0x040D, struct.pack(">I", 77))) + RA_ANGLE)),
+        "^ +Global Angle += 30 degrees$", forbid="Global Angle += 77")
+# An 8BIM header cut by the end of its APP13 (its ID and 1 byte of the rest):
+# the length was said to run past the segment, as 0
+rp_ps_hdr = seg(0xED, b"Photoshop 3.0\x00" + b"8BIM\x04\x0d\x00")
+rp_case("RP_ps_header", write("rp_ps_header.jpg", b"\xff\xd8" + rp_ps_hdr + c444[2:]),
+        f"^ERROR: 8BIM header at \\[0x{2 + 4 + 14:08x}\\] runs past the end of its segment, at "
+        f"\\[0x{2 + len(rp_ps_hdr):08x}\\]\\. Stopping\\.$", forbid="8BIM length")
+
+
+# PSD layers: a "lyid" block of 2 bytes (its value needs 4), whose ID was
+# read from the channel data after it; a "luni" name of 10 characters in a
+# block of 2
+def rp_psd(name, blocks=b"", patch=None):
+    lay = psd_layers(pw, ph, [p_r, p_g, p_b], "Lay", blocks=blocks)
+    if patch:
+        lay = patch(lay)
+    data = psd(pw, ph, [p_r, p_g, p_b], layers=lay)
+    write(name, data)
+    return data
+
+
+rp_lyid = rp_psd("rp_psd_lyid.psd", psd_block(b"lyid", b"\x00\x07"))
+rp_lyid_at = rp_lyid.index(b"8BIMlyid") + 12
+rp_case("RP_psd_lyid", "rp_psd_lyid.psd",
+        rp_past("[lyid] value", rp_lyid_at, rp_lyid_at + 2, "additional layer info", ". Stopping."), forbid="Layer ID +=")
+rp_case("RP_psd_lyid_image", "rp_psd_lyid.psd", "^harness: decoded=0 preview=37x23 ")
+rp_luni = rp_psd("rp_psd_luni.psd", psd_block(b"luni", struct.pack(">I", 10) + "AB".encode("utf-16-be")))
+rp_luni_at = rp_luni.rindex(b"8BIMluni") + 12
+rp_case("RP_psd_luni", "rp_psd_luni.psd",
+        rp_past("Unicode string of length 10", rp_luni_at + 4, rp_luni_at + 8, "additional layer info", ". Stopping."),
+        forbid='Layer Name \\(Unicode\\) += "AB[^"]')
+
+
+# A layer record whose extra data ends 3 bytes into its name ("Layer 1", 8
+# bytes with its length): the name and the blocks after it were read from
+# the record's channel data (and the channels then from the wrong place)
+def rp_cut_extra(lay):
+    rec = lay.index(b"8BIMnorm")
+    at = rec + 12          # the extra data's length
+    return lay[:at] + struct.pack(">I", 4 + 4 + 3) + lay[at + 4:]
+
+
+rp_name = rp_psd("rp_psd_name.psd", patch=rp_cut_extra)
+rp_name_at = rp_name.index(b"8BIMnorm") + 12 + 4 + 4 + 4
+rp_case("RP_psd_name", "rp_psd_name.psd",
+        psd_past("Layer name", rp_name_at, rp_name_at + 3, "the layer's extra data"))
+rp_case("RP_psd_name_image", "rp_psd_name.psd", "^harness: decoded=0 preview=37x23 ")
+# A tagged block claiming 100 bytes, with 20 in the record's extra data: its
+# hex dump ran on into the channel data (compression 1, rows of 38 bytes).
+# The record still ends where its extra data does, so its channels are read.
+rp_blk = rp_psd("rp_psd_block.psd", b"8BIMabcd" + struct.pack(">I", 100) + bytes(20))
+rp_blk_at = rp_blk.index(b"8BIMabcd") + 12
+rp_case("RP_psd_block", "rp_psd_block.psd",
+        psd_past("Additional layer info [abcd]", rp_blk_at, rp_blk_at + 20, "the layer's extra data"),
+        forbid="00 01 00 26 00 26")
+rp_case("RP_psd_block_layers", "rp_psd_block.psd", "^ +Layer   1/  1, Channel  3/ 3 *$",
+        forbid="Skipping the rest of the layer and mask information")
+
+
+# The layer info said 8 bytes longer, past the end of its section (by 4)
+def rp_long_info(lay):
+    return struct.pack(">I", struct.unpack(">I", lay[:4])[0] + 8) + lay[4:]
+
+
+rp_info = rp_psd("rp_psd_info.psd", patch=rp_long_info)
+RP_PSD_SECTION = 26 + 4 + 4 + 4   # the header and two empty sections, then the layer and mask one
+RP_PSD_LEN = struct.unpack(">I", rp_info[RP_PSD_SECTION - 4:RP_PSD_SECTION])[0]
+rp_case("RP_psd_info", "rp_psd_info.psd",
+        psd_past("Layer info", RP_PSD_SECTION + 4, RP_PSD_SECTION + RP_PSD_LEN, "the layer and mask information"),
+        forbid="Channel  1/ 3")
+rp_case("RP_psd_info_image", "rp_psd_info.psd", "^harness: decoded=0 preview=37x23 ")
+
+
+# Values cleared for each entry: ComponentsConfiguration shows 4 values, here
+# with 2 of its own after ExifVersion ("0230"), whose last two (0x33, 0x30)
+# it showed as "? ?". (The entry's 2 spare bytes, 4 and 5, would show as "R G".)
+rp_cc_sub = 8 + 2 + 12 + 4
+rp_cc = (b"II*\x00" + struct.pack("<I", 8) + struct.pack("<H", 1) + struct.pack("<HHII", 0x8769, 4, 1, rp_cc_sub)
+         + struct.pack("<I", 0) + struct.pack("<H", 2) + struct.pack("<HHI", 0x9000, 7, 4) + b"0230"
+         + struct.pack("<HHI", 0x9101, 7, 2) + bytes([1, 2, 4, 5]) + struct.pack("<I", 0))
+rp_case("RP_components", rp_file("rp_components.jpg", seg(0xE1, b"Exif\x00\x00" + rp_cc)),
+        "^    \\[ComponentsConfiguration +\\] = \\[Y Cb \\. \\.\\]$", forbid="Y Cb \\? \\?")
+# FlashPix: no room for the version and type, or for a contents list's count
+rp_case("RP_fpx_version", rp_file("rp_fpx_version.jpg", seg(0xE2, b"FPXR\x00\x00")),
+        rp_past("FlashPix version", RP_AT + 4 + 5, RP_AT + 4 + 6, "APP2 segment", ". Skipping."),
+        forbid="Reserved Segment")
+rp_case("RP_fpx_count", rp_file("rp_fpx_count.jpg", seg(0xE2, b"FPXR\x00\x00\x01\x00")),
+        rp_past("FlashPix interoperability count", RP_AT + 4 + 7, RP_AT + 4 + 8, "APP2 segment", ". Skipping."),
+        forbid="Interoperability Count")
+
+# Each fixed-size Photoshop resource a byte short (2 short where that is 0):
+# its fields came from the bytes after it. (ID, size, the error's name, a line
+# that was shown)
+for rp_id_, rp_size, rp_name_, rp_line in (
+        (0x0426, 14, "Print scale", "^ +Style +="), (0x040D, 4, "Global Angle", "^ +Global Angle +="),
+        (0x0419, 4, "Global Altitude", "^ +Global Altitude +="), (0x03F3, 9, "Print flags", "^ +Labels +="),
+        (0x2710, 10, "Print flags information", "^ +Center crop marks +="),
+        (0x0428, 12, "Pixel aspect ratio", "^ +X/Y Ratio +="),
+        (0x0414, 4, "Document-specific IDs seed", "^ +Base value +="),
+        (0x03ED, 16, "Resolution info", "^ +Horizontal resolution +="),
+        (0x0400, 2, "Target layer", "^ +Target layer +="), (0x0421, 5, "Version", "^ +hasRealMergedData +="),
+        (0x0408, 16, "Grid and guides header", "^ +Grid Horizontal +="),
+        (0x041A, 4, "Slice header version", "^ +Version +="),
+        (0x0406, 2, "Photoshop Save As Quality", "^ +Photoshop Save Format +=")):
+    rp_short = rp_size - 1
+    rp_case(f"RP_ps_short_{rp_id_:04x}", write(f"rp_ps_short_{rp_id_:04x}.jpg", app13_only(bim(rp_id_, bytes(range(1, rp_short + 1))))),
+            ra_past(rp_name_, RA_PS, RA_PS + rp_short), forbid=rp_line)
+
+
+# Slices of version 6 cut at each fixed-size field (a slice of origin 1, with
+# an associated layer, and empty strings). (The cut, the field's name and
+# where it starts, a line shown from past the end)
+def rp_slice_v6(origin):
+    head = struct.pack(">I", 6) + struct.pack(">IIII", 0, 0, 48, 64) + struct.pack(">I", 0) + struct.pack(">I", 1)
+    body = struct.pack(">III", 1, 0, origin) + (struct.pack(">I", 9) if origin == 1 else b"") + struct.pack(">I", 0)
+    body += struct.pack(">IIIII", 0, 0, 0, 48, 64) + struct.pack(">I", 0) * 4 + b"\x00" + struct.pack(">I", 0)
+    body += struct.pack(">II", 0, 0) + bytes([255, 1, 2, 3]) + struct.pack(">I", 16)
+    return head + body
+
+
+rp_sv = rp_slice_v6(1)
+RP_SV_SLICE = 4 + 16 + 4 + 4       # where the slice starts
+RP_SV_LAYER = RP_SV_SLICE + 12      # its associated layer ID
+RP_SV_TYPE = RP_SV_LAYER + 4 + 4    # after the ID and the name
+RP_SV_HTML = RP_SV_TYPE + 20 + 16   # after the type, position and 4 strings
+RP_SV_ALIGN = RP_SV_HTML + 1 + 4    # after the flag and the cell text
+RP_SV_DESC = RP_SV_ALIGN + 12
+for rp_cid, rp_cut, rp_name_, rp_at, rp_line in (
+        ("bounds", 4 + 8, "Bound Rect", 4, "Bound Rect \\(top\\)"),
+        ("count", 4 + 16 + 4 + 2, "Number of slices", 4 + 16 + 4, "Number of slices +="),
+        ("id", RP_SV_SLICE + 6, "Slice ID", RP_SV_SLICE, "Group ID"),
+        ("layer", RP_SV_LAYER + 2, "Associated Layer ID", RP_SV_LAYER, "Associated Layer ID +="),
+        ("html", RP_SV_HTML, "Cell text is HTML", RP_SV_HTML, "Cell text is HTML +="),
+        ("align", RP_SV_ALIGN + 6, "Horizontal alignment", RP_SV_ALIGN, "Vertical alignment"),
+        ("desc", RP_SV_DESC + 2, "Descriptor version", RP_SV_DESC, "Descriptor version +=")):
+    rp_case(f"RP_ps_slice_{rp_cid}", write(f"rp_ps_slice_{rp_cid}.jpg", app13_only(bim(0x041A, rp_sv[:rp_cut]))),
+            ra_past(rp_name_, RA_PS + rp_at, RA_PS + rp_cut), forbid=rp_line)
+
+# Descriptor items of the types skipped or read now: a unit float ("#Pxl",
+# 2.5), a class ("Clss"), and data of 3 bytes (an alias); the long (5) after
+# them was read from inside their values
+rp_types = rp_desc([(b"Wdth", b"UntF", b"#Pxl" + struct.pack(">d", 2.5)),
+                    (b"Clas", b"type", struct.pack(">I", 0) + struct.pack(">I", 0) + b"Clss"),
+                    (b"Alis", b"alis", struct.pack(">I", 3) + b"abc"), (b"Hght", b"long", struct.pack(">I", 5))])
+rp_case("RP_ps_types", write("rp_ps_types.jpg", app13_only(bim(0x041A, rp_types))), "^ +Value += 5 $",
+        forbid="String of length")
+rp_case("RP_ps_types_units", "rp_ps_types.jpg", '^ +Units += "#Pxl"$')
+rp_case("RP_ps_types_class", "rp_ps_types.jpg", '^ +classID += "Clss"$')
+rp_case("RP_ps_types_data", "rp_ps_types.jpg", "^ +Data += 3 bytes$")
+
+# PSD: "knko" with a 2-byte value, as "lyid"
+rp_knko = rp_psd("rp_psd_knko.psd", psd_block(b"knko", b"\x00\x01"))
+rp_knko_at = rp_knko.index(b"8BIMknko") + 12
+rp_case("RP_psd_knko", "rp_psd_knko.psd",
+        rp_past("[knko] value", rp_knko_at, rp_knko_at + 2, "additional layer info", ". Stopping."), forbid="Knockout +=")
+
+
+# The layer info's length cut in each fixed-size part of its record (the
+# rectangle, 16 bytes, comes first): after the count (2), the rectangle and
+# channel count (2), the channel list (3 x 6) and the blend mode to the extra
+# data's length (16). (Even lengths: an odd one is padded by a byte.)
+def rp_info_len(n):
+    return lambda lay: struct.pack(">I", n) + lay[4:]
+
+
+for rp_cid, rp_n, rp_name_, rp_at in (("chans", 2 + 16, "Number of channels", 2 + 16),
+                                      ("list", 2 + 16 + 2 + 4, "Layer channel list", 2 + 16 + 2),
+                                      ("blend", 2 + 16 + 2 + 18 + 10, "Blend mode signature", 2 + 16 + 2 + 18),
+                                      ("extra", 2 + 16 + 2 + 18 + 16 + 6, "Layer extra data", 2 + 16 + 2 + 18 + 16)):
+    rp_psd(f"rp_psd_cut_{rp_cid}.psd", patch=rp_info_len(rp_n))
+    rp_case(f"RP_psd_cut_{rp_cid}", f"rp_psd_cut_{rp_cid}.psd",
+            psd_past(rp_name_, RP_PSD_SECTION + 4 + rp_at, RP_PSD_SECTION + 4 + rp_n + rp_n % 2, "the layer info"),
+            forbid="Channel  1/ 3")
+
+
+# The extra data's length cut in the mask and blending ranges' lengths (4
+# bytes each) and data: the mask said to be 8 bytes, the ranges 8
+def rp_extra(n, mask_len=0, blend_len=0):
+    def patch(lay):
+        at = lay.index(b"8BIMnorm") + 12   # the extra data's length; then the mask's and the ranges' (both 0)
+        return lay[:at] + struct.pack(">III", n, mask_len, blend_len) + lay[at + 12:]
+    return patch
+
+
+for rp_cid, rp_n, rp_ml, rp_bl, rp_name_, rp_at in (("mask_len", 2, 0, 0, "Layer mask data length", 0),
+                                                    ("mask", 4 + 3, 8, 0, "Layer mask data", 4),
+                                                    ("blend_len", 4 + 2, 0, 0, "Layer blending range data length", 4),
+                                                    ("blend", 4 + 4 + 3, 0, 8, "Layer blending range data", 8)):
+    rp_x = rp_psd(f"rp_psd_x_{rp_cid}.psd", patch=rp_extra(rp_n, rp_ml, rp_bl))
+    rp_x_at = rp_x.index(b"8BIMnorm") + 16
+    rp_case(f"RP_psd_x_{rp_cid}", f"rp_psd_x_{rp_cid}.psd",
+            psd_past(rp_name_, rp_x_at + rp_at, rp_x_at + rp_n, "the layer's extra data"))
+
+# The global layer mask info said to be 100 bytes, past the end of the section
+rp_gm = rp_psd("rp_psd_global.psd", patch=lambda lay: lay[:-4] + struct.pack(">I", 100))
+RP_GM = struct.unpack(">I", rp_gm[RP_PSD_SECTION - 4:RP_PSD_SECTION])[0]
+rp_case("RP_psd_global", "rp_psd_global.psd",
+        psd_past("Global layer mask info", RP_PSD_SECTION + RP_GM, RP_PSD_SECTION + RP_GM, "the layer and mask information"))
+
+
+# A layer's last channel said 8 bytes longer, past the end of the layer info:
+# it was decoded from the image data after it
+def rp_long_chan(lay):
+    at = 4 + 2 + 16 + 2 + 2 * 6 + 2   # the third channel's length, in the record after the count
+    return lay[:at] + struct.pack(">I", struct.unpack(">I", lay[at:at + 4])[0] + 8) + lay[at + 4:]
+
+
+rp_chan = rp_psd("rp_psd_chan.psd", patch=rp_long_chan)
+RP_LI_LEN = struct.unpack(">I", rp_chan[RP_PSD_SECTION:RP_PSD_SECTION + 4])[0]
+rp_chan_at = rp_chan.index(psd_rle_channel(p_b, pw), RP_PSD_SECTION)
+rp_case("RP_psd_chan", "rp_psd_chan.psd",
+        psd_past("Channel image data", rp_chan_at, RP_PSD_SECTION + 4 + RP_LI_LEN, "the layer info"))
+# A layer info of 1 byte, in a section of 5: no room for the layer count (it
+# was read from the image data after it), nor, in a section of 2, for the
+# layer info's own length
+rp_psd_small = write("rp_psd_count.psd", psd(pw, ph, [p_r, p_g, p_b], layers=struct.pack(">I", 1) + b"\x00"))
+rp_case("RP_psd_count", rp_psd_small,
+        psd_past("Layer count", RP_PSD_SECTION + 4, RP_PSD_SECTION + 5, "the layer info"), forbid="Layer count +=")
+rp_case("RP_psd_info_len", write("rp_psd_info_len.psd", psd(pw, ph, [p_r, p_g, p_b], layers=b"\x00\x00")),
+        psd_past("Layer info length", RP_PSD_SECTION, RP_PSD_SECTION + 2, "the layer and mask information"),
+        forbid="^ +Length += 1 $")
+rp_case("RP_psd_info_len_image", "rp_psd_info_len.psd", "^harness: decoded=0 preview=37x23 ")
+
+
+# At the end of a file of 4 GiB - 1 bytes, with a JPEG at its start: a field
+# past the end is past 2^32, where the 32-bit position wraps, and was read
+# from the file's start (a JFIF version of 255.216, an interval of 65,496)
+def rp_wr(cid, tail, expect, forbid="-"):
+    name, start = wr_file(f"rp_wr_{cid}.bin", tail, c420)
+    case(f"RP_wr_{cid}", "RP", "decode", name, f"--start {start}", timeout=20, expect=expect(start), forbid=forbid)
+
+
+# An identifier cut by the end of the file (no 0)
+rp_wr("jfif", b"\xff\xd8\xff\xe0\x00\x10JFIF",
+      lambda at: rp_past("Identifier", at + 6, WR_SIZE, "APP0 segment", ". Skipping."), forbid="version")
+rp_wr("icc", b"\xff\xd8\xff\xe2\x00\x40ICC_PROFILE",
+      lambda at: rp_past("Identifier", at + 6, WR_SIZE, "APP2 segment", ". Skipping."), forbid="Marker Number")
+# "Ducky" and its 0 end with the file: the quality, 6 bytes on, is past 2^32
+rp_wr("ducky", b"\xff\xd8\xff\xec\x00\x20Ducky\x00",
+      lambda at: rp_past("Photoshop Save For Web Quality", WR_SIZE + 6, WR_SIZE, "APP12 segment", ". Skipping."),
+      forbid="Save For Web Quality = \\[")
+# A length cut by the end of the file: an Early EOF (a DRI's interval, a SOF's
+# precision and size were read from the start)
+rp_wr("dri", b"\xff\xd8\xff\xdd\x00", lambda at: RP_EOF, forbid="interval")
+rp_wr("sof", b"\xff\xd8\xff\xc0\x01", lambda at: RP_EOF, forbid="Precision")
+
 
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:

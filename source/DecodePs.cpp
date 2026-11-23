@@ -292,6 +292,7 @@ void CDecodePs::Reset()
   m_nPosBlockEnd = 0;
   m_bInResBlock = false;
   m_bBlockOverrun = false;
+  m_strBlockKind = "8BIM resource";
   m_nDescriptorDepth = 0;
   m_bDibGray = false;
   m_nDepthBpp = 8;
@@ -406,6 +407,31 @@ bool CDecodePs::PsdFits(uint32_t nPos, uint64_t nLen, const QString &strWhat)
 
   m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of the file. Stopping.")
                        .arg(strWhat).arg(nPos, 8, 16, QChar('0')));
+  return false;
+}
+
+// Does a field of nLen bytes at nPos end within the part of the file that holds
+// it (strIn, ending at nPosEnd, exclusive)? If not, report it. Lengths were only
+// compared with the file's end, so a part was read on into the one after it:
+// a layer's name and tagged blocks from the next layer record.
+bool CDecodePs::PsdFitsIn(uint32_t nPos, uint64_t nLen, uint64_t nPosEnd, const QString &strWhat, const QString &strIn)
+{
+  // (Where the file ends first, as before)
+  if(nPosEnd >= m_pWBuf->GetPosEof())
+  {
+    return PsdFits(nPos, nLen, strWhat);
+  }
+
+  if((nPos <= nPosEnd) && (nLen <= nPosEnd - nPos))
+  {
+    return true;
+  }
+
+  m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of %3, at [0x%4]. Stopping.")
+                       .arg(strWhat)
+                       .arg(nPos, 8, 16, QChar('0'))
+                       .arg(strIn)
+                       .arg(nPosEnd, 8, 16, QChar('0')));
   return false;
 }
 
@@ -782,9 +808,10 @@ void CDecodePs::BlockOverrun(uint32_t &nPos, const QString &strWhat)
 
   if(!m_bBlockOverrun)
   {
-    m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of its 8BIM resource, at [0x%3]. Stopping.")
+    m_pLog->AddLineErr(QString("ERROR: %1 at [0x%2] runs past the end of its %3, at [0x%4]. Stopping.")
                          .arg(strWhat)
                          .arg(nPos, 8, 16, QChar('0'))
+                         .arg(m_strBlockKind)
                          .arg(m_nPosBlockEnd, 8, 16, QChar('0')));
     m_bBlockOverrun = true;
   }
@@ -793,6 +820,21 @@ void CDecodePs::BlockOverrun(uint32_t &nPos, const QString &strWhat)
   {
     nPos = m_nPosBlockEnd;
   }
+}
+
+// Whether a field of nLen bytes at nPos is in the block. If not, it is reported
+// and nPos moved to the block's end (see BlockOverrun()), and the parser stops:
+// fixed-size fields were read from whatever followed the block (the next
+// resource's "8BIM", as a thumbnail 943,868,237 pixels wide).
+bool CDecodePs::PsNeed(uint32_t &nPos, uint64_t nLen, const QString &strWhat)
+{
+  if(BlockRoom(nPos, nLen))
+  {
+    return true;
+  }
+
+  BlockOverrun(nPos, strWhat);
+  return false;
 }
 
 QString CDecodePs::PhotoshopParseGetLStrAsc(uint32_t &nPos)
@@ -1328,6 +1370,11 @@ void CDecodePs::PhotoshopParseThumbnailResource(uint32_t &nPos, uint32_t nIndent
 {
   uint32_t nVal;
 
+  if(!PsNeed(nPos, 28, "Thumbnail header"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "Format", nVal, "");
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
@@ -1365,6 +1412,11 @@ void CDecodePs::PhotoshopParseVersionInfo(uint32_t &nPos, uint32_t nIndent)
 
   uint32_t nPosOffset;
 
+  if(!PsNeed(nPos, 5, "Version"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "Version", nVal, "");
   nVal = m_pWBuf->BufRdAdv1(nPos, PS_BSWAP);
@@ -1375,6 +1427,12 @@ void CDecodePs::PhotoshopParseVersionInfo(uint32_t &nPos, uint32_t nIndent)
   strVal = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
   nPos += nPosOffset;
   PhotoshopParseReportFldStr(nIndent, "Reader name", strVal);
+
+  if(!PsNeed(nPos, 4, "File version"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "File version", nVal, "");
 }
@@ -1388,6 +1446,11 @@ void CDecodePs::PhotoshopParseVersionInfo(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParsePrintScale(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 14, "Print scale"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1411,6 +1474,11 @@ void CDecodePs::PhotoshopParsePrintScale(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParseGlobalAngle(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 4, "Global Angle"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1428,6 +1496,11 @@ void CDecodePs::PhotoshopParseGlobalAngle(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParseGlobalAltitude(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 4, "Global Altitude"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1445,6 +1518,11 @@ void CDecodePs::PhotoshopParseGlobalAltitude(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParsePrintFlags(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 9, "Print flags"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1478,6 +1556,11 @@ void CDecodePs::PhotoshopParsePrintFlags(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParsePrintFlagsInfo(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 10, "Print flags information"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1503,6 +1586,11 @@ void CDecodePs::PhotoshopParsePrintFlagsInfo(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParseCopyrightFlag(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 1, "Copyright flag"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1520,6 +1608,11 @@ void CDecodePs::PhotoshopParseCopyrightFlag(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParsePixelAspectRatio(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 12, "Pixel aspect ratio"))
+  {
+    return;
+  }
+
   uint32_t nVal, nVal1, nVal2;
 
   QString strVal;
@@ -1540,6 +1633,11 @@ void CDecodePs::PhotoshopParsePixelAspectRatio(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParseDocSpecificSeed(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 4, "Document-specific IDs seed"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1561,6 +1659,11 @@ void CDecodePs::PhotoshopParseGridGuides(uint32_t &nPos, uint32_t nIndent)
 
   QString strVal;
 
+  if(!PsNeed(nPos, 16, "Grid and guides header"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "Version", nVal, "");
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
@@ -1577,6 +1680,13 @@ void CDecodePs::PhotoshopParseGridGuides(uint32_t &nPos, uint32_t nIndent)
   // The count comes from the file; also stop at the end of the block
   for(uint32_t nInd = 0; (nInd < nNumGuides) && (nPos < m_nPosBlockEnd); nInd++)
   {
+    // A guide (5 bytes) is all in the block: one starting 1 to 4 bytes before
+    // its end was read on past it
+    if(!PsNeed(nPos, 5, QString("Guide #%1").arg(nInd)))
+    {
+      break;
+    }
+
     strVal = QString("Guide #%1:").arg(nInd);
     PhotoshopParseReportNote(nIndent, strVal);
 
@@ -1599,6 +1709,11 @@ void CDecodePs::PhotoshopParseGridGuides(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParseResolutionInfo(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 16, "Resolution info"))
+  {
+    return;
+  }
+
   uint32_t nVal, nUnit;
 
   QString strVal, strUnit;
@@ -1626,6 +1741,11 @@ void CDecodePs::PhotoshopParseResolutionInfo(uint32_t &nPos, uint32_t nIndent)
 //
 void CDecodePs::PhotoshopParseLayerStateInfo(uint32_t &nPos, uint32_t nIndent)
 {
+  if(!PsNeed(nPos, 2, "Target layer"))
+  {
+    return;
+  }
+
   uint32_t nVal;
 
   QString strVal;
@@ -1853,8 +1973,9 @@ bool CDecodePs::PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent)
   }
   else
   {
+    // Its parts are in the section, not just in the file
     if(bDecOk)
-      bDecOk &= PhotoshopParseLayerInfo(nPos, nIndent);
+      bDecOk &= PhotoshopParseLayerInfo(nPos, nIndent, nPosEnd);
 
     // The global layer mask info is optional: the layer info can fill the
     // section (as in files from macOS's sips), or tagged blocks can follow it
@@ -1865,7 +1986,7 @@ bool CDecodePs::PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent)
       const QString strSig = m_pWBuf->BufReadStrn(nPos, 4);
 
       if((strSig != "8BIM") && (strSig != "8B64"))
-        bDecOk &= PhotoshopParseGlobalLayerMaskInfo(nPos, nIndent);
+        bDecOk &= PhotoshopParseGlobalLayerMaskInfo(nPos, nIndent, nPosEnd);
     }
 
     if(bDecOk)
@@ -1875,7 +1996,7 @@ bool CDecodePs::PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent)
       // the end looked like 4 GB to go.
       while((bDecOk) && (nPos < nPosEnd) && (nPosEnd - nPos > 12))
       {
-        bDecOk &= PhotoshopParseAddtlLayerInfo(nPos, nIndent, 4);
+        bDecOk &= PhotoshopParseAddtlLayerInfo(nPos, nIndent, 4, nPosEnd, "the layer and mask information");
       }
     }
   }
@@ -1902,7 +2023,7 @@ bool CDecodePs::PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent)
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
+bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit)
 {
   QString strVal;
 
@@ -1910,6 +2031,11 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
 
   PhotoshopParseReportNote(nIndent, "Layer Info:");
   nIndent++;
+
+  if(!PsdFitsIn(nPos, 4, nPosLimit, "Layer info length", "the layer and mask information"))
+  {
+    return false;
+  }
 
   uint32_t nLayerLen = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
@@ -1920,7 +2046,7 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
     return bDecOk;
   }
 
-  if(!PsdFits(nPos, nLayerLen, "Layer info"))
+  if(!PsdFitsIn(nPos, nLayerLen, nPosLimit, "Layer info", "the layer and mask information"))
   {
     return false;
   }
@@ -1928,9 +2054,15 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
   // Save file position
   uint32_t nPosStart = nPos;
 
-  // Round up length to multiple of 2 (at most the end of the file)
+  // Round up length to multiple of 2 (at most the end of the section)
+  const uint64_t nPosOuter = std::min<uint64_t>(nPosLimit, m_pWBuf->GetPosEof());
   const uint32_t nPosEnd = static_cast<uint32_t>(std::min<uint64_t>(
-      static_cast<uint64_t>(nPosStart) + nLayerLen + (nLayerLen % 2), m_pWBuf->GetPosEof()));
+      static_cast<uint64_t>(nPosStart) + nLayerLen + (nLayerLen % 2), nPosOuter));
+
+  if(!PsdFitsIn(nPos, 2, nPosEnd, "Layer count", "the layer info"))
+  {
+    return false;
+  }
 
   // According to Adobe, "Layer count" is defined as follows:
   // - If it is a negative number, its absolute value is the number of layers and the
@@ -1964,7 +2096,7 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
 
     // A record is at least its rectangle: stop at the end of the section
     // rather than parse up to 32767 records of zeros past it
-    if((nPos >= nPosEnd) || !PsdFits(nPos, 16, strTmp))
+    if((nPos >= nPosEnd) || !PsdFitsIn(nPos, 16, nPosEnd, strTmp, "the layer info"))
     {
       if(nPos >= nPosEnd)
       {
@@ -1975,7 +2107,7 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
       break;
     }
 
-    bDecOk &= PhotoshopParseLayerRecord(nPos, nIndent, &sLayerAllInfo.psLayers[nLayerInd]);
+    bDecOk &= PhotoshopParseLayerRecord(nPos, nIndent, &sLayerAllInfo.psLayers[nLayerInd], nPosEnd);
   }
 
   PhotoshopParseReportNote(nIndent, "Channel Image Data:");
@@ -2023,7 +2155,8 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
         // problem with one channel doesn't lose the rest of the layers
         const uint32_t nChanLen = sLayer.pnChanLen[nChanInd];
 
-        if(!PsdFits(nPos, nChanLen, "Channel image data"))
+        // (In the layer info: it was read on into the image data after it)
+        if(!PsdFitsIn(nPos, nChanLen, nPosEnd, "Channel image data", "the layer info"))
         {
           bDecOk = false;
           break;
@@ -2097,7 +2230,7 @@ bool CDecodePs::PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent)
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo)
+bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo, uint32_t nPosLimit)
 {
   QString strVal;
 
@@ -2123,12 +2256,19 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
   pLayerInfo->nWidth = nRect4 - nRect2;
   //nHeight = nRect3-nRect1;
 
+  // Each part of the record is in the layer info, and those after the extra
+  // data's length in the extra data (they were read on into the next record)
+  if(!PsdFitsIn(nPos, 2, nPosLimit, "Number of channels", "the layer info"))
+  {
+    return false;
+  }
+
   uint32_t nNumChans = m_pWBuf->BufRdAdv2(nPos, PS_BSWAP);
 
   PhotoshopParseReportFldNum(nIndent, "Number of channels", nNumChans, "");
 
   // 6 bytes per channel (ID and data length)
-  if(!PsdFits(nPos, PsdSize(nNumChans, 6), "Layer channel list"))
+  if(!PsdFitsIn(nPos, PsdSize(nNumChans, 6), nPosLimit, "Layer channel list", "the layer info"))
   {
     return false;
   }
@@ -2155,6 +2295,13 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
     pLayerInfo->pnChanLen[nChanInd] = nChanDataLen;
   }
 
+  // Blend mode signature and key, opacity, clipping, flags, filler and the
+  // extra data's length
+  if(!PsdFitsIn(nPos, 16, nPosLimit, "Blend mode signature", "the layer info"))
+  {
+    return false;
+  }
+
   QString strBlendModeSig = m_pWBuf->BufReadStrn(nPos, 4);
 
   nPos += 4;
@@ -2172,7 +2319,7 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
 
   uint32_t nPosExtra = nPos;
 
-  if(!PsdFits(nPosExtra, nExtraDataLen, "Layer extra data"))
+  if(!PsdFitsIn(nPosExtra, nExtraDataLen, nPosLimit, "Layer extra data", "the layer info"))
   {
     return false;
   }
@@ -2187,13 +2334,28 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
     bRealMask |= (pLayerInfo->pnChanID[nChanInd] == 0xFFFD);
   }
 
-  if(bDecOk)
-    bDecOk &= PhotoshopParseLayerMask(nPos, nIndent, pLayerInfo, bRealMask);
+  // The mask, blending ranges, name and tagged blocks are in the extra data,
+  // whose length was checked: a problem with one of them is reported, and the
+  // record still ends where its extra data does, so the next layers are read
+  bool bExtraOk = PhotoshopParseLayerMask(nPos, nIndent, pLayerInfo, bRealMask, nPosExtraEnd);
 
-  if(bDecOk)
-    bDecOk &= PhotoshopParseLayerBlendingRanges(nPos, nIndent);
+  if(bExtraOk)
+    bExtraOk = PhotoshopParseLayerBlendingRanges(nPos, nIndent, nPosExtraEnd);
 
-  if(bDecOk)
+  // The name (its length, then the name) is in the extra data too. (Its pad
+  // to a multiple of 4 is left out of the check: a writer that doesn't pad,
+  // with nothing after the name, is still read.)
+  if(bExtraOk && !PsdFitsIn(nPos, 1, nPosExtraEnd, "Layer name", "the layer's extra data"))
+  {
+    bExtraOk = false;
+  }
+  else if(bExtraOk && !PsdFitsIn(nPos, 1 + static_cast<uint64_t>(Buf(nPos)), nPosExtraEnd, "Layer name",
+                                 "the layer's extra data"))
+  {
+    bExtraOk = false;
+  }
+
+  if(bExtraOk)
   {
     uint32_t nLayerNameLen = m_pWBuf->BufRdAdv1(nPos, PS_BSWAP);
 
@@ -2208,17 +2370,13 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
   }
 
   // Now use up the "extra bytes" with "Additional Layer Info"
-  while((bDecOk) && (nPos < nPosExtraEnd))
+  while(bExtraOk && (nPos < nPosExtraEnd))
   {
-    if(bDecOk)
-      bDecOk &= PhotoshopParseAddtlLayerInfo(nPos, nIndent, 2);
+    bExtraOk = PhotoshopParseAddtlLayerInfo(nPos, nIndent, 2, nPosExtraEnd, "the layer's extra data");
   }
 
   // The record ends with its extra data
-  if(bDecOk)
-  {
-    nPos = nPosExtraEnd;
-  }
+  nPos = nPosExtraEnd;
 
   return bDecOk;
 }
@@ -2230,13 +2388,20 @@ bool CDecodePs::PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLa
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo, bool bRealMask)
+bool CDecodePs::PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo, bool bRealMask,
+                                        uint32_t nPosLimit)
 {
   PhotoshopParseReportNote(nIndent, "Layer Mask / Adjustment layer data:");
 
+  // In the layer's extra data (nPosLimit, its end)
+  if(!PsdFitsIn(nPos, 4, nPosLimit, "Layer mask data length", "the layer's extra data"))
+  {
+    return false;
+  }
+
   uint32_t nLayerMaskLen = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
-  if(!PsdFits(nPos, nLayerMaskLen, "Layer mask data"))
+  if(!PsdFitsIn(nPos, nLayerMaskLen, nPosLimit, "Layer mask data", "the layer's extra data"))
   {
     return false;
   }
@@ -2277,15 +2442,21 @@ bool CDecodePs::PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent, tsLaye
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseLayerBlendingRanges(uint32_t &nPos, uint32_t nIndent)
+bool CDecodePs::PhotoshopParseLayerBlendingRanges(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit)
 {
   PhotoshopParseReportNote(nIndent, "Layer blending ranges data:");
+
+  // In the layer's extra data (nPosLimit, its end)
+  if(!PsdFitsIn(nPos, 4, nPosLimit, "Layer blending range data length", "the layer's extra data"))
+  {
+    return false;
+  }
 
   uint32_t nLayerBlendLen = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   // The ranges aren't reported: skip them. (Reading them in a loop of
   // (length - 8) / 8 pairs ran 500 million times for a bad length.)
-  if(!PsdFits(nPos, nLayerBlendLen, "Layer blending range data"))
+  if(!PsdFitsIn(nPos, nLayerBlendLen, nPosLimit, "Layer blending range data", "the layer's extra data"))
   {
     return false;
   }
@@ -2740,7 +2911,7 @@ bool CDecodePs::PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImag
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nIndent)
+bool CDecodePs::PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit)
 {
   QString strVal;
 
@@ -2756,7 +2927,7 @@ bool CDecodePs::PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nInde
     return bDecOk;
   }
 
-  if(!PsdFits(nPos, nInfoLen, "Global layer mask info"))
+  if(!PsdFitsIn(nPos, nInfoLen, nPosLimit, "Global layer mask info", "the layer and mask information"))
   {
     return false;
   }
@@ -2789,7 +2960,8 @@ bool CDecodePs::PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nInde
 // OUTPUT:
 // - nPos               = File position after reading the block
 //
-bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nAlign)
+bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nAlign, uint32_t nPosLimit,
+                                             const QString &strIn)
 {
   bool bDecOk = true;
 
@@ -2798,8 +2970,9 @@ bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, u
   PhotoshopParseReportNote(nIndent, "Additional layer info:");
   nIndent++;
 
-  // Signature, key and length
-  if(!PsdFits(nPos, 12, "Additional layer info"))
+  // Signature, key and length, in what holds the block (strIn, ending at
+  // nPosLimit), as is the block
+  if(!PsdFitsIn(nPos, 12, nPosLimit, "Additional layer info", strIn))
   {
     return false;
   }
@@ -2873,7 +3046,7 @@ bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, u
 
   // A length near 4 GB wrapped the position back to this block, so the
   // caller's loop never ended
-  if(!PsdFits(nPos, nLen, QString("Additional layer info [%1]").arg(strKey)))
+  if(!PsdFitsIn(nPos, nLen, nPosLimit, QString("Additional layer info [%1]").arg(strKey), strIn))
   {
     return false;
   }
@@ -2883,41 +3056,70 @@ bool CDecodePs::PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, u
     PhotoshopParseReportFldHex(nIndent, strKey, nPos, nLen);
   }
 
-  uint32_t nVal;
+  // The values below are in the block, as for a resource's (see
+  // BlockOverrun()): they were read past its length, from the next block
+  {
+    uint32_t nVal;
+    QString sStr;
+    uint32_t nPosOffset = 0;
 
-  QString sStr;
+    struct TaggedScope
+    {
+      CDecodePs &rPs;
+      explicit TaggedScope(CDecodePs &rDec, uint32_t nPosEnd) : rPs(rDec)
+      {
+        rPs.m_bInResBlock = true;
+        rPs.m_nPosBlockEnd = nPosEnd;
+        rPs.m_bBlockOverrun = false;
+        rPs.m_strBlockKind = "additional layer info";
+      }
+      ~TaggedScope()
+      {
+        rPs.m_bInResBlock = false;
+        rPs.m_strBlockKind = "8BIM resource";
+      }
+      TaggedScope(const TaggedScope &) = delete;
+      TaggedScope &operator = (const TaggedScope &) = delete;
+    } sScope(*this, nPos + nLen);
 
-  uint32_t nPosOffset = 0;
+    uint32_t nPosVal = nPos;
+    const bool bFourBytes = (strKey == "lnsr") || (strKey == "lyid") || (strKey == "clbl") || (strKey == "infx") ||
+                            (strKey == "knko");
 
-  if(strKey == "luni")
-  {
-    sStr = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
-    PhotoshopParseReportFldStr(nIndent, "Layer Name (Unicode)", sStr);
-  }
-  else if(strKey == "lnsr")
-  {
-    nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
-    PhotoshopParseReportFldNum(nIndent, "Layer Name Source ID", nVal, "");
-  }
-  else if(strKey == "lyid")
-  {
-    nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
-    PhotoshopParseReportFldNum(nIndent, "Layer ID", nVal, "");
-  }
-  else if(strKey == "clbl")
-  {
-    nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
-    PhotoshopParseReportFldBool(nIndent, "Blend clipped elements", nVal);
-  }
-  else if(strKey == "infx")
-  {
-    nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
-    PhotoshopParseReportFldBool(nIndent, "Blend interior elements", nVal);
-  }
-  else if(strKey == "knko")
-  {
-    nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
-    PhotoshopParseReportFldBool(nIndent, "Knockout", nVal);
+    if(strKey == "luni")
+    {
+      sStr = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
+      PhotoshopParseReportFldStr(nIndent, "Layer Name (Unicode)", sStr);
+    }
+    else if(bFourBytes && !PsNeed(nPosVal, 4, QString("[%1] value").arg(strKey)))
+    {
+      // (Reported)
+    }
+    else if(strKey == "lnsr")
+    {
+      nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
+      PhotoshopParseReportFldNum(nIndent, "Layer Name Source ID", nVal, "");
+    }
+    else if(strKey == "lyid")
+    {
+      nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
+      PhotoshopParseReportFldNum(nIndent, "Layer ID", nVal, "");
+    }
+    else if(strKey == "clbl")
+    {
+      nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
+      PhotoshopParseReportFldBool(nIndent, "Blend clipped elements", nVal);
+    }
+    else if(strKey == "infx")
+    {
+      nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
+      PhotoshopParseReportFldBool(nIndent, "Blend interior elements", nVal);
+    }
+    else if(strKey == "knko")
+    {
+      nVal = m_pWBuf->BufX(nPos, 4, PS_BSWAP);
+      PhotoshopParseReportFldBool(nIndent, "Knockout", nVal);
+    }
   }
 
   nPosStart = nPos;
@@ -3044,8 +3246,26 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
     return false;;
   }
 
+  // The header (ID, name and length) is in the segment or section too: past
+  // it the name was read, up to 255 bytes, and a length of 0 from past the
+  // file's end was said to run past the segment. (Every byte past the end
+  // reads as 0.)
+  const uint64_t nPosHeaderLimit = std::min<uint64_t>(nPosLimit, m_pWBuf->GetPosEof());
+  const uint32_t nPosHeader = nPos - 4;
+  const uint32_t nResNameLen = ((nPos <= nPosHeaderLimit) && (nPosHeaderLimit - nPos >= 3)) ? Buf(nPos + 2) : 0;
+  const uint64_t nHeaderLen = 2 + 1 + nResNameLen + (((1 + nResNameLen) % 2 != 0) ? 1 : 0) + 4;
+
+  if((nPos > nPosHeaderLimit) || (nHeaderLen > nPosHeaderLimit - nPos))
+  {
+    m_pLog->AddLineErr(QString("ERROR: 8BIM header at [0x%1] runs past the end of its segment, at [0x%2]. Stopping.")
+                         .arg(nPosHeader, 8, 16, QChar('0'))
+                         .arg(nPosHeaderLimit, 8, 16, QChar('0')));
+    nPos = static_cast<uint32_t>(nPosHeaderLimit);
+    return false;
+  }
+
   uint32_t nBimId = m_pWBuf->BufRdAdv2(nPos, PS_BSWAP);
-  uint32_t nResNameLen = m_pWBuf->BufRdAdv1(nPos, PS_BSWAP);
+  m_pWBuf->BufRdAdv1(nPos, PS_BSWAP);   // (nResNameLen)
 
   QString strResName = m_pWBuf->BufReadStrn(nPos, nResNameLen);
 
@@ -3231,7 +3451,9 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
         break;
 
       default:
-        return false;
+        // Not decoded (0x03E8): skipped whole. (Parsing went on inside it, so
+        // an "8BIM" in its data was reported as the next resource.)
+        nPos = nPosSaved + nBimLen;
         break;
     }                           // switch
 
@@ -3260,9 +3482,8 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
 
       // Now we should roll-back the file position to the position indicated
       // by the length. This will help us stay on track for next decoding.
-      nPos = nPosEnd + 1;
-
-      return false;
+      // (Then on after the block's pad byte, below: this left the position a
+      // byte early after an odd length, and every resource after it was lost.)
     }
     else if(nPos != nPosEnd + 1)
     {
@@ -3283,7 +3504,20 @@ bool CDecodePs::PhotoshopParseImageResourceBlock(uint32_t &nPos, uint32_t nInden
           .arg(strTmp);
       qDebug() << (strDebug);
 #endif
-      return false;
+      // The block is skipped by its length below: parsing went on from where
+      // it stopped, inside the block, and lost the resources after it. Unless
+      // no resource starts where the length ends, and one does where the
+      // fields did: then the length is taken to be wrong, as it always was.
+      const uint32_t nPosByLen = nPosSaved + nBimLen + (nBimLen % 2);
+
+      if((m_pWBuf->BufReadStrn(nPosByLen, 4) != "8BIM") && (m_pWBuf->BufReadStrn(nPos, 4) == "8BIM"))
+      {
+        m_pLog->AddLineWarn(QString("NOTE: No 8BIM resource where its length ends, at [0x%1], but one where its fields "
+                                    "do, at [0x%2]: going on there")
+                              .arg(nPosByLen, 8, 16, QChar('0'))
+                              .arg(nPos, 8, 16, QChar('0')));
+        return true;
+      }
     }
 
     // Reset the file marker
@@ -3319,9 +3553,20 @@ void CDecodePs::PhotoshopParseSliceHeader(uint32_t &nPos, uint32_t nIndent, uint
   PhotoshopParseReportNote(nIndent, "Slice Header:");
   nIndent++;
 
+  // Each fixed-size part is in the block (they were read on past it)
+  if(!PsNeed(nPos, 4, "Slice header version"))
+  {
+    return;
+  }
+
   uint32_t nSliceVer = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   PhotoshopParseReportFldNum(nIndent, "Version", nSliceVer, "");
+
+  if((nSliceVer == 6) && !PsNeed(nPos, 16, "Bound Rect"))
+  {
+    return;
+  }
 
   if(nSliceVer == 6)
   {
@@ -3336,6 +3581,12 @@ void CDecodePs::PhotoshopParseSliceHeader(uint32_t &nPos, uint32_t nIndent, uint
     strVal = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
     nPos += nPosOffset;
     PhotoshopParseReportFldStr(nIndent, "Name of group of slices", strVal);
+
+    if(!PsNeed(nPos, 4, "Number of slices"))
+    {
+      return;
+    }
+
     uint32_t nNumSlices = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
     PhotoshopParseReportFldNum(nIndent, "Number of slices", nNumSlices, "");
@@ -3363,7 +3614,7 @@ void CDecodePs::PhotoshopParseSliceHeader(uint32_t &nPos, uint32_t nIndent, uint
     if(nNumSlices > 0)
       PhotoshopParseReportNote(nIndent, "-----");
   }
-  else if((nSliceVer == 7) || (nSliceVer == 8))
+  else if(((nSliceVer == 7) || (nSliceVer == 8)) && PsNeed(nPos, 4, "Descriptor version"))
   {
     nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
     PhotoshopParseReportFldNum(nIndent, "Descriptor version", nVal, "");
@@ -3393,6 +3644,11 @@ void CDecodePs::PhotoshopParseSliceResource(uint32_t &nPos, uint32_t nIndent, ui
   PhotoshopParseReportNote(nIndent, "Slice Resource:");
   nIndent++;
 
+  if(!PsNeed(nPos, 12, "Slice ID"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "ID", nVal, "");
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
@@ -3400,6 +3656,11 @@ void CDecodePs::PhotoshopParseSliceResource(uint32_t &nPos, uint32_t nIndent, ui
   uint32_t nOrigin = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
 
   PhotoshopParseReportFldNum(nIndent, "Origin", nOrigin, "");
+
+  if((nOrigin == 1) && !PsNeed(nPos, 4, "Associated Layer ID"))
+  {
+    return;
+  }
 
   if(nOrigin == 1)
   {
@@ -3410,6 +3671,12 @@ void CDecodePs::PhotoshopParseSliceResource(uint32_t &nPos, uint32_t nIndent, ui
   strVal = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
   nPos += nPosOffset;
   PhotoshopParseReportFldStr(nIndent, "Name", strVal);
+
+  if(!PsNeed(nPos, 20, "Slice type"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "Type", nVal, "");
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
@@ -3432,11 +3699,23 @@ void CDecodePs::PhotoshopParseSliceResource(uint32_t &nPos, uint32_t nIndent, ui
   strVal = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
   nPos += nPosOffset;
   PhotoshopParseReportFldStr(nIndent, "Alt Tag", strVal);
+
+  if(!PsNeed(nPos, 1, "Cell text is HTML"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv1(nPos, PS_BSWAP);
   PhotoshopParseReportFldBool(nIndent, "Cell text is HTML", nVal);
   strVal = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
   nPos += nPosOffset;
   PhotoshopParseReportFldStr(nIndent, "Cell text", strVal);
+
+  if(!PsNeed(nPos, 12, "Horizontal alignment"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "Horizontal alignment", nVal, "");
   nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
@@ -3457,7 +3736,8 @@ void CDecodePs::PhotoshopParseSliceResource(uint32_t &nPos, uint32_t nIndent, ui
   // to parse the next fields.
   // TODO: Do we need to be any more precise than this? (ie. check
   // after reading the descriptor version?)
-  if(nPos <= nPosEnd)
+  // (Its 4 bytes have to be there: with 1 to 3 left they were read past it)
+  if((nPos <= nPosEnd) && PsNeed(nPos, 4, "Descriptor version"))
   {
     nVal = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
     PhotoshopParseReportFldNum(nIndent, "Descriptor version", nVal, "");
@@ -3490,6 +3770,11 @@ void CDecodePs::PhotoshopParseJpegQuality(uint32_t &nPos, uint32_t nIndent, uint
 
   // Save As Quality
   // Index 0: Quality level
+  if(!PsNeed(nPos, 2, "Photoshop Save As Quality"))
+  {
+    return;
+  }
+
   nVal = m_pWBuf->BufRdAdv2(nPos, PS_BSWAP);
 
   switch (nVal)
@@ -3544,6 +3829,14 @@ void CDecodePs::PhotoshopParseJpegQuality(uint32_t &nPos, uint32_t nIndent, uint
   // - Perhaps we should check against length in case some older files had a shorter format
   //   to this IRB?
 
+  // The fields after it are read as far as the block goes (one of 2 bytes has
+  // been seen, so older versions may have had fewer): they were read from the
+  // next resource
+  if(!BlockRoom(nPos, 2))
+  {
+    return;
+  }
+
   // Index 1: Format
   nSaveFormat = m_pWBuf->BufRdAdv2(nPos, PS_BSWAP);
 
@@ -3564,6 +3857,11 @@ void CDecodePs::PhotoshopParseJpegQuality(uint32_t &nPos, uint32_t nIndent, uint
   }
 
   PhotoshopParseReportFldStr(nIndent, "Photoshop Save Format", strVal);
+
+  if(!BlockRoom(nPos, 2))
+  {
+    return;
+  }
 
   // Index 2: Progressive Scans
   // - Only meaningful if Progressive mode
@@ -3587,6 +3885,11 @@ void CDecodePs::PhotoshopParseJpegQuality(uint32_t &nPos, uint32_t nIndent, uint
 
   PhotoshopParseReportFldStr(nIndent, "Photoshop Save Progressive Scans", strVal);
 
+  if(!BlockRoom(nPos, 1))
+  {
+    return;
+  }
+
   // Not sure what this byte is for
   nVal = m_pWBuf->BufRdAdv1(nPos, PS_BSWAP);
   PhotoshopParseReportFldNum(nIndent, "???", nVal, "");
@@ -3602,9 +3905,60 @@ void CDecodePs::PhotoshopParseJpegQuality(uint32_t &nPos, uint32_t nIndent, uint
 //
 void CDecodePs::PhotoshopParseHandleOsType(QString strOsType, uint32_t &nPos, uint32_t nIndent)
 {
-  if(strOsType == "obj ")
+  // An item's value is read, or at least skipped, so that the next item is
+  // read where it starts. (Types that weren't decoded left the value unread,
+  // which was then taken for the next key's length.) A reference ("obj ") or a
+  // type not known can't be skipped: the rest of the block isn't decoded.
+  uint32_t nVal1;
+  uint32_t nVal2;
+  QString strVal;
+
+  if(strOsType == "doub")
   {
-    //PhotoshopParseReference(nPos,nIndent);
+    if(PsNeed(nPos, 8, "Double"))
+    {
+      nVal1 = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
+      nVal2 = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
+      PhotoshopParseReportFldDoublePt(nIndent, "Value", nVal1, nVal2, "");
+    }
+  }
+  else if(strOsType == "UntF")
+  {
+    // A unit (an OSType: "#Ang", "#Pxl", ...) and a double
+    if(PsNeed(nPos, 12, "Unit float"))
+    {
+      strVal = QString(QChar(Buf(nPos + 0))) + QChar(Buf(nPos + 1)) + QChar(Buf(nPos + 2)) + QChar(Buf(nPos + 3));
+      nPos += 4;
+      PhotoshopParseReportFldStr(nIndent, "Units", strVal);
+      nVal1 = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
+      nVal2 = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
+      PhotoshopParseReportFldDoublePt(nIndent, "Value", nVal1, nVal2, "");
+    }
+  }
+  else if((strOsType == "type") || (strOsType == "GlbC"))
+  {
+    // A class: its name, then its ID
+    uint32_t nPosOffset;
+
+    strVal = PhotoshopParseGetBimLStrUni(nPos, nPosOffset);
+    nPos += nPosOffset;
+    PhotoshopParseReportFldStr(nIndent, "Name from classID", strVal);
+    strVal = PhotoshopParseGetLStrAsc(nPos);
+    PhotoshopParseReportFldStr(nIndent, "classID", strVal);
+  }
+  else if((strOsType == "alis") || (strOsType == "tdta"))
+  {
+    // Data of a given length, not decoded
+    if(PsNeed(nPos, 4, "Data length"))
+    {
+      const uint32_t nDataLen = m_pWBuf->BufRdAdv4(nPos, PS_BSWAP);
+
+      if(PsNeed(nPos, nDataLen, QString("Data of length %1").arg(nDataLen)))
+      {
+        PhotoshopParseReportFldNum(nIndent, "Data", nDataLen, "bytes");
+        nPos += nDataLen;
+      }
+    }
   }
   else if(strOsType == "Objc")
   {
@@ -3613,14 +3967,6 @@ void CDecodePs::PhotoshopParseHandleOsType(QString strOsType, uint32_t &nPos, ui
   else if(strOsType == "VlLs")
   {
     PhotoshopParseList(nPos, nIndent);
-  }
-  else if(strOsType == "doub")
-  {
-    //PhotoshopParseDouble(nPos,nIndent);
-  }
-  else if(strOsType == "UntF")
-  {
-    //PhotoshopParseUnitFloat(nPos,nIndent);
   }
   else if(strOsType == "TEXT")
   {
@@ -3657,37 +4003,15 @@ void CDecodePs::PhotoshopParseHandleOsType(QString strOsType, uint32_t &nPos, ui
   {
     PhotoshopParseDescriptor(nPos, nIndent);
   }
-  else if(strOsType == "type")
-  {
-    //PhotoshopParseClass(nPos,nIndent);
-  }
-  else if(strOsType == "GlbC")
-  {
-    //PhotoshopParseClass(nPos,nIndent);
-  }
-  else if(strOsType == "alis")
-  {
-    //PhotoshopParseAlias(nPos,nIndent);
-  }
-  else if(strOsType == "tdta")
-  {
-    //PhotoshopParseRawData(nPos,nIndent);
-  }
   else
   {
-#ifdef DEBUG_LOG
-    QString strError;
-    QString strDebug;
-
-    strError = QString("ERROR: Unsupported OSType [%1]").arg(strOsType);
-    strDebug = QString("## File=[%1] Block=[%2] Error=[%3]\n")
-        .arg(m_pAppConfig->strCurFname, -100)
-        .arg("PsDecode", -10)
-        .arg(strError);
-    qDebug() << (strDebug);
-#else
-    Q_ASSERT(false);
-#endif
+    // A reference ("obj ") or a type not known: its length can't be told
+    m_pLog->AddLineWarn(QString("NOTE: Descriptor item type [%1] at [0x%2] isn't decoded, so the rest of its %3 "
+                                "isn't either")
+                          .arg(strOsType)
+                          .arg(nPos - 4, 8, 16, QChar('0'))
+                          .arg(m_strBlockKind));
+    nPos = m_nPosBlockEnd;
   }
 }
 

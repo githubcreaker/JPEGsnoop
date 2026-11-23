@@ -188,6 +188,7 @@ private:
   uint32_t LimitAdvance(uint32_t nPos, uint64_t nLen) const;
   bool BlockRoom(uint32_t nPos, uint64_t nLen) const;
   void BlockOverrun(uint32_t &nPos, const QString &strWhat);
+  bool PsNeed(uint32_t &nPos, uint64_t nLen, const QString &strWhat);
   QString PhotoshopParseIndent(uint32_t nIndent);
   void PhotoshopParseReportNote(uint32_t nIndent, QString strNote);
   QString PhotoshopParseLookupEnum(teBimEnumField eEnumField, uint32_t nVal);
@@ -212,6 +213,7 @@ private:
   void PhotoshopParseHandleOsType(QString strOsType, uint32_t &nPos, uint32_t nIndent);
   void PhotoshopParseFileHeader(uint32_t &nPos, uint32_t nIndent, tsImageInfo * psImageInfo);
   bool PsdFits(uint32_t nPos, uint64_t nLen, const QString &strWhat);
+  bool PsdFitsIn(uint32_t nPos, uint64_t nLen, uint64_t nPosEnd, const QString &strWhat, const QString &strIn);
   uint64_t PsdRowBytes(uint32_t nWidth) const;
   bool PhotoshopParseColorModeSection(uint32_t &nPos, uint32_t nIndent);
   bool PhotoshopParseImageResourcesSection(uint32_t &nPos, uint32_t nIndent);
@@ -233,15 +235,17 @@ private:
   void PhotoshopParseJpegQuality(uint32_t &nPos, uint32_t nIndent, uint32_t nPosEnd);
 
   bool PhotoshopParseLayerMaskInfo(uint32_t &nPos, uint32_t nIndent);
-  bool PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent);
-  bool PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * psLayerInfo);
-  bool PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo, bool bRealMask);
-  bool PhotoshopParseLayerBlendingRanges(uint32_t &nPos, uint32_t nIndent);
+  bool PhotoshopParseLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit);
+  bool PhotoshopParseLayerRecord(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * psLayerInfo, uint32_t nPosLimit);
+  bool PhotoshopParseLayerMask(uint32_t &nPos, uint32_t nIndent, tsLayerInfo * pLayerInfo, bool bRealMask,
+                               uint32_t nPosLimit);
+  bool PhotoshopParseLayerBlendingRanges(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit);
   bool PhotoshopParseChannelImageData(uint32_t &nPos, uint32_t nIndent, uint32_t nWidth, uint32_t nHeight, uint32_t nChan,
                                       uint32_t nPosChanEnd, unsigned char *pDibBits);
   bool ChanFits(uint32_t nPos, uint64_t nLen, uint32_t nPosChanEnd, const QString &strWhat);
-  bool PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nIndent);
-  bool PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nAlign);
+  bool PhotoshopParseGlobalLayerMaskInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nPosLimit);
+  bool PhotoshopParseAddtlLayerInfo(uint32_t &nPos, uint32_t nIndent, uint32_t nAlign, uint32_t nPosLimit,
+                                    const QString &strIn);
   bool PhotoshopParseImageData(uint32_t &nPos, uint32_t nIndent, tsImageInfo * psImageInfo, QImage * pDibTemp);
 
   bool PhotoshopDecodeRowUncomp(uint32_t &nPos, uint32_t nRowBytes, uint32_t nRow, uint32_t nChanID,
@@ -281,6 +285,9 @@ private:
   bool m_bInResBlock;
   // Whether this block's overrun has been reported (once per block)
   bool m_bBlockOverrun;
+  // What the block is, for that report: an "8BIM resource", or a PSD layer's
+  // "additional layer info" (whose values are limited by its length too)
+  QString m_strBlockKind;
 
   // Current Descriptor/List nesting depth (they can recurse through OSTypes)
   uint32_t m_nDescriptorDepth;
