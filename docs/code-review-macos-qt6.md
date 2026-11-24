@@ -1542,6 +1542,7 @@ which it already was. Thirteen deliberate breaks each fail their own cases:
 - **Fill bytes before an RST marker** (found while testing): the report's marker list
   takes the first 0xFF of the fill as the end of the scan. It then says "Restart
   marker [0xFFd0] detected outside scan". The scan's decode, and the lookup, are right.
+  (Fixed since: see "Where the marker list ends".)
 
 ### Tools > Search Executable for DQT
 
@@ -3929,7 +3930,7 @@ resource names" below):
 - **H5's message** says "runs past the thumbnail length (N bytes)" also when the file's
   end stopped it (port).
 - **"Data exists after EOF"** counts from offset 0 when decoding stops before an EOI: the
-  whole file is said to be after it.
+  whole file is said to be after it. (Fixed since: see "Where the marker list ends".)
 - **`Q_ASSERT`** in `CimgDecode::DecodeScanImg` (3523) asserts a nonzero minimum factor
   that the check after it handles (an SOS with more components than the SOF); a debug
   build would stop there. Release builds, the only ones made, are unaffected (port).
@@ -4026,6 +4027,7 @@ switched off one at a time in a scratch copy, fails its own cases.
 **Found, not fixed:**
 - **A file that ends right after a whole segment** says "Expected marker 0xFF, got 0x00 @
   [its end]" rather than Early EOF: the next marker is read at the end (inherited).
+  (Fixed since: see "Where the marker list ends".)
 - **An 8BIM header cut by the segment's end** gives "8BIM length [0x00000000] runs past the
   end of its segment", naming the length, not the header (port, now also at the file's end).
   (Fixed since: see "Reads past their own field".)
@@ -4338,6 +4340,122 @@ a number in it fails the case.
   the APP13 end with no case. The second, of the AVI changes, found an empty INFO list at
   the end of a file given a "cut" note (fixed), and the stream header's type above.
 - **Not checked:** the cases that open the window, a real camera's AVI or Photoshop's file.
+
+### Where the marker list ends
+
+Three things found earlier and left are fixed, with the rest of their class: data said to
+be after an EOI that was never found, an error at the end of a file that ends right after
+a segment, and fill bytes before a restart marker. All are inherited from Windows.
+
+**Data after EOF:** "NOTE: Data exists after EOF" counted from the EOI's position, which
+is 0 when decoding stopped at an error before any EOI: the whole file was said to be after
+it ("range: 0x00000000-0x00000286 (646 bytes)" for a file of 646 bytes). The note is now
+given only after an EOI, as before.
+
+**A file that ends right after a whole segment:** the next marker was read at the end of
+the file, where the 0 read gave "ERROR: Expected marker 0xFF, got 0x00 @ offset [the
+end]". It is now an Early EOF ("ERROR: Early EOF - file may be missing EOI"), as for a
+segment cut short; also at the end of a file of 4 GiB - 1 bytes, where the position wraps
+to 0. A byte that isn't 0xFF inside the file is still "Expected marker". A start offset at
+or past the end of the file, which only the test driver can give (File > Offset and the
+command line refuse one), is now an Early EOF too, where it said "Expected marker 0xFF,
+got 0x00".
+
+**Fill bytes before a restart marker** (0xFF bytes, which T.81 B.1.1.2 allows before any
+marker):
+- **The report's marker list** took the first fill byte for the end of the scan data, and
+  the RST after it for a marker outside the scan: "WARNING: Restart marker [0xFFd0]
+  detected outside scan", then "Stopping decode". No EOI was found, so Export JPEG
+  exported nothing ("The image has no end-of-image marker"), and the whole file was said
+  to be after the EOF (above). Fill bytes before an RST are now skipped with it. Before
+  any other marker they are still the marker's own, skipped where it is read ("*** Skipped
+  2 marker pad bytes ***"), and fill bytes that run to the end of the file are an Early
+  EOF; none is read past the end.
+- **The scan's decode** (found by the first review below; the earlier tests had 2 fill
+  bytes at most): it took fill bytes for data, 1 bits. With 2 of them a restart could be
+  missed ("ERROR: Restart marker not detected", once in a made file whose image was still
+  right); with 3 or more restarts were missed, and the MCUs after them decoded wrongly
+  ("Bad scan data in MCU(1,0)"), in the preview, Detailed Decode and Lookup MCU Offset. They are now skipped, to the RST's own 0xFF. A run of 0xFF found not
+  to end in an RST is remembered until the next restart or decode, as that search goes to
+  the run's end: without that, a scan the decoder reads through (its Huffman tables can
+  make "1" a valid code) took over a minute for a run of 1 MB, which it reads in 1 s.
+- **The EXIF thumbnail's marker list** didn't skip fill bytes at all: the second 0xFF was
+  taken for the marker's code ("* Embedded Thumb Marker: (0xFFff)"), with a length from
+  the bytes after it (53,500), so the rest of the thumbnail and its signature were lost
+  ("ERROR: Read more than specified EXIF thumb nLength (1000 bytes) before EOI"). Its scan
+  data, like the main image's, ended at a fill byte before an RST. Both now skip them.
+
+**Windows** has all of these (by reading its code).
+
+**Tests:** 29 new `ML` cases (1,806 in all), 3 of which open the window: Lookup MCU Offset
+after an RST with 3 fill bytes before it, twice, and two files decoded one after the
+other. On the code before, 23 fail; the other 6 check what was right (data after an EOI
+still counted from it, a 0 inside the file still "Expected marker", fill bytes before an
+EOI still skipped there, a thumbnail's scan without fill bytes counted as before, a Pillow
+JPEG's image without fill bytes, and the 1 MB run read in time and as far as before). Each
+of 10 switches, put in a scratch copy, fails its own cases when on and passes when off:
+one for each fix, and one each for the search's bound at the end of the file (without it,
+"Ran out of buffer"), the run remembered (without it, the 1 MB run times out) and
+forgotten at the next decode (without that, a second file's fill bytes inside the first
+file's run were taken for data). In each passing output, deleting the matched line or
+adding 1 to a number in it fails the case.
+
+**Checks:**
+- **Only these reports change.** Old against new:
+  - **Case files:** of the 431 under 64 MB, 414 are unchanged. The others are 11 new ones;
+    `lm_rst_fill`, whose fill bytes before its RSTs stopped the marker list; `ns_nosos`
+    and `r18_bufx_end`, which end after a segment; and `c5_second_sof_h0`, `ns_comps` and
+    `rp_sos` (and `ns_nosos`), which lose the whole-file note.
+  - **Made files:** 2,247 for this round: JPEGs with 0 to 3 fill bytes before each RST cut
+    after each byte, Pillow's with restart markers and 0 to 2 fill bytes cut every 13
+    bytes, fill bytes before the EOI and what may follow or replace it, fill bytes before
+    each header segment and files ending after each, and an EXIF thumbnail with RSTs and
+    fill bytes, cut after each byte, with fill bytes before each of its markers. 582 more
+    have 3 to 8 fill bytes. 1,673 of the 2,829 are unchanged. Every changed line is one of
+    these: the whole-file note gone; "Expected marker" at the end of the file replaced by
+    Early EOF; the marker list going on past RSTs with fill bytes, to the EOI or to the
+    end of a file cut short; the thumbnail's markers and signature; and the decode of
+    files with fill bytes. Those now decode with no error, to the same image whatever the
+    number of fill bytes, 0 to 8, and the restart interval, which is the image without
+    them (Pillow's included). The only errors added are in 141 files cut short, all in
+    their last 12 bytes, with no RST after them in the file.
+  - **The last two rounds' made files:** the 656 are unchanged; of the 2,088, 60 lose the
+    whole-file note, and 16 cut after a segment are now Early EOF (5 of them also lose the
+    note).
+  - **In all of them,** each of the 1,167 notes gone was from 0 to the file's size, and
+    each of the 55 "Expected marker" errors replaced was at the file's end.
+- **The affected groups pass:** 909 cases: all those that don't open the window (decoding,
+  export, batches, the command line, file facts, settings), with the `ML`, `LM` (Lookup
+  MCU Offset, which open it), `OW`, `PN`, `RP`, `AV`, `H4`, `H5`, `WR_thumb` and `NS`
+  cases, and the `FF_size` and `RA_thumb_rst` ones, whose files have fill bytes before an
+  RST. The 4 `ML` cases added after that run pass with the others (29).
+- **With ASan/UBSan,** the `ML`, `LM_rst`, `OW`, `PN`, `RP`, `RA`, `PE`, `PSD`, `ok_`,
+  `H`, `C1`–`C5`, `F`, `AV`, `WR_thumb`, `D`, `MP`, `R13`–`R18` and `NS` cases pass (496,
+  and the 4 later `ML` ones).
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 235 things in the two
+  files as before, and catches a bug planted in each function changed but the constructor
+  (6 plants, two of them in `DecodeMarker()`).
+- **No new compiler warnings** (202 in the two files before and after).
+- **Two independent reviews** (agents given only the diff). The first found the scan's
+  decode with 3 or more fill bytes, which a case of 3 hid by checking only the marker
+  list; a case that couldn't fail without its fix (a thumbnail's fill bytes to the end of
+  the file); the start offset's message (above); and Relaxed Parsing's RST (below). The
+  second found no bug, and cases missing: the 1 MB run's result, the run forgotten at the
+  next decode, Detailed Decode after an RST with fill bytes, and a Pillow JPEG with AC
+  data. All are added.
+- **Not checked:** a camera's JPEG with fill bytes before its restart markers, and
+  Detailed Decode and Lookup MCU Offset in the app's own window.
+
+**Found, not fixed:**
+- **With Relaxed Parsing, an RST outside a scan** is checked for a marker 2 bytes after
+  the one that follows it, and the parsing goes on 2 bytes too far: for
+  `FF D8 FF D0 FF FE 00 04 61 62 FF D9`, "Header length = 65534" and Early EOF, not the
+  COM (inherited).
+- **Fill bytes before a stuffed 0xFF00** in scan data (`FF FF 00`, which isn't valid: a
+  fill byte comes before a marker): the decoder takes it for data, as libjpeg does, but
+  the marker list says "WARNING: Unknown marker [0xFF00]" and stops, so no EOI is found.
+- **The thumbnail's "Skipped N bytes"** counts from the SOS's length, its header included,
+  and leaves out the 0xFF of each RST (inherited).
 
 ## How this was reviewed
 

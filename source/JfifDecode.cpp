@@ -6159,6 +6159,18 @@ uint32_t CjfifDecode::DecodeMarker()
 
   QString strDqtZigZagOrder = "";
 
+  const uint32_t nPosEof = m_pWBuf->GetPosEof();
+
+  // At the end of the file, as in one that ends right after a whole segment:
+  // the 0 read there was reported as "Expected marker 0xFF, got 0x00". It is
+  // an Early EOF, which ProcessFile() reports (the position is past the end;
+  // 0 at the end of the largest file, see WrappedSince()).
+  if(m_nPos >= nPosEof)
+  {
+    m_nPos = nPosEof + 1;
+    return DECMARK_OK;
+  }
+
   if(Buf(m_nPos) != 0xFF)
   {
     if(m_nPos == 0)
@@ -6188,7 +6200,6 @@ uint32_t CjfifDecode::DecodeMarker()
   // Not past the end of the file: the 0 read there was taken for a marker
   // (0xFF00), and at the end of the largest file the position passed 2^32,
   // so a marker was then read from the file's start
-  const uint32_t nPosEof = m_pWBuf->GetPosEof();
   bool bPastEof = (m_nPos >= nPosEof);
 
   // Read the current marker code
@@ -8034,6 +8045,26 @@ uint32_t CjfifDecode::DecodeMarker()
           nSkipData = Buf(m_nPos++);
           nSkipCount++;
 
+          // Fill bytes (T.81 B.1.1.2): 0xFF bytes before an RSTn are skipped
+          // with it. The first ended the scan here, so the marker list took
+          // the RSTn for one outside the scan, and stopped. (Before any other
+          // marker, its parsing skips them, as before.)
+          if(nSkipData == 0xFF)
+          {
+            uint32_t nPosFill = m_nPos;
+
+            while((nPosFill < nPosEof) && (Buf(nPosFill) == 0xFF))
+            {
+              nPosFill++;
+            }
+
+            if((nPosFill < nPosEof) && (Buf(nPosFill) >= JFIF_RST0) && (Buf(nPosFill) <= JFIF_RST7))
+            {
+              nSkipData = Buf(nPosFill);
+              m_nPos = nPosFill + 1;
+            }
+          }
+
           if(nSkipData == 0x00)
           {
             // Byte stuff
@@ -9789,6 +9820,24 @@ void CjfifDecode::DecodeEmbeddedThumb()
         bDone = true;
       }
 
+      // Fill bytes before the marker (T.81 B.1.1.2): the first was taken for
+      // its code (an unknown marker 0xFF, given a length from the code and the
+      // byte after it)
+      if(!bDone)
+      {
+        while((m_nPos < nPosEof) && (Buf(m_nPos) == 0xFF))
+        {
+          m_nPos++;
+        }
+
+        if(m_nPos >= nPosEof)
+        {
+          m_pLog->AddLineErr("ERROR: EXIF thumbnail runs past the end of the file");
+          bErrorAny = true;
+          bDone = true;
+        }
+      }
+
       if(!bDone)
       {
         nCode = Buf(m_nPos++);
@@ -9984,10 +10033,19 @@ void CjfifDecode::DecodeEmbeddedThumb()
 
               if((Buf(m_nPos) == 0xFF) && (Buf(m_nPos + 1) != 0x00))
               {
-                // Was it a restart marker?
-                if((Buf(m_nPos + 1) >= JFIF_RST0) && (Buf(m_nPos + 1) <= JFIF_RST7))
+                // Was it a restart marker? After any fill bytes (T.81
+                // B.1.1.2): the first ended the scan, and the marker after
+                // it was then read from the next 0xFF.
+                uint32_t nPosCode = m_nPos + 1;
+
+                while((nPosCode < nPosEof) && (Buf(nPosCode) == 0xFF))
                 {
-                  m_nPos++;
+                  nPosCode++;
+                }
+
+                if((nPosCode < nPosEof) && (Buf(nPosCode) >= JFIF_RST0) && (Buf(nPosCode) <= JFIF_RST7))
+                {
+                  m_nPos = nPosCode;
                 }
                 else
                 {
@@ -10814,11 +10872,16 @@ void CjfifDecode::ProcessFile(QFile *inFile)
     // Return value 0 - OK
     //              1 - Error
     //              2 - EOI
-    if(DecodeMarker() != DECMARK_OK)
+    const uint32_t nRetMarker = DecodeMarker();
+
+    if(nRetMarker != DECMARK_OK)
     {
       bDone = true;
 
-      if(m_nPosFileEnd >= m_nPosEoi)
+      // Only after an EOI: an error before one left its position at 0, so the
+      // whole file was said to be after it ("Data exists after EOF, range:
+      // 0x00000000-...")
+      if((nRetMarker == DECMARK_EOI) && (m_nPosFileEnd >= m_nPosEoi))
       {
         nDataAfterEof = m_nPosFileEnd - m_nPosEoi;
       }

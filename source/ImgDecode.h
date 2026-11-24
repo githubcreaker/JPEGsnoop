@@ -692,6 +692,10 @@ private:
   bool m_bScanEofReported;      // Reported that the scan data ran past the end of the file?
 
   bool m_bRestartRead;          // Have we seen a restart marker?
+  // A run of 0xFF bytes in the scan data, [start, end), found not to end in an
+  // RSTn (see BuffAddByte()): so a long one is searched only once
+  uint32_t m_nScanFillStart;
+  uint32_t m_nScanFillEnd;
   uint32_t m_nRestartLastInd;   // Last Restart marker read (0..7)
   uint32_t m_nRestartExpectInd; // Next Restart marker expected (0..7)
   uint32_t m_nRestartMcusLeft;  // How many MCUs until next RST?

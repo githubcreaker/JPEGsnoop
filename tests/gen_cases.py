@@ -14,6 +14,7 @@ import hashlib
 import io
 import os
 import random
+import re
 import struct
 import sys
 import zlib
@@ -6213,6 +6214,158 @@ ow_case("OW_avi_head_cut", "ow_avi_head_cut.avi",
 ow_idit = chunk(b"IDIT", b"THU OCT 13 12:00:00 2016\n")[:-1]
 write("ow_avi_odd.avi", b"RIFF" + struct.pack("<I", 4 + len(AV_HDR) + len(ow_idit)) + b"AVI " + AV_HDR + ow_idit)
 ow_case("OW_avi_odd", "ow_avi_odd.avi", AV_FOUND, forbid="runs past the end")
+
+
+# --- ML: where the marker list ends --------------------------------------------------
+def ml_case(cid, name, expect, forbid="-", mode="decode", flags="", timeout=10):
+    case(cid, "ML", mode, name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def ml_wr(cid, made, forbid):
+    """An Early EOF at the end of a file of 4 GiB - 1 bytes (wr_file(), as WR)"""
+    name, start = made
+    ml_case(cid, name, WR_EOF, forbid=forbid, flags=f"--start {start}", timeout=20)
+
+
+# "Data exists after EOF" counted from 0 when the decode stopped at an error
+# before any EOI: the whole file was said to be after it. Here the main image's
+# EOI is replaced by a COM and zeros: the next marker is read at the first zero.
+ml_err = c444[:-2] + seg(0xFE, b"ab") + bytes(8)
+ml_case("ML_after_err", write("ml_after_err.jpg", ml_err),
+        f"^ERROR: Expected marker 0xFF, got 0x00 @ offset 0x{len(c444) - 2 + 6:08x}\\. ", forbid="Data exists after EOF")
+# (The note is printed with the compression signatures, which are searched)
+ml_case("ML_after_err_block", "ml_after_err.jpg", "^\\*\\*\\* Searching Compression Signatures \\*\\*\\*$",
+        forbid="Additional Info")
+# After an EOI the bytes after it are still counted from it
+ml_case("ML_after_eoi", write("ml_after_eoi.jpg", c444 + bytes(range(10))),
+        f"^NOTE: Data exists after EOF, range: 0x{len(c444):08x}-0x{len(c444) + 10:08x} \\(10 bytes\\)$")
+
+# A file that ends right after a whole segment: the next marker was read at the
+# end of the file, as a 0 ("Expected marker 0xFF, got 0x00 @ [its end]"). It is
+# an Early EOF.
+ml_case("ML_eof_seg", write("ml_eof_seg.jpg", b"\xff\xd8" + seg(0xFE, b"ab")), RP_EOF, forbid="Expected marker")
+ml_case("ML_eof_dht", write("ml_eof_dht.jpg", c444[:sos_pos(c444)]), RP_EOF, forbid="Expected marker")
+# A 0 inside the file is still one
+ml_case("ML_eof_zero", write("ml_eof_zero.jpg", b"\xff\xd8" + seg(0xFE, b"ab") + b"\x00"),
+        "^ERROR: Expected marker 0xFF, got 0x00 @ offset 0x00000008\\. ", forbid="Early EOF")
+# At the end of a file of 4 GiB - 1 bytes, where the next position wraps to 0
+ml_wr("ML_wr_eof_seg", wr_file("ml_wr_eof_seg.bin", b"\xff\xd8" + seg(0xFE, b"ab"), c420), forbid="Expected marker")
+
+# Fill bytes (0xFF) before an RST marker in the scan data (T.81 B.1.1.2): the
+# first ended the scan in the marker list, which then took the RST for one
+# outside the scan ("Restart marker [0xFFd0] detected outside scan") and
+# stopped, so no EOI was found. 4 x 2 MCUs of 8 x 8, an RST after each but the
+# last.
+ml_fill1, _, _ = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=1, fill=1)
+ml_case("ML_fill_rst", write("ml_fill_rst.jpg", ml_fill1), f"^  OFFSET: 0x{len(ml_fill1) - 2:08x}$",
+        forbid="detected outside scan")
+ml_fill3, _, _ = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=1, fill=3)
+ml_case("ML_fill_rst3", write("ml_fill_rst3.jpg", ml_fill3), f"^  OFFSET: 0x{len(ml_fill3) - 2:08x}$",
+        forbid="detected outside scan")
+# The scan's decode was right with 1 or 2 fill bytes, which it took for data
+# (1 bits). 3 or more filled its 32-bit buffer before the RST was reached, so
+# the restart wasn't seen ("Restart marker not detected") and the MCUs after it
+# were decoded wrongly. Now they are skipped. The image's levels (DC only,
+# quantiser 1) are lm_level()'s: 40 in the first block, 40 + 3 * 37 + 23 in the
+# last.
+ml_case("ML_fill_rst3_scan", "ml_fill_rst3.jpg", "^    Number of RESTART markers decoded: 7$", forbid="ERROR")
+ml_case("ML_fill_rst3_pixels", "ml_fill_rst3.jpg", f"pixel 28,12 = {near(174, 1)},{near(174, 1)},{near(174, 1)}$",
+        flags="--pixels 28,12")
+# Each search for an RST after a run of 0xFF bytes goes to the run's end, so one
+# found not to end in an RST is remembered. Without that, a decoder that reads
+# through a long run searched it again for each of its bytes: over a minute for
+# this file (and 1 s with it). Its Huffman tables have two 1-bit codes, so "1"
+# is valid (DC category 0, and EOB), every bit of its scan is a code, and its
+# 65,536 blocks (2 bits each) read 2^14 bytes of the 1 MB run of 0xFF that is
+# the scan.
+ml_run = (b"\xff\xd8" + seg(0xDB, bytes([0]) + bytes([1]) * 64)
+          + seg(0xC0, bytes([8]) + struct.pack(">HHB", 2048, 2048, 1) + bytes([1, 0x11, 0]))
+          + seg(0xC4, bytes([0x00, 2] + [0] * 15 + [0, 0])) + seg(0xC4, bytes([0x10, 2] + [0] * 15 + [0, 0]))
+          + seg(0xDA, bytes([1, 1, 0x00, 0, 63, 0])) + b"\xff" * 1000000 + b"\xff\xd9")
+# (The decoder stops 2^14 bytes into the scan, which starts after the 140 bytes
+# of header)
+ml_run_at = len(ml_run) - 1000002
+ml_case("ML_fill_run", write("ml_fill_run.jpg", ml_run),
+        f"^    Next position in scan buffer: Offset 0x{ml_run_at + (1 << 14):08x}\\.0$", forbid="ERROR", timeout=20)
+# And Tools > Lookup MCU Offset, where the restart's MCU starts (as LM_rst_fill_*,
+# whose 2 fill bytes were right)
+_, MLRSTFILL3 = lm_file("ml_rst_fill3.jpg", 40, 24, LM_Y3, restart=2, fill=3)
+case("ML_lookup_fill3_after", "ML", "gui", "ml_rst_fill3.jpg", "--lookup " + LM_ALL, timeout=30,
+     expect=lm_want(19, 5, (2, 0), MLRSTFILL3[2]))
+case("ML_lookup_fill3_last", "ML", "gui", "ml_rst_fill3.jpg", "--lookup " + LM_ALL, timeout=30,
+     expect=lm_want(35, 21, (4, 2), MLRSTFILL3[14]))
+# And Detailed Decode, from MCU [2,0], after RST0: its first code where the
+# generator wrote it, and its DC the block's level (lm_level), as the restart
+# reset the predictor
+ML_DC2 = round((lm_level(0, 16, 0) - 128) * 8)
+ml_case("ML_detail_fill3", "ml_rst_fill3.jpg",
+        f"^      \\[0x{MLRSTFILL3[2][0]:08x}\\.{MLRSTFILL3[2][1]}\\]: ZRL=\\[ *0\\] Val=\\[ *{ML_DC2}\\] Coef=\\[00= DC\\]",
+        flags="--ac --detail 2,0,1")
+# A run found not to end in an RST is forgotten at the next decode: the second
+# file's fill bytes, inside the first file's run (from 0x8c on), were otherwise
+# taken for data
+case("ML_fill_second_file", "ML", "gui", ["ml_fill_run.jpg", "ml_rst_fill3.jpg"], "--log", timeout=60,
+     expect="^    Number of RESTART markers decoded: 7$", forbid="Restart marker not detected")
+
+
+def ml_fill_before_rst(data, k):
+    """k fill bytes added before each RST after the last SOS (Pillow's scan
+    data has no other 0xFF that isn't stuffed)"""
+    at = data.rfind(b"\xff\xda")
+    return data[:at] + re.sub(rb"(?=\xff[\xd0-\xd7])", lambda m: b"\xff" * k, data[at:])
+
+
+# A Pillow 4:2:0 JPEG with AC data and an RST after each MCU (d_restart.jpg),
+# with 3 fill bytes before each: its image is the same as without them. (The
+# MD5 is that of d_restart.jpg, decoded right before: take it again from there
+# if the decoder's output changes.)
+ML_PIL_MD5 = "^harness: preview md5=cbef5da7849350d9f639f495fbb58280$"
+ml_case("ML_fill_pil", write("ml_fill_pil.jpg", ml_fill_before_rst((files_dir / restart).read_bytes(), 3)),
+        ML_PIL_MD5, flags="--ac --preview-md5", forbid="ERROR")
+ml_case("ML_fill_pil_none", restart, ML_PIL_MD5, flags="--ac --preview-md5")
+# With no EOI found, Export JPEG exported nothing
+ml_case("ML_fill_rst_export", "ml_fill_rst.jpg", exported(ml_fill1), mode="export-jpeg")
+# Fill bytes before the EOI are still the marker's own, and skipped there
+ml_plain, _, _ = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level)
+ml_case("ML_fill_eoi", write("ml_fill_eoi.jpg", ml_plain[:-2] + b"\xff\xff\xff\xd9"),
+        "^\\*\\*\\* Skipped 2 marker pad bytes \\*\\*\\*$", forbid="Expected marker")
+# Fill bytes that run to the end of the file, after the scan's RSTs: an Early
+# EOF, read no further than the file (past it, the scan would have run out of
+# buffer)
+ml_case("ML_fill_eof", write("ml_fill_eof.jpg", ml_fill1[:-2] + b"\xff\xff"), RP_EOF,
+        forbid="detected outside scan|Ran out of buffer")
+ml_wr("ML_wr_fill_eof", wr_file("ml_wr_fill_eof.bin", ml_fill1[:-2] + b"\xff\xff", c420),
+      forbid="detected outside scan|Ran out of buffer")
+
+# The EXIF thumbnail's marker list didn't skip fill bytes at all: the second
+# 0xFF was taken for the marker's code, given a length from the bytes after
+# it, so no marker after it was found. Its scan data ended at the first, as
+# above. Each thumbnail here is at the end of the file (ow_thumb_tail()).
+ml_t_rst, ml_t_at, _ = dc_only_jpeg(16, 16, [(1, 1, 1)], lm_level, restart=1, fill=1)
+ow_thumb_tail("ml_thumb_rst.jpg", ml_t_rst)
+ml_case("ML_thumb_rst", "ml_thumb_rst.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR")
+# The bytes from the SOS's length (8 bytes of header, skipped with the scan
+# data) to the EOI, but for the 3 RSTs' 0xFF and the fill byte before each
+ML_SOS_HDR = 8
+ml_case("ML_thumb_rst_count", "ml_thumb_rst.jpg",
+        f"^    Skipped {len(ml_t_rst) - 2 - (ml_t_at - ML_SOS_HDR) - 3 * 2} bytes$")
+# Without fill bytes, only each RST's 0xFF isn't counted, as before
+ml_t_rst0, ml_t_at0, _ = dc_only_jpeg(16, 16, [(1, 1, 1)], lm_level, restart=1)
+ow_thumb_tail("ml_thumb_rst0.jpg", ml_t_rst0)
+ml_case("ML_thumb_rst0_count", "ml_thumb_rst0.jpg",
+        f"^    Skipped {len(ml_t_rst0) - 2 - (ml_t_at0 - ML_SOS_HDR) - 3} bytes$")
+ml_t_plain, _, _ = dc_only_jpeg(16, 16, [(1, 1, 1)], lm_level)
+ow_thumb_tail("ml_thumb_eoi.jpg", ml_t_plain[:-2] + b"\xff\xff\xd9")
+ml_case("ML_thumb_eoi", "ml_thumb_eoi.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR")
+# Before the DQT (just after the SOI)
+ow_thumb_tail("ml_thumb_dqt.jpg", ml_t_plain[:2] + b"\xff\xff" + ml_t_plain[2:])
+ml_case("ML_thumb_dqt", "ml_thumb_dqt.jpg", "^  \\* Embedded Thumb Marker: DQT$", forbid="ERROR")
+ml_case("ML_thumb_dqt_eoi", "ml_thumb_dqt.jpg", "^  \\* Embedded Thumb Marker: EOI$")
+# Fill bytes to the end of the file: the code isn't read there (as a 0, "(0xFF00)",
+# where the same error came next)
+ow_thumb_tail("ml_thumb_eof.jpg", b"\xff\xd8\xff\xff\xff")
+ml_case("ML_thumb_eof", "ml_thumb_eof.jpg", "^ERROR: EXIF thumbnail runs past the end of the file$",
+        forbid="Read more than|Embedded Thumb Marker: \\(0x")
 
 
 with open(out_dir / "cases.tsv", "w") as f:

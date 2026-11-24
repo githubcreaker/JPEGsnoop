@@ -109,6 +109,9 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
 {
   m_bVerbose = false;
 
+  m_nScanFillStart = 0;
+  m_nScanFillEnd = 0;
+
   m_pStatBar = 0;
   m_bImgDecoded = false;        // Image has not been decoded yet
   m_bDibTempReady = false;
@@ -1846,6 +1849,37 @@ uint32_t CimgDecode::BuffAddByte()
 
   nBuf0 = m_pWBuf->Buf(m_nScanBuffPtr);
   nBuf1 = m_pWBuf->Buf(m_nScanBuffPtr + 1);
+
+  // Fill bytes before an RSTn (T.81 B.1.1.2) are skipped, to the marker's own
+  // 0xFF. Added as data, they could fill the buffer before the RSTn was
+  // reached (3 or more did in every file tried), so the restart wasn't seen
+  // in time ("Restart marker not detected") and the rest of the scan was
+  // decoded wrongly. (Before any other marker they are still added: where the
+  // scan's data ends is found before them, below.) A run found not to end in
+  // an RSTn is remembered, so a long one isn't searched again for each of its
+  // bytes.
+  if((nBuf0 == 0xFF) && (nBuf1 == 0xFF) &&
+     !((m_nScanBuffPtr >= m_nScanFillStart) && (m_nScanBuffPtr < m_nScanFillEnd)))
+  {
+    const uint32_t nPosEof = m_pWBuf->GetPosEof();
+    uint32_t nPosCode = m_nScanBuffPtr + 1;
+
+    while((nPosCode < nPosEof) && (m_pWBuf->Buf(nPosCode) == 0xFF))
+    {
+      nPosCode++;
+    }
+
+    if((nPosCode < nPosEof) && (m_pWBuf->Buf(nPosCode) >= JFIF_RST0) && (m_pWBuf->Buf(nPosCode) <= JFIF_RST7))
+    {
+      m_nScanBuffPtr = nPosCode - 1;
+      nBuf1 = m_pWBuf->Buf(nPosCode);
+    }
+    else
+    {
+      m_nScanFillStart = m_nScanBuffPtr;
+      m_nScanFillEnd = nPosCode;
+    }
+  }
 
   // Check for restart marker first. Assume none back-to-back.
   if(nBuf0 == 0xFF)
@@ -5110,6 +5144,9 @@ void CimgDecode::DecodeRestartScanBuf(uint32_t nFilePos, bool bRestart)
   // Reset RST Interval checking
   m_bRestartRead = false;
   m_nRestartMcusLeft = m_nRestartInterval;
+
+  m_nScanFillStart = 0;
+  m_nScanFillEnd = 0;
 }
 
 // Color conversion from YCC to RGB
