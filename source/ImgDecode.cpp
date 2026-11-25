@@ -109,8 +109,7 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
 {
   m_bVerbose = false;
 
-  m_nScanFillStart = 0;
-  m_nScanFillEnd = 0;
+  ScanFillForget();
 
   m_pStatBar = 0;
   m_bImgDecoded = false;        // Image has not been decoded yet
@@ -142,6 +141,10 @@ CimgDecode::CimgDecode(CDocLog *pLog, CwindowBuf *pWBuf, CSnoopConfig *pAppConfi
   // 254 in a decoder on the stack), and then left m_nWarnBadScanNum unset
   m_bScanErrorsDisable = false;
   m_nWarnBadScanNum = 0;
+  m_nWarnRstIndexNum = 0;
+  m_nWarnRstCutNum = 0;
+  m_nWarnRstShortNum = 0;
+  m_nWarnRstSyncNum = 0;
   m_nRestartInterval = 0;
 
   // Reset the image decoding state
@@ -207,6 +210,9 @@ void CimgDecode::Reset()
 
   m_bRestartRead = false;       // No restarts seen yet
   m_nRestartRead = 0;
+  m_nRestartWantInd = 0;
+  m_bRestartLost = false;
+  m_bRestartNoMore = false;
 
   m_nImgSizeXPartMcu = 0;
   m_nImgSizeYPartMcu = 0;
@@ -295,6 +301,10 @@ void CimgDecode::Reset()
     m_nWarnBadScanNum = 0;
   }
   m_nWarnYccClipNum = 0;
+  m_nWarnRstIndexNum = 0;
+  m_nWarnRstCutNum = 0;
+  m_nWarnRstShortNum = 0;
+  m_nWarnRstSyncNum = 0;
 
   // Reset the view
   m_nPreviewPosX = 0;
@@ -1409,11 +1419,19 @@ void CimgDecode::ScanErrorsDisable()
 //
 // POST:
 // - m_nWarnBadScanNum
+// - m_nWarnRstIndexNum
+// - m_nWarnRstCutNum
+// - m_nWarnRstShortNum
+// - m_nWarnRstSyncNum
 // - m_bScanErrorsDisable
 //
 void CimgDecode::ScanErrorsEnable()
 {
   m_nWarnBadScanNum = 0;
+  m_nWarnRstIndexNum = 0;
+  m_nWarnRstCutNum = 0;
+  m_nWarnRstShortNum = 0;
+  m_nWarnRstSyncNum = 0;
   m_bScanErrorsDisable = false;
 }
 
@@ -1644,6 +1662,23 @@ teRsvRet CimgDecode::ReadScanVal(uint32_t nClass, uint32_t nTbl, uint32_t &rZrl,
     else
     {
       // Normal nCode
+
+      // Its value bits run on past a restart marker: the interval's data
+      // ends inside the code. It is dropped, as the bits before a marker
+      // that make no code are, and read again after the marker; nor is it
+      // counted. (Taken whole, with zeros for the bits past the marker, it
+      // ended the scan with "Overread scan segment": the rest of the image
+      // was grey, and the errors were at 0x00000000.2.)
+      if(m_bRestartRead && (m_nScanBitsUsed2 > 32 - m_nScanBuff_vacant))
+      {
+        if(m_nScanBitsUsed1 < MAX_DHT_CODELEN + 1)
+        {
+          m_anDhtHisto[nClass][nTbl][m_nScanBitsUsed1]--;
+        }
+
+        return RSV_RST_CUT;
+      }
+
       nVal = ExtractBits(m_nScanBuff, m_nScanBitsUsed2);
       rVal = HuffmanDc2Signed(nVal, m_nScanBitsUsed2);
 
@@ -1812,6 +1847,76 @@ bool CimgDecode::ExpectRestart()
   return false;
 }
 
+// Forget the runs of 0xFF remembered by ScanFillRun() (at each decode and
+// restart)
+void CimgDecode::ScanFillForget()
+{
+  for(uint32_t nInd = 0; nInd < SCAN_FILL_RUNS; nInd++)
+  {
+    m_anScanFillStart[nInd] = 0;
+    m_anScanFillEnd[nInd] = 0;
+    m_abScanFillSkipped[nInd] = false;
+  }
+
+  m_nScanFillNext = 0;
+}
+
+// Where a run of 0xFF bytes in the scan data from nPos ends (nPosEnd: the
+// first byte after it, or the end of the file), and whether all but its last
+// 0xFF are fill bytes, skipped: those before an RSTn (T.81 B.1.1.2), whose
+// last 0xFF is the marker's, and those before the 0x00 of a stuffed 0xFF,
+// which T.81 doesn't allow (libjpeg documents reading the run as one 0xFF of
+// data). The last runs are remembered with that answer, so a long one isn't
+// searched again, nor the byte after it read again, for each of its bytes: a
+// crafted 1 MB run took over a minute to decode; that byte, over 112 KB on,
+// made the file's window load twice for each (12 to 31 s for 2 MB before an
+// EOI, depending on the machine's load, 0.3 to 0.6 s without); and Detailed
+// Decode searched one before an RSTn again for each code near it (16 MB took
+// 5 times as long). Its bytes for a code (5 at most: a 16-bit code and a
+// 15-bit value from bit 7; the last not searched from) reach at most 4 runs,
+// and the decoder has read up to 4 bytes past the code, so 8 are kept: with
+// one, a short run next to a long one made each code search the long one
+// again, and with 4, 16-bit codes made it search each run about once more.
+bool CimgDecode::ScanFillRun(uint32_t nPos, uint32_t &nPosEnd)
+{
+  for(uint32_t nInd = 0; nInd < SCAN_FILL_RUNS; nInd++)
+  {
+    if((nPos >= m_anScanFillStart[nInd]) && (nPos < m_anScanFillEnd[nInd]))
+    {
+      nPosEnd = m_anScanFillEnd[nInd];
+      return m_abScanFillSkipped[nInd];
+    }
+  }
+
+  const uint32_t nPosEof = m_pWBuf->GetPosEof();
+
+  nPosEnd = nPos;
+
+  while((nPosEnd < nPosEof) && (m_pWBuf->Buf(nPosEnd) == 0xFF))
+  {
+    nPosEnd++;
+  }
+
+  bool bSkipped = false;
+
+  if(nPosEnd < nPosEof)
+  {
+    const uint32_t nCode = m_pWBuf->Buf(nPosEnd);
+
+    bSkipped = ((nCode >= JFIF_RST0) && (nCode <= JFIF_RST7)) || (nCode == 0x00);
+  }
+
+  if(nPosEnd > nPos)
+  {
+    m_anScanFillStart[m_nScanFillNext] = nPos;
+    m_anScanFillEnd[m_nScanFillNext] = nPosEnd;
+    m_abScanFillSkipped[m_nScanFillNext] = bSkipped;
+    m_nScanFillNext = (m_nScanFillNext + 1) % SCAN_FILL_RUNS;
+  }
+
+  return bSkipped;
+}
+
 // Add a byte to the scan buffer from the file
 // - Handle stuff bytes
 // - Handle restart markers
@@ -1855,33 +1960,22 @@ uint32_t CimgDecode::BuffAddByte()
   // reached (3 or more did in every file tried), so the restart wasn't seen
   // in time ("Restart marker not detected") and the rest of the scan was
   // decoded wrongly. (Before any other marker they are still added: where the
-  // scan's data ends is found before them, below.) A run found not to end in
-  // an RSTn is remembered, so a long one isn't searched again for each of its
-  // bytes.
-  if((nBuf0 == 0xFF) && (nBuf1 == 0xFF) &&
-     !((m_nScanBuffPtr >= m_nScanFillStart) && (m_nScanBuffPtr < m_nScanFillEnd)))
+  // scan's data ends is found before them, below.) Before the 0x00 of a
+  // stuffed 0xFF they aren't allowed, but are skipped likewise, so the run is
+  // one 0xFF of data, as libjpeg documents; each 0xFF was data.
+  if((nBuf0 == 0xFF) && (nBuf1 == 0xFF))
   {
-    const uint32_t nPosEof = m_pWBuf->GetPosEof();
-    uint32_t nPosCode = m_nScanBuffPtr + 1;
+    uint32_t nPosCode = 0;
 
-    while((nPosCode < nPosEof) && (m_pWBuf->Buf(nPosCode) == 0xFF))
-    {
-      nPosCode++;
-    }
-
-    if((nPosCode < nPosEof) && (m_pWBuf->Buf(nPosCode) >= JFIF_RST0) && (m_pWBuf->Buf(nPosCode) <= JFIF_RST7))
+    if(ScanFillRun(m_nScanBuffPtr + 1, nPosCode))
     {
       m_nScanBuffPtr = nPosCode - 1;
       nBuf1 = m_pWBuf->Buf(nPosCode);
     }
-    else
-    {
-      m_nScanFillStart = m_nScanBuffPtr;
-      m_nScanFillEnd = nPosCode;
-    }
   }
 
-  // Check for restart marker first. Assume none back-to-back.
+  // Check for restart marker first. (One is read at a time: the decoder
+  // passes over each of several in a row, in DecodeScanComp().)
   if(nBuf0 == 0xFF)
   {
     nMarker = nBuf1;
@@ -1902,9 +1996,16 @@ uint32_t CimgDecode::BuffAddByte()
       m_nRestartRead++;
       m_nRestartLastInd = nMarker - JFIF_RST0;
 
-      if(m_nRestartLastInd != m_nRestartExpectInd)
+      // Reported up to the scan's error limit, as its other errors are, but
+      // on a count of its own, so as not to hide them: each RST of a run in a
+      // row is read (1 MB of RST0s logged 524,288 of these, in 88 s). Only
+      // without a DRI: with one, an RST out of order is reported where the
+      // restart rule takes it, by the interval count (DecodeRestartNext()).
+      // (Reported here too, each RST skipped was reported twice, and the
+      // right RST after a wrong one was reported as out of order.)
+      if(!m_bRestartEn && (m_nRestartLastInd != m_nRestartExpectInd))
       {
-        if(!m_bScanErrorsDisable)
+        if(!m_bScanErrorsDisable && (m_nWarnRstIndexNum < m_nScanErrMax))
         {
           QString strTmp;
 
@@ -1914,6 +2015,14 @@ uint32_t CimgDecode::BuffAddByte()
               .arg(m_nRestartLastInd)
               .arg(m_nScanBuffPtr, 8, 16, QChar('0'));
           m_pLog->AddLineErr(strTmp);
+
+          m_nWarnRstIndexNum++;
+
+          if(m_nWarnRstIndexNum >= m_nScanErrMax)
+          {
+            strTmp = QString("    Only reported first %1 instances of this message...").arg(m_nScanErrMax);
+            m_pLog->AddLineErr(strTmp);
+          }
         }
       }
 
@@ -2036,7 +2145,14 @@ uint32_t CimgDecode::BuffAddByte()
       nDataEnd--;
     }
 
-    m_nScanDataEnd = qMin(m_nScanDataEnd, nDataEnd);
+    // With a DRI, a marker below SOF0 (0xFF01..0xFFBF) doesn't end it: the
+    // restart rule passes over it, as libjpeg does, and the decode goes on
+    // after it. (Tools > Lookup MCU Offset gave "Not decoded" for every MCU
+    // after it, though each was decoded in its place.)
+    if(!m_bRestartEn || (nMarker >= 0xC0))
+    {
+      m_nScanDataEnd = qMin(m_nScanDataEnd, nDataEnd);
+    }
 
     if(m_nWarnBadScanNum < m_nScanErrMax)
     {
@@ -2134,6 +2250,13 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
   // Profiling: No difference noted
   DecodeIdctClear();
 
+  // The data of this block's restart interval has ended: it isn't read
+  if(m_bRestartLost)
+  {
+    DecodeRestartLostBlock();
+    return true;
+  }
+
   while(!bDone)
   {
     BuffTopup();
@@ -2150,17 +2273,51 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
     // - RSV_EOB            End of block
     // - RSV_UNDERFLOW      Ran out of data in buffer
     // - RSV_RST_TERM       No huffman code found, but restart marker seen
+    // - RSV_RST_CUT        A code found, but its bits run on past the marker
     // Assume nTblDht just points to DC tables, adjust for AC
     // e.g. nTblDht = 0,2,4
     eRsvRet = ReadScanVal(bDC ? 0 : 1, bDC ? nTblDhtDc : nTblDhtAc, nZrl, nVal);
 
-    // Handle Restart marker first.
-    if(eRsvRet == RSV_RST_TERM)
+    // An RST before the restart interval's last MCU is read (each interval's
+    // first is passed over before it, in DecodeRestartNext()): its data ends
+    // here, and a code cut short is dropped. The block keeps what was read
+    // before it; with no DC read, it is grey as the rest of the interval is.
+    if(m_bRestartEn && ((eRsvRet == RSV_RST_TERM) || (eRsvRet == RSV_RST_CUT)))
+    {
+      if(eRsvRet == RSV_RST_CUT)
+      {
+        ReportRestartCut(nSavedBufPos, nSavedBufAlign, nMcuX, nMcuY);
+      }
+
+      DecodeRestartShort(nMcuX, nMcuY);
+
+      if(bDC)
+      {
+        DecodeRestartLostBlock();
+      }
+
+      break;
+    }
+
+    // Without a restart interval (no DRI), an RST is passed over where it is
+    // found, and the decode goes on. Another may follow it at once: each is
+    // passed over in turn, until a code is read. (The decode went on after
+    // the second marker, with no code read: the block took that for its
+    // first coefficient, a 0 at file position 0, and Detailed Decode and the
+    // MCU's position showed position 0.) A code the marker cuts short is
+    // read again after it, likewise.
+    while((eRsvRet == RSV_RST_TERM) || (eRsvRet == RSV_RST_CUT))
     {
       // Assume that m_bRestartRead is TRUE
       // No huffman code found because either we ran out of bits
       // in the scan buffer or the bits padded with 1's didn't result
       // in a valid VLC code.
+
+      // Or the code found was cut short: reported where it starts
+      if(eRsvRet == RSV_RST_CUT)
+      {
+        ReportRestartCut(nSavedBufPos, nSavedBufAlign, nMcuX, nMcuY);
+      }
 
       // Steps:
       //   1) Reset the decoder state (DC values)
@@ -2191,11 +2348,9 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
       nSavedBufPos = m_anScanBuffPtr_pos[0];
       nSavedBufAlign = m_nScanBuffPtr_align;
 
-      // Step 6
-      // Q_ASSERT is because we assume that we don't get 2 restart
-      // markers in a row!
+      // Step 6 (each pass moves 2 bytes on, and no marker is read past the
+      // end of the file, so this ends)
       eRsvRet = ReadScanVal(bDC ? 0 : 1, bDC ? nTblDhtDc : nTblDhtAc, nZrl, nVal);
-      Q_ASSERT(eRsvRet != RSV_RST_TERM);
     }
 
     // The MCU's first code: where the MCU starts
@@ -2487,6 +2642,20 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
 
   DecodeIdctClear();
 
+  // The data of this block's restart interval has ended: it isn't read
+  if(m_bRestartLost)
+  {
+    DecodeRestartLostBlock();
+
+    if(bPrint)
+    {
+      m_pLog->AddLine("      Not decoded: the data of its restart interval ended before it");
+      m_pLog->AddLine("");
+    }
+
+    return true;
+  }
+
   while(!bDone)
   {
     BuffTopup();
@@ -2504,15 +2673,51 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
     //  1 - EOB
     //  2 - Overread error
     //  3 - No huffman code found, but restart marker seen
+    //  4 - A code found, but its bits run on past the marker
     eRsvRet = ReadScanVal(bDC ? 0 : 1, bDC ? nTblDhtDc : nTblDhtAc, nZrl, nVal);
 
-    // Handle Restart marker first.
-    if(eRsvRet == RSV_RST_TERM)
+    // An RST before the restart interval's last MCU is read: its data ends
+    // here (as in DecodeScanComp())
+    if(m_bRestartEn && ((eRsvRet == RSV_RST_TERM) || (eRsvRet == RSV_RST_CUT)))
+    {
+      if(eRsvRet == RSV_RST_CUT)
+      {
+        ReportRestartCut(nSavedBufPos, nSavedBufAlign, nMcuX, nMcuY);
+      }
+
+      DecodeRestartShort(nMcuX, nMcuY);
+
+      if(bDC)
+      {
+        DecodeRestartLostBlock();
+      }
+
+      if(bPrint)
+      {
+        m_pLog->AddLine(QString("      RST%1 @ 0x%2.0: the data of its restart interval ends here")
+                          .arg(m_nRestartLastInd)
+                          .arg(m_nScanBuffPtr, 8, 16, QChar('0')));
+      }
+
+      break;
+    }
+
+    // Without a restart interval (no DRI), an RST is passed over where it is
+    // found, and each that follows it at once (as DecodeScanComp(): the code
+    // read after the second was reported at [0x00000000.0], showing the
+    // file's first bytes), and a code it cuts short
+    while((eRsvRet == RSV_RST_TERM) || (eRsvRet == RSV_RST_CUT))
     {
       // Assume that m_bRestartRead is TRUE
       // No huffman code found because either we ran out of bits
       // in the scan buffer or the bits padded with 1's didn't result
       // in a valid VLC code.
+
+      // Or the code found was cut short: reported where it starts
+      if(eRsvRet == RSV_RST_CUT)
+      {
+        ReportRestartCut(nSavedBufPos, nSavedBufAlign, nMcuX, nMcuY);
+      }
 
       // Steps:
       //   1) Reset the decoder state (DC values)
@@ -2543,11 +2748,8 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
       nSavedBufPos = m_anScanBuffPtr_pos[0];
       nSavedBufAlign = m_nScanBuffPtr_align;
 
-      // Step 6
-      // Q_ASSERT is because we assume that we don't get 2 restart
-      // markers in a row!
+      // Step 6 (this ends, as in DecodeScanComp())
       eRsvRet = ReadScanVal(bDC ? 0 : 1, bDC ? nTblDhtDc : nTblDhtAc, nZrl, nVal);
-      Q_ASSERT(eRsvRet != RSV_RST_TERM);
     }
 
     // The MCU's first code: where the MCU starts
@@ -2852,7 +3054,10 @@ void CimgDecode::ReportVlc(uint32_t nVlcPos, uint32_t nVlcAlign,
   QString strPos;
   QString strTmp;
 
-  uint32_t nBufPosInd = nVlcPos;
+  // (In 64 bits: past the end of the largest file it wrapped to its start,
+  // which was shown. Past the end each byte is 0, as the decoder read it.)
+  quint64 nBufPosInd = nVlcPos;
+  const quint64 nPosEof = m_pWBuf->GetPosEof();
 
   strPos = GetScanBufPos(nVlcPos, nVlcAlign);
 
@@ -2867,18 +3072,36 @@ void CimgDecode::ReportVlc(uint32_t nVlcPos, uint32_t nVlcAlign,
   // We need to look at previous byte as it might have been
   // start of stuff byte! If so, we need to ignore the byte
   // and advance the pointers.
-  uint32_t nBufBytePrev = (nBufPosInd > 0) ? m_pWBuf->Buf(nBufPosInd - 1) : 0;
+  uint32_t nBufBytePrev = ((nBufPosInd > 0) && (nBufPosInd - 1 < nPosEof)) ? m_pWBuf->Buf(nVlcPos - 1) : 0;
 
   QString strHex;
   QString strBytes;
 
   for(uint32_t nInd = 0; nInd < nBytes; nInd++)
   {
-    uint32_t nBufByte = m_pWBuf->Buf(nBufPosInd++);
+    uint32_t nBufByte = (nBufPosInd < nPosEof) ? m_pWBuf->Buf(static_cast<uint32_t>(nBufPosInd)) : 0;
+    nBufPosInd++;
 
     if((nBufBytePrev == 0xFF) && (nBufByte == 0x00))
     {
-      nBufByte = m_pWBuf->Buf(nBufPosInd++);
+      nBufByte = (nBufPosInd < nPosEof) ? m_pWBuf->Buf(static_cast<uint32_t>(nBufPosInd)) : 0;
+      nBufPosInd++;
+    }
+
+    // Fill bytes, before an RSTn or a stuffed 0xFF's 0x00, are skipped as the
+    // decoder skips them (see BuffAddByte()): each was shown, and the bytes
+    // after them later than the decoder read them. On to the RSTn's code, or
+    // the 0x00, passed over next as after a 0xFF. (Not for the last byte
+    // shown: nothing after it is.)
+    if((nInd + 1 < nBytes) && (nBufByte == 0xFF) && (nBufPosInd < nPosEof) &&
+       (m_pWBuf->Buf(static_cast<uint32_t>(nBufPosInd)) == 0xFF))
+    {
+      uint32_t nPosCode = 0;
+
+      if(ScanFillRun(static_cast<uint32_t>(nBufPosInd), nPosCode))
+      {
+        nBufPosInd = nPosCode;
+      }
     }
 
     strHex += QString(" %1").arg(nBufByte, 2, 16, QChar('0'));
@@ -3318,6 +3541,475 @@ QString CimgDecode::GetScanBufPos(uint32_t pos, uint32_t align)
   return QString("0x%1.%2")
       .arg(pos, 8, 16, QChar('0'))
       .arg(align);;
+}
+
+// Report a code cut short by a restart marker (ReadScanVal() returned
+// RSV_RST_CUT), up to the scan's error limit, as its other errors are, but on
+// a count of its own, so as not to hide them (on theirs, 20 of these hid the
+// error for a file cut short after them), as the RST index error is
+// - Called before the marker is passed over: m_nScanBuffPtr is on its 0xFF
+//
+// INPUT:
+// - nPos                       = File position where the code starts (byte)
+// - nAlign                     = File position where the code starts (bit)
+// - nMcuX                      = MCU coordinate (x)
+// - nMcuY                      = MCU coordinate (y)
+// PRE:
+// - m_nScanBuffPtr
+// - m_nRestartLastInd
+// - m_bScanErrorsDisable
+// POST:
+// - m_nWarnRstCutNum
+//
+void CimgDecode::ReportRestartCut(uint32_t nPos, uint32_t nAlign, uint32_t nMcuX, uint32_t nMcuY)
+{
+  if(!m_bScanErrorsDisable && (m_nWarnRstCutNum < m_nScanErrMax))
+  {
+    QString strTmp;
+
+    strTmp = QString("*** ERROR: Huffman code @ %1 in MCU(%2,%3) cut short by RST%4 @ 0x%5.0")
+        .arg(GetScanBufPos(nPos, nAlign))
+        .arg(nMcuX)
+        .arg(nMcuY)
+        .arg(m_nRestartLastInd)
+        .arg(m_nScanBuffPtr, 8, 16, QChar('0'));
+    m_pLog->AddLineErr(strTmp);
+
+    m_nWarnRstCutNum++;
+
+    if(m_nWarnRstCutNum >= m_nScanErrMax)
+    {
+      strTmp = QString("    Only reported first %1 instances of this message...").arg(m_nScanErrMax);
+      m_pLog->AddLineErr(strTmp);
+    }
+  }
+}
+
+// Restart intervals (T.81 B.2.4.4, F.2.2.4): each holds the scan data of a
+// fixed number of MCUs (the DRI's), and an RST follows each but the last.
+// Each interval's data is decoded at the MCUs the restart interval sets, as
+// libjpeg does (jdhuff.c process_restart(), jdmarker.c read_restart_marker()
+// and jpeg_resync_to_restart()):
+// - An RST that comes before the interval's last MCU is read ends its data
+//   (DecodeRestartShort()): the rest of the interval isn't decoded, but left
+//   grey, and the data after the RST is the next interval's.
+// - Data after the interval's last MCU is skipped to the next marker
+//   (DecodeRestartNext()), and the RST found there is taken by its number.
+// (The decoder went on decoding where an RST was found, continuing the block
+// or MCU it was in: when an interval had lost data, the rest of the image was
+// decoded one or more MCUs early, and an RST inside an MCU put the data after
+// it into the wrong block or component, for the rest of the image. Bits
+// before an RST that made no code were dropped with no message.)
+//
+// Without a DRI, an RST in the scan data is passed over where it is found,
+// as before (DecodeScanComp()).
+
+// The MCUs from nMcuFirst on, nMcuCount of them, but not past the image's
+// last: "MCU(x,y)", or "MCU(x,y) to MCU(x2,y2)"
+//
+QString CimgDecode::RestartMcuRange(uint64_t nMcuFirst, uint64_t nMcuCount) const
+{
+  const uint64_t nMcuX = static_cast<uint64_t>(qMax(m_nMcuXMax, 1));
+  const uint64_t nMcuAll = nMcuX * static_cast<uint64_t>(qMax(m_nMcuYMax, 1));
+
+  uint64_t nMcuLast = nMcuFirst + ((nMcuCount > 0) ? (nMcuCount - 1) : 0);
+
+  if(nMcuLast >= nMcuAll)
+  {
+    nMcuLast = nMcuAll - 1;
+  }
+
+  QString strRange = QString("MCU(%1,%2)").arg(nMcuFirst % nMcuX).arg(nMcuFirst / nMcuX);
+
+  if(nMcuLast > nMcuFirst)
+  {
+    strRange += QString(" to MCU(%1,%2)").arg(nMcuLast % nMcuX).arg(nMcuLast / nMcuX);
+  }
+
+  return strRange;
+}
+
+// A marker found by RestartSkipToMarker(), for the log
+//
+// INPUT:
+// - nMarker                    = The marker's code (0xD0..0xD7 for an RST), or 0
+//                                for the end of the file
+// - nMarkerPos                 = File position of its 0xFF (or of the end)
+//
+QString CimgDecode::RestartMarkerStr(uint32_t nMarker, uint32_t nMarkerPos) const
+{
+  if(nMarker == 0)
+  {
+    return QString("the end of the file @ 0x%1.0").arg(nMarkerPos, 8, 16, QChar('0'));
+  }
+
+  if((nMarker >= JFIF_RST0) && (nMarker <= JFIF_RST7))
+  {
+    return QString("RST%1 @ 0x%2.0").arg(nMarker - JFIF_RST0).arg(nMarkerPos, 8, 16, QChar('0'));
+  }
+
+  return QString("marker 0xFF%1 @ 0x%2.0").arg(nMarker, 2, 16, QChar('0')).arg(nMarkerPos, 8, 16, QChar('0'));
+}
+
+// Whether another message about a missing, late or out of order RST is
+// reported: up to the scan's error limit, as its other errors are, but on a
+// count of its own, so as not to hide them (one can come at each restart
+// interval). Checked before building the message.
+//
+bool CimgDecode::RestartSyncReportable() const
+{
+  return !m_bScanErrorsDisable && (m_nWarnRstSyncNum < m_nScanErrMax);
+}
+
+// Report a message about a missing, late or out of order RST
+// (RestartSyncReportable() said it is reported)
+//
+// POST:
+// - m_nWarnRstSyncNum
+//
+void CimgDecode::ReportRestartSync(const QString &strMsg)
+{
+  m_pLog->AddLineErr(strMsg);
+
+  m_nWarnRstSyncNum++;
+
+  if(m_nWarnRstSyncNum >= m_nScanErrMax)
+  {
+    m_pLog->AddLineErr(QString("    Only reported first %1 instances of this message...").arg(m_nScanErrMax));
+  }
+}
+
+// Pass over the RST that the scan buffer stopped at (m_bRestartRead), and
+// start the buffer again after it
+//
+// PRE:
+// - m_nScanBuffPtr             = On the marker's 0xFF
+// POST:
+// - m_nScanBuffPtr
+// - m_bRestartRead
+//
+void CimgDecode::RestartPassMarker()
+{
+  ScanBuffPtrAdvance(2);
+  DecodeRestartScanBuf(m_nScanBuffPtr, true);
+}
+
+// Skip the scan data from nPos to the next marker, as libjpeg's
+// next_marker() does (passing over stuffed 0xFF 0x00 and fill bytes), and
+// markers below SOF0 (0xFF01..0xFFBF), which its jpeg_resync_to_restart()
+// passes over. The scan buffer is started again at the marker found, which
+// it reads (BuffAddByte()) if it hadn't: an RST stops the buffer there
+// (m_bRestartRead), as at the end of an interval; another marker, or the end
+// of the file, ends the scan's data. (The RST the buffer had stopped at is
+// left as it is, so it isn't counted or checked twice; a marker the buffer
+// had read past was reported then.) Each byte is looked at once, ahead of
+// nPos only.
+//
+// INPUT:
+// - nPos                       = File position to search from
+// PRE:
+// - m_nScanBuffPtr             = Where the scan buffer has read the file to
+//                                (on the RST it stopped at, if m_bRestartRead)
+// OUTPUT:
+// - nMarkerPos                 = File position of the marker's 0xFF (or of the
+//                                end of the file)
+// RETURN:
+// - The marker's code (0xD0..0xD7 for an RST), or 0 at the end of the file
+//
+uint32_t CimgDecode::RestartSkipToMarker(uint32_t nPos, uint32_t &nMarkerPos)
+{
+  const uint32_t nPosEof = m_pWBuf->GetPosEof();
+  const uint32_t nReadTo = m_nScanBuffPtr;
+  const bool bRstRead = m_bRestartRead;
+
+  uint32_t nMarker = 0;
+
+  nMarkerPos = nPosEof;
+
+  while(nPos < nPosEof)
+  {
+    if(m_pWBuf->Buf(nPos) != 0xFF)
+    {
+      nPos++;
+      continue;
+    }
+
+    // A run of 0xFF: the last is a marker's, unless a 0x00 follows (data)
+    uint32_t nPosNext = nPos + 1;
+
+    while((nPosNext < nPosEof) && (m_pWBuf->Buf(nPosNext) == 0xFF))
+    {
+      nPosNext++;
+    }
+
+    if(nPosNext >= nPosEof)
+    {
+      break;
+    }
+
+    const uint32_t nCode = m_pWBuf->Buf(nPosNext);
+
+    // A stuffed 0xFF (0x00 after it) is data; a marker below SOF0 (0xC0:
+    // JfifDecode.h's JFIF_SOF0, not included here) is passed over
+    if(nCode < 0xC0)
+    {
+      nPos = nPosNext + 1;
+      continue;
+    }
+
+    nMarker = nCode;
+    nMarkerPos = nPosNext - 1;
+    break;
+  }
+
+  // The RST the scan buffer stopped at
+  if(bRstRead && (nMarkerPos == nReadTo))
+  {
+    return nMarker;
+  }
+
+  // Read it from there, unless the buffer read it already. (The buffer stops
+  // at each RST, so one before nReadTo is not this one.)
+  DecodeRestartScanBuf(nMarkerPos, true);
+
+  if(nMarkerPos >= nReadTo)
+  {
+    BuffAddByte();
+  }
+
+  return nMarker;
+}
+
+// An RST came before the current restart interval's last MCU was read (as
+// ReadScanVal() found no code, or a code cut short, before it): the
+// interval's data ends there. The rest of the interval isn't decoded (its
+// blocks are left grey: DecodeRestartLostBlock()), and the RST is left for
+// DecodeRestartNext() to pass over when the next interval starts, at the MCU
+// the restart interval sets. (libjpeg decodes the rest of the MCU from zero
+// bits, and leaves the interval's MCUs after it grey.) Reported up to the
+// scan's error limit, on a count of its own, as each interval can end so.
+//
+// INPUT:
+// - nMcuX                      = MCU coordinate (x)
+// - nMcuY                      = MCU coordinate (y)
+// PRE:
+// - m_nScanBuffPtr             = On the RST's 0xFF
+// - m_nRestartLastInd
+// - m_nRestartMcusLeft         = MCUs of the interval left, this one included
+// POST:
+// - m_bRestartLost
+// - m_nWarnRstShortNum
+//
+void CimgDecode::DecodeRestartShort(uint32_t nMcuX, uint32_t nMcuY)
+{
+  m_bRestartLost = true;
+
+  if(!m_bScanErrorsDisable && (m_nWarnRstShortNum < m_nScanErrMax))
+  {
+    const uint64_t nMcu = static_cast<uint64_t>(nMcuY) * static_cast<uint64_t>(qMax(m_nMcuXMax, 1)) + nMcuX;
+
+    // Its last MCU (the range's end)
+    const QString strRange = RestartMcuRange(nMcu, qMax(m_nRestartMcusLeft, 1u));
+    const qsizetype nTo = strRange.indexOf(" to ");
+
+    m_pLog->AddLineErr(QString("*** ERROR: Restart interval ends early, at RST%1 @ 0x%2.0 in MCU(%3,%4): "
+                               "the rest of it, to %5, not decoded")
+                         .arg(m_nRestartLastInd)
+                         .arg(m_nScanBuffPtr, 8, 16, QChar('0'))
+                         .arg(nMcuX)
+                         .arg(nMcuY)
+                         .arg((nTo < 0) ? strRange : strRange.mid(nTo + 4)));
+
+    m_nWarnRstShortNum++;
+
+    if(m_nWarnRstShortNum >= m_nScanErrMax)
+    {
+      m_pLog->AddLineErr(QString("    Only reported first %1 instances of this message...").arg(m_nScanErrMax));
+    }
+  }
+}
+
+// A block of a restart interval whose data has ended (DecodeRestartShort(),
+// DecodeRestartNext()) isn't read: it is left grey, its DC 0 and no AC, as
+// libjpeg leaves it. The caller adds the block's DC difference (0) to its
+// component's predictor, so they are all set to 0; the next interval starts
+// them at 0 again.
+//
+// POST:
+// - m_nDcLum
+// - m_nDcChrCb
+// - m_nDcChrCr
+//
+void CimgDecode::DecodeRestartLostBlock()
+{
+  m_nDcLum = 0;
+  m_nDcChrCb = 0;
+  m_nDcChrCr = 0;
+}
+
+// Start the next restart interval, before its first MCU (libjpeg's
+// process_restart()): the DC predictors start at 0, and the interval's data
+// after the RST that ended the last. The bits left before that RST are
+// passed over: padding, or the rest of an interval whose data ended early.
+// Data after the last interval's last MCU is skipped to the next marker
+// ("Restart marker not detected"). The RST found is taken by its number, as
+// libjpeg's jpeg_resync_to_restart() takes it, with the one wanted (the
+// interval's, counting from RST0 at the scan's start):
+// - The one wanted: passed over, and the interval decoded after it.
+// - One of the next two: the RSTs before it were lost, with the data of
+//   their intervals. It is left for a later interval, and this interval
+//   isn't decoded (its MCUs are left grey).
+// - One of the two before: skipped, with the data after it, to the next
+//   marker, which is taken likewise.
+// - Any other: taken for the one wanted.
+// - A marker that isn't an RST, or the end of the file: no MCU from here on
+//   is decoded.
+// Each is reported up to the scan's error limit, on a count of its own.
+//
+// INPUT:
+// - nMcuX                      = The interval's first MCU (x)
+// - nMcuY                      = The interval's first MCU (y)
+// PRE:
+// - m_nRestartWantInd
+// - m_bRestartLost
+// - m_bRestartNoMore
+// - m_bRestartRead
+// - m_nRestartLastInd
+// POST:
+// - m_nRestartWantInd
+// - m_nRestartMcusLeft
+// - m_bRestartLost
+// - m_bRestartNoMore
+// - m_nWarnRstSyncNum
+//
+void CimgDecode::DecodeRestartNext(uint32_t nMcuX, uint32_t nMcuY)
+{
+  const uint64_t nMcu = static_cast<uint64_t>(nMcuY) * static_cast<uint64_t>(qMax(m_nMcuXMax, 1)) + nMcuX;
+  const uint32_t nWant = m_nRestartWantInd;
+
+  m_nRestartWantInd = (nWant + 1) % 8;
+  DecodeRestartDcState();
+  m_nRestartMcusLeft = static_cast<uint32_t>(m_nRestartInterval);
+
+  // Nothing is read past a marker that isn't an RST, or the end of the file
+  if(m_bRestartNoMore)
+  {
+    m_bRestartLost = true;
+    return;
+  }
+
+  // The rest of an interval that ended early is passed over with its RST,
+  // which the scan buffer stopped at. Otherwise the last interval's data
+  // should end with padding (under a byte) before its RST.
+  const bool bWasLost = m_bRestartLost;
+
+  if(!bWasLost)
+  {
+    BuffTopup();
+  }
+
+  // The marker the scan buffer stopped at (or the one found below)
+  uint32_t nMarker = JFIF_RST0 + m_nRestartLastInd;
+  uint32_t nMarkerPos = m_nScanBuffPtr;
+
+  // Data after the last interval's last MCU: a byte or more before its RST,
+  // or no RST within the buffer's reach. It is searched from the byte that
+  // holds the next bit, as the buffer may have read on past a marker that
+  // isn't an RST, which ends the scan's data here as further on: a data byte
+  // partly used, or a stuffed 0xFF, is passed over, and a marker's 0xFF that
+  // the last MCU took some of the bits of (as data) is found. (Searched from
+  // the byte after it, that 0xFF was missed, and at the end of a file of
+  // 4 GiB - 1 bytes the position wrapped around to 0.) One whose 0xFF the
+  // MCU took whole is passed, as inside an interval's data.
+  if(!m_bRestartRead || (!bWasLost && (m_nScanBuff_vacant <= 32 - 8)))
+  {
+    const uint32_t nFromPos = m_anScanBuffPtr_pos[0];
+    const uint32_t nFromAlign = m_nScanBuffPtr_align;
+    const uint32_t nFrom = (m_nScanBuff_vacant >= 32) ? m_nScanBuffPtr : nFromPos;
+
+    nMarker = RestartSkipToMarker(nFrom, nMarkerPos);
+
+    if(!bWasLost && RestartSyncReportable())
+    {
+      m_pLog->AddLine(QString("  Expect Restart interval elapsed @ %1").arg(GetScanBufPos(nFromPos, nFromAlign)));
+      ReportRestartSync(QString("    ERROR: Restart marker not detected: data skipped to %1")
+                          .arg(RestartMarkerStr(nMarker, nMarkerPos)));
+    }
+  }
+
+  m_bRestartLost = false;
+
+  for(;;)
+  {
+    // A marker that isn't an RST, or the end of the file: libjpeg reads
+    // nothing past it, and decodes no more MCUs
+    if(!m_bRestartRead)
+    {
+      if(RestartSyncReportable())
+      {
+        ReportRestartSync(QString("*** ERROR: No RST found before MCU(%1,%2), but %3: no MCU from there on decoded")
+                            .arg(nMcuX)
+                            .arg(nMcuY)
+                            .arg(RestartMarkerStr(nMarker, nMarkerPos)));
+      }
+
+      m_bRestartNoMore = true;
+      m_bRestartLost = true;
+      break;
+    }
+
+    // How far after the one wanted it is (0..7)
+    const uint32_t nAhead = (m_nRestartLastInd + 8 - nWant) % 8;
+
+    if(nAhead == 0)
+    {
+      RestartPassMarker();
+      break;
+    }
+
+    // The start of its message (made only while they are reported)
+    const bool bReport = RestartSyncReportable();
+    const QString strFound = !bReport ? QString() :
+                             QString("*** ERROR: Expected RST%1 before MCU(%2,%3), found RST%4 @ 0x%5.0")
+                               .arg(nWant)
+                               .arg(nMcuX)
+                               .arg(nMcuY)
+                               .arg(m_nRestartLastInd)
+                               .arg(m_nScanBuffPtr, 8, 16, QChar('0'));
+
+    if((nAhead == 1) || (nAhead == 2))
+    {
+      if(bReport)
+      {
+        ReportRestartSync(strFound + QString(": taken as a later one, so %1 not decoded")
+                                       .arg(RestartMcuRange(nMcu, static_cast<uint64_t>(m_nRestartInterval))));
+      }
+
+      m_bRestartLost = true;
+      break;
+    }
+
+    if((nAhead == 6) || (nAhead == 7))
+    {
+      RestartPassMarker();
+      nMarker = RestartSkipToMarker(m_nScanBuffPtr, nMarkerPos);
+
+      if(bReport)
+      {
+        ReportRestartSync(strFound + QString(", an earlier one: skipped to %1").arg(RestartMarkerStr(nMarker, nMarkerPos)));
+      }
+
+      continue;
+    }
+
+    if(bReport)
+    {
+      ReportRestartSync(strFound + ": taken for it");
+    }
+
+    RestartPassMarker();
+    break;
+  }
 }
 
 // File position where an MCU's scan data starts, formatted as GetScanBufPos()
@@ -3838,6 +4530,11 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
   m_nRestartExpectInd = 0;
   m_nRestartLastInd = 0;
 
+  // And that the first restart interval is followed by RST0, and has data
+  m_nRestartWantInd = 0;
+  m_bRestartLost = false;
+  m_bRestartNoMore = false;
+
   // Load the first data into the scan buffer
   // This is done so that the MCU map will already
   // have access to the data.
@@ -4060,47 +4757,12 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
 
     for(uint32_t nMcuX = 0; (nMcuX < m_nMcuXMax) && (!bScanStop); nMcuX++)
     {
-      // Check to see if we should expect a restart marker!
-      // FIXME: Should actually check to ensure that we do in
-      // fact get a restart marker, and that it was the right one!
+      // Each restart interval after the first starts after the RST that
+      // ends the one before, at the MCU the restart interval sets
+      // (DecodeRestartNext())
       if((m_bRestartEn) && (m_nRestartMcusLeft == 0))
       {
-        /*
-           if (m_bVerbose) {
-           strTmp = QString("  Expect Restart interval elapsed @ %s"),GetScanBufPos();
-           m_pLog->AddLine(strTmp);
-           }
-         */
-
-        if(m_bRestartRead)
-        {
-          /*
-             // FIXME: Check for restart counter value match
-             if (m_bVerbose) {
-             strTmp = QString("  Restart marker matched");
-             m_pLog->AddLine(strTmp);
-             }
-           */
-        }
-        else
-        {
-          strTmp = QString("  Expect Restart interval elapsed @ %1").arg(GetScanBufPos());
-          m_pLog->AddLine(strTmp);
-          strTmp = QString("    ERROR: Restart marker not detected");
-          m_pLog->AddLineErr(strTmp);
-        }
-        /*
-           if (ExpectRestart()) {
-           if (m_bVerbose) {
-           strTmp = QString("  Restart marker detected");
-           m_pLog->AddLine(strTmp);
-           }
-           } else {
-           strTmp = QString("  ERROR: Restart marker expected but not found @ %s"),GetScanBufPos();
-           m_pLog->AddLineErr(strTmp);
-           }
-         */
-
+        DecodeRestartNext(nMcuX, nMcuY);
       }
 
       // To support a fast decode mode, allow for a subset of the
@@ -4616,6 +5278,17 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
       if(m_bScanEnd && m_bScanBad)
       {
         bScanStop = true;
+
+        // With a DRI, no MCU after it is decoded, as after an interval with no
+        // RST at its end (DecodeRestartNext()). (The rest of the row was
+        // skipped without counting its MCUs, so the restart interval's count
+        // was off after it, and the first MCU of each row after it was decoded
+        // from zeros.)
+        if(m_bRestartEn)
+        {
+          m_bRestartNoMore = true;
+          m_bRestartLost = true;
+        }
       }
     }                           // nMcuX
   }                             // nMcuY
@@ -5123,7 +5796,10 @@ void CimgDecode::DecodeRestartScanBuf(uint32_t nFilePos, bool bRestart)
 
   m_nScanBuffPtr_start = nFilePos;
   m_nScanBuffPtr_align = 0;     // Start with byte alignment (0)
-  m_anScanBuffPtr_pos[0] = 0;
+  // The next bit's position, before any byte is added: the next byte's. (It
+  // was 0, which was reported where a restart interval or the scan ended
+  // before a byte was added.)
+  m_anScanBuffPtr_pos[0] = nFilePos;
   m_anScanBuffPtr_pos[1] = 0;
   m_anScanBuffPtr_pos[2] = 0;
   m_anScanBuffPtr_pos[3] = 0;
@@ -5145,8 +5821,7 @@ void CimgDecode::DecodeRestartScanBuf(uint32_t nFilePos, bool bRestart)
   m_bRestartRead = false;
   m_nRestartMcusLeft = m_nRestartInterval;
 
-  m_nScanFillStart = 0;
-  m_nScanFillEnd = 0;
+  ScanFillForget();
 }
 
 // Color conversion from YCC to RGB

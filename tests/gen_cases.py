@@ -615,27 +615,33 @@ class Bits:
         self.out += b"\xff" * fill + bytes([0xFF, 0xD0 + k % 8])
 
 
-def dc_only_jpeg(width, height, comps, level, restart=0, fill=0):
+def dc_only_jpeg(width, height, comps, level, restart=0, fill=0, rst_in=()):
     """Baseline JPEG made of flat 8x8 blocks (DC only, quantiser 1), with any
     sampling factors and any level, even outside 0..255, which Pillow can't
     write. comps: [(id, h, v)]; level(comp_index, x, y) is the component's
     level for the block whose top-left image pixel is (x, y). restart: a DRI
     interval in MCUs, with an RST marker after each interval but the last,
-    and fill 0xFF fill bytes before each (T.81 B.1.1.2).
+    and fill 0xFF fill bytes before each (T.81 B.1.1.2). rst_in: (MCU,
+    comp_index) pairs before whose blocks an RST goes too, inside the MCU,
+    resetting the predictors as the decoder does at any RST (the RSTs are
+    numbered in order).
     Returns (file, offset of the scan data, [(byte, bit) where each MCU starts
     in the scan data])."""
     hmax, vmax = max(c[1] for c in comps), max(c[2] for c in comps)
     mcus_x = -(-width // (8 * hmax))
     dc = huff_codes(DC_COUNTS, DC_VALUES)
-    bits, pred, mcu_pos = Bits(), [0] * len(comps), []
+    bits, pred, mcu_pos, rsts = Bits(), [0] * len(comps), [], 0
     for my in range(-(-height // (8 * vmax))):
         for mx in range(mcus_x):
             mcu = my * mcus_x + mx
             if restart and mcu and mcu % restart == 0:
-                bits.restart(mcu // restart - 1, fill)
-                pred = [0] * len(comps)
+                bits.restart(rsts, fill)
+                rsts, pred = rsts + 1, [0] * len(comps)
             mcu_pos.append(bits.pos())
             for ci, (_, h, v) in enumerate(comps):
+                if (mcu, ci) in rst_in:
+                    bits.restart(rsts, fill)
+                    rsts, pred = rsts + 1, [0] * len(comps)
                 for by in range(v):
                     for bx in range(h):
                         x = (mx * hmax + bx * (hmax // h)) * 8
@@ -6258,10 +6264,10 @@ ml_wr("ML_wr_eof_seg", wr_file("ml_wr_eof_seg.bin", b"\xff\xd8" + seg(0xFE, b"ab
 # last.
 ml_fill1, _, _ = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=1, fill=1)
 ml_case("ML_fill_rst", write("ml_fill_rst.jpg", ml_fill1), f"^  OFFSET: 0x{len(ml_fill1) - 2:08x}$",
-        forbid="detected outside scan")
+        forbid="detected outside scan|before a stuffed 0xFF00")
 ml_fill3, _, _ = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=1, fill=3)
 ml_case("ML_fill_rst3", write("ml_fill_rst3.jpg", ml_fill3), f"^  OFFSET: 0x{len(ml_fill3) - 2:08x}$",
-        forbid="detected outside scan")
+        forbid="detected outside scan|before a stuffed 0xFF00")
 # The scan's decode was right with 1 or 2 fill bytes, which it took for data
 # (1 bits). 3 or more filled its 32-bit buffer before the RST was reached, so
 # the restart wasn't seen ("Restart marker not detected") and the MCUs after it
@@ -6321,7 +6327,7 @@ def ml_fill_before_rst(data, k):
 # if the decoder's output changes.)
 ML_PIL_MD5 = "^harness: preview md5=cbef5da7849350d9f639f495fbb58280$"
 ml_case("ML_fill_pil", write("ml_fill_pil.jpg", ml_fill_before_rst((files_dir / restart).read_bytes(), 3)),
-        ML_PIL_MD5, flags="--ac --preview-md5", forbid="ERROR")
+        ML_PIL_MD5, flags="--ac --preview-md5", forbid="ERROR|before a stuffed 0xFF00")
 ml_case("ML_fill_pil_none", restart, ML_PIL_MD5, flags="--ac --preview-md5")
 # With no EOI found, Export JPEG exported nothing
 ml_case("ML_fill_rst_export", "ml_fill_rst.jpg", exported(ml_fill1), mode="export-jpeg")
@@ -6343,18 +6349,16 @@ ml_wr("ML_wr_fill_eof", wr_file("ml_wr_fill_eof.bin", ml_fill1[:-2] + b"\xff\xff
 # above. Each thumbnail here is at the end of the file (ow_thumb_tail()).
 ml_t_rst, ml_t_at, _ = dc_only_jpeg(16, 16, [(1, 1, 1)], lm_level, restart=1, fill=1)
 ow_thumb_tail("ml_thumb_rst.jpg", ml_t_rst)
-ml_case("ML_thumb_rst", "ml_thumb_rst.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR")
-# The bytes from the SOS's length (8 bytes of header, skipped with the scan
-# data) to the EOI, but for the 3 RSTs' 0xFF and the fill byte before each
-ML_SOS_HDR = 8
-ml_case("ML_thumb_rst_count", "ml_thumb_rst.jpg",
-        f"^    Skipped {len(ml_t_rst) - 2 - (ml_t_at - ML_SOS_HDR) - 3 * 2} bytes$")
-# Without fill bytes, only each RST's 0xFF isn't counted, as before
+ml_case("ML_thumb_rst", "ml_thumb_rst.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR|before a stuffed 0xFF00")
+# The scan data's bytes, from the end of the SOS's header to the EOI, the 3
+# RSTs and the fill byte before each included (see MR below: the count
+# included the header, and left out each RST's 0xFF and fill bytes)
+ml_case("ML_thumb_rst_count", "ml_thumb_rst.jpg", f"^    Skipped {len(ml_t_rst) - 2 - ml_t_at} bytes$")
+# And without fill bytes
 ml_t_rst0, ml_t_at0, _ = dc_only_jpeg(16, 16, [(1, 1, 1)], lm_level, restart=1)
 ow_thumb_tail("ml_thumb_rst0.jpg", ml_t_rst0)
-ml_case("ML_thumb_rst0_count", "ml_thumb_rst0.jpg",
-        f"^    Skipped {len(ml_t_rst0) - 2 - (ml_t_at0 - ML_SOS_HDR) - 3} bytes$")
-ml_t_plain, _, _ = dc_only_jpeg(16, 16, [(1, 1, 1)], lm_level)
+ml_case("ML_thumb_rst0_count", "ml_thumb_rst0.jpg", f"^    Skipped {len(ml_t_rst0) - 2 - ml_t_at0} bytes$")
+ml_t_plain, ml_t_plain_at, _ = dc_only_jpeg(16, 16, [(1, 1, 1)], lm_level)
 ow_thumb_tail("ml_thumb_eoi.jpg", ml_t_plain[:-2] + b"\xff\xff\xd9")
 ml_case("ML_thumb_eoi", "ml_thumb_eoi.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR")
 # Before the DQT (just after the SOI)
@@ -6366,6 +6370,1128 @@ ml_case("ML_thumb_dqt_eoi", "ml_thumb_dqt.jpg", "^  \\* Embedded Thumb Marker: E
 ow_thumb_tail("ml_thumb_eof.jpg", b"\xff\xd8\xff\xff\xff")
 ml_case("ML_thumb_eof", "ml_thumb_eof.jpg", "^ERROR: EXIF thumbnail runs past the end of the file$",
         forbid="Read more than|Embedded Thumb Marker: \\(0x")
+
+
+# --- MR: the rest of the marker list's findings ----------------------------------------
+def mr_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "MR", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+# With Relaxed Parsing, an RST outside a scan is passed over when a marker
+# follows it. That was looked for 2 bytes further on: before a COM, the COM's
+# marker (FF FE) was taken for the RST's length, 65534, so neither the COM nor
+# the EOI was read; where it found a 0xFF it went on from there, 2 bytes too far.
+write("mr_rst_com.jpg", b"\xff\xd8\xff\xd0" + seg(0xFE, b"ab") + b"\xff\xd9")
+mr_case("MR_rst_relaxed", "mr_rst_com.jpg", "^    Comment=ab$", forbid="Header length", flags="--relaxed")
+mr_case("MR_rst_relaxed_eoi", "mr_rst_com.jpg", "^\\*\\*\\* Marker: EOI \\(End of Image\\) \\(xFFD9\\) \\*\\*\\*$",
+        forbid="Early EOF", flags="--relaxed")
+# Two in a row: the second was passed over with the first
+mr_case("MR_rst_relaxed_two", write("mr_rst_two.jpg", b"\xff\xd8\xff\xd0\xff\xd1\xff\xd9"),
+        "^  WARNING: Restart marker \\[0xFFd1\\] detected outside scan$", flags="--relaxed")
+# One that ends the file: its "length" was read past the end
+mr_case("MR_rst_relaxed_end", write("mr_rst_end.jpg", b"\xff\xd8\xff\xd0"),
+        "^  Ignoring standalone marker\\. Proceeding with decode\\.$", forbid="Header length", flags="--relaxed")
+# One with a length after it is still skipped with it
+mr_case("MR_rst_relaxed_length", write("mr_rst_length.jpg", b"\xff\xd8\xff\xd0\x00\x04ab\xff\xd9"),
+        "^  Header length = 4$", forbid="Early EOF", flags="--relaxed")
+# But a "length" that doesn't end at a marker isn't one: the bytes after the
+# RST aren't a marker, reported there (0x1234 ran past the end of the file;
+# with 0, the parsing stayed after the RST)
+mr_case("MR_rst_relaxed_junk", write("mr_rst_junk.jpg", b"\xff\xd8\xff\xd0\x12\x34\xff\xd9"),
+        "^ERROR: Expected marker 0xFF, got 0x12 @ offset 0x00000004\\. ", forbid="Header length", flags="--relaxed")
+mr_case("MR_rst_relaxed_len0", write("mr_rst_len0.jpg", b"\xff\xd8\xff\xd0\x00\x00\xff\xd9"),
+        "^ERROR: Expected marker 0xFF, got 0x00 @ offset 0x00000004\\. ", forbid="Header length", flags="--relaxed")
+# One that ends at the end of the file is a length, as before
+mr_case("MR_rst_relaxed_length_eof", write("mr_rst_length_eof.jpg", b"\xff\xd8\xff\xd0\x00\x04ab"),
+        "^  Header length = 4$", forbid="Expected marker", flags="--relaxed")
+# TEM has no length either (T.81 Table B.1, as RSTn, SOI and EOI), with or
+# without Relaxed Parsing: before a COM, its marker was taken for a length of
+# 65534. Likewise in a thumbnail (after its SOI).
+write("mr_tem.jpg", b"\xff\xd8\xff\x01" + seg(0xFE, b"ab") + b"\xff\xd9")
+mr_case("MR_tem", "mr_tem.jpg", "^    Comment=ab$", forbid="Header length")
+mr_case("MR_tem_eoi", "mr_tem.jpg", "^\\*\\*\\* Marker: EOI \\(End of Image\\) \\(xFFD9\\) \\*\\*\\*$", forbid="Early EOF")
+
+# Fill bytes before the 0x00 of a stuffed 0xFF in scan data (FF FF 00), which
+# T.81 doesn't allow (a fill byte comes before a marker): the marker list took
+# them for a marker 0xFF00 and stopped ("Unknown marker [0xFF00]"), so no EOI
+# was found; the decoder took each 0xFF for data. They are now one 0xFF of data
+# (as libjpeg documents, and its djpeg reads most of them), with a warning.
+# The scan of 16 MCUs of 8 x 8 has 2 stuffed 0xFF, 13 bytes in, before MCU 7:
+# 3 fill bytes go before the first, 1 before the second (2 runs, 4 bytes).
+mr_plain, mr_at, mr_pos = dc_only_jpeg(64, 16, [(1, 1, 1)], lm_level)
+mr_ff = [i for i in range(mr_at, len(mr_plain) - 2) if mr_plain[i:i + 2] == b"\xff\x00"]
+assert len(mr_ff) == 2 and mr_ff[0] == mr_at + 13 and mr_at + mr_pos[7][0] > mr_ff[0] + 1
+assert mr_at + mr_pos[7][0] < mr_ff[1]
+mr_fill = mr_plain[:mr_ff[0]] + b"\xff" * 3 + mr_plain[mr_ff[0]:mr_ff[1]] + b"\xff" + mr_plain[mr_ff[1]:]
+write("mr_stuffed_fill.jpg", mr_fill)
+mr_case("MR_stuffed_fill", "mr_stuffed_fill.jpg", f"^  OFFSET: 0x{len(mr_fill) - 2:08x}$", forbid="Unknown marker")
+mr_case("MR_stuffed_fill_warn", "mr_stuffed_fill.jpg",
+        f"^  WARNING: 0xFF fill bytes from 0x{mr_ff[0]:08x} before a stuffed 0xFF00 \\(2 runs in the scan data\\), "
+        "which T\\.81 allows only before a marker: each run is read as one 0xFF of data$")
+# The decode (8 x 2 MCUs): the last block (x 56, y 8) at its level, and MCU 7
+# (x 56, y 0) 3 bytes later than in the file without them, with the DC
+# difference from MCU 6
+MR_LAST = near(lm_level(0, 56, 8), 1)
+mr_case("MR_stuffed_fill_pixel", "mr_stuffed_fill.jpg", f"pixel 60,12 = {MR_LAST},{MR_LAST},{MR_LAST}$",
+        flags="--pixels 60,12", forbid="ERROR")
+MR_DC7 = round((lm_level(0, 56, 0) - 128) * 8) - round((lm_level(0, 48, 0) - 128) * 8)
+mr_case("MR_stuffed_fill_detail", "mr_stuffed_fill.jpg",
+        f"^      \\[0x{mr_at + mr_pos[7][0] + 3:08x}\\.{mr_pos[7][1]}\\]: ZRL=\\[ *0\\] Val=\\[ *{MR_DC7}\\] "
+        "Coef=\\[00= DC\\]", flags="--ac --detail 7,0,1")
+# Detailed Decode's bytes for a code: MCU 5's EOB, 1 bit after its DC code and
+# value (category 9), starts a byte before the run. They showed the fill bytes
+# as data, so not the bits the decoder read: now those of the file without them
+# (its stuffed 0xFF read as one)
+mr_dc5 = round((lm_level(0, 40, 0) - 128) * 8) - round((lm_level(0, 32, 0) - 128) * 8)
+mr_eob = (mr_pos[5][0] * 8 + mr_pos[5][1] + huff_codes(DC_COUNTS, DC_VALUES)[abs(mr_dc5).bit_length()][1]
+          + abs(mr_dc5).bit_length())
+mr_shown = mr_plain[mr_at + mr_eob // 8:].replace(b"\xff\x00", b"\xff")[:4]
+assert mr_at + mr_eob // 8 == mr_ff[0] - 1
+mr_case("MR_stuffed_fill_bytes", "mr_stuffed_fill.jpg",
+        f"^      \\[0x{mr_at + mr_eob // 8:08x}\\.{mr_eob % 8}\\]: ZRL=\\[ *0\\] Val=\\[ *0\\] Coef=\\[01\\.\\.01\\] "
+        f"Data=\\[0x {' '.join(f'{b:02x}' for b in mr_shown)} = 0b", flags="--ac --detail 5,0,1")
+# And MCU 6's DC code, which starts in the stuffed 0xFF: the decoder reads it
+# at the run's last 0xFF, 3 bytes on
+mr_dc6 = round((lm_level(0, 48, 0) - 128) * 8) - round((lm_level(0, 40, 0) - 128) * 8)
+assert mr_at + mr_pos[6][0] == mr_ff[0] and mr_pos[6][1] == 0
+mr_shown6 = mr_plain[mr_ff[0]:].replace(b"\xff\x00", b"\xff")[:4]
+mr_case("MR_stuffed_fill_bytes6", "mr_stuffed_fill.jpg",
+        f"^      \\[0x{mr_ff[0] + 3:08x}\\.0\\]: ZRL=\\[ *0\\] Val=\\[ *{mr_dc6}\\] Coef=\\[00= DC\\] "
+        f"Data=\\[0x {' '.join(f'{b:02x}' for b in mr_shown6)} = 0b", flags="--ac --detail 6,0,1")
+# A run that ends in a marker (an EOI) is data, each 0xFF: the decoder read
+# the byte after the run for each of them, which, over 112 KB on, made the
+# file's window load twice for each (12 to 31 s for this 2 MB run, depending on
+# the machine's load, 0.3 to 0.6 s without; 5 s are allowed). Its all-ones 16-bit code is DC category
+# 15 and AC 0x0F, so a block is 64 codes of 31 bits, 248 bytes, and 32 x 264
+# blocks read 2,095,104 of its 2,097,152 bytes.
+mr_counts = [1] * 15 + [2]
+mr_run = (b"\xff\xd8" + seg(0xDB, bytes([0]) + bytes([1]) * 64)
+          + seg(0xC0, bytes([8]) + struct.pack(">HHB", 8 * 264, 8 * 32, 1) + bytes([1, 0x11, 0]))
+          + seg(0xC4, bytes([0x00] + mr_counts + list(range(15)) + [0, 15]))
+          + seg(0xC4, bytes([0x10] + mr_counts + [0] + list(range(1, 15)) + [1, 0x0F]))
+          + seg(0xDA, bytes([1, 1, 0x00, 0, 63, 0])))
+mr_run_at = len(mr_run)
+mr_run += b"\xff" * (2 << 20) + b"\xff\xd9"
+mr_case("MR_fill_eoi_run", write("mr_fill_eoi_run.jpg", mr_run),
+        f"^    Next position in scan buffer: Offset 0x{mr_run_at + 32 * 264 * 248:08x}\\.0$", forbid="ERROR", timeout=5)
+# Detailed Decode's bytes after a code before an RST with fill bytes before
+# it showed the fill bytes, not the RST: MCU 0's EOB, after a DC of -704
+# (category 10), in ml_fill_rst3.jpg, shows the bytes of the file without them
+ml_fill0, ml_fill0_at, ml_fill0_pos = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=1)
+mr_eob0 = ml_fill0_pos[0][0] * 8 + ml_fill0_pos[0][1] + huff_codes(DC_COUNTS, DC_VALUES)[10][1] + 10
+mr_shown0 = ml_fill0[ml_fill0_at + mr_eob0 // 8:].replace(b"\xff\x00", b"\xff")[:4]
+assert mr_shown0[1:3] == b"\xff\xd0" and ml_fill3[:ml_fill0_at + mr_eob0 // 8 + 1] == ml_fill0[:ml_fill0_at + mr_eob0 // 8 + 1]
+mr_case("MR_fill_rst_bytes", "ml_fill_rst3.jpg",
+        f"^      \\[0x{ml_fill0_at + mr_eob0 // 8:08x}\\.{mr_eob0 % 8}\\]: ZRL=\\[ *0\\] Val=\\[ *0\\] Coef=\\[01\\.\\.01\\] "
+        f"Data=\\[0x {' '.join(f'{b:02x}' for b in mr_shown0)} = 0b", flags="--ac --detail 0,0,1")
+# A run at the third of 4 bytes shown (MCU 8's DC, 18 bits from bit 6): it is
+# read as one 0xFF there too (the last byte shown isn't searched from)
+mr_lv = lambda c, x, y: (40 + 10 * (x // 8) + 6 * (y // 8)) % 250
+mr_i, mr_i_at, mr_i_pos = dc_only_jpeg(64, 16, [(1, 1, 1)], mr_lv)
+mr_i_ff = mr_i_at + mr_i_pos[8][0] + 2
+assert mr_i[mr_i_ff:mr_i_ff + 2] == b"\xff\x00" and mr_i_pos[8][1] == 6
+mr_dc8 = round((mr_lv(0, 0, 8) - 128) * 8) - round((mr_lv(0, 56, 0) - 128) * 8)
+mr_shown8 = mr_i[mr_i_at + mr_i_pos[8][0]:].replace(b"\xff\x00", b"\xff")[:4]
+mr_case("MR_stuffed_fill_bytes8", write("mr_stuffed_third.jpg", mr_i[:mr_i_ff] + b"\xff\xff" + mr_i[mr_i_ff:]),
+        f"^      \\[0x{mr_i_at + mr_i_pos[8][0]:08x}\\.6\\]: ZRL=\\[ *0\\] Val=\\[ *{mr_dc8}\\] Coef=\\[00= DC\\] "
+        f"Data=\\[0x {' '.join(f'{b:02x}' for b in mr_shown8)} = 0b", flags="--ac --detail 0,1,1")
+# A run before an EOI isn't skipped: Detailed Decode shows each 0xFF (it
+# would show the EOI's D9 for a run it took to be skipped). MCU 7's EOB, after
+# a DC difference of 296 (category 9), in ml_fill_eoi.jpg (fill bytes before
+# its EOI)
+_, ml_plain_at, ml_plain_pos = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level)
+mr_eob7 = ml_plain_pos[7][0] * 8 + ml_plain_pos[7][1] + huff_codes(DC_COUNTS, DC_VALUES)[9][1] + 9
+mr_eoi_data = ml_plain[:-2] + b"\xff\xff\xff\xd9"
+mr_shown7 = mr_eoi_data[ml_plain_at + mr_eob7 // 8:][:4]
+assert mr_shown7[1:] == b"\xff\xff\xff"
+mr_case("MR_fill_eoi_bytes", "ml_fill_eoi.jpg",
+        f"^      \\[0x{ml_plain_at + mr_eob7 // 8:08x}\\.{mr_eob7 % 8}\\]: ZRL=\\[ *0\\] Val=\\[ *0\\] Coef=\\[01\\.\\.01\\] "
+        f"Data=\\[0x {' '.join(f'{b:02x}' for b in mr_shown7)} = 0b", flags="--ac --detail 3,1,1")
+# And a run at the 4th of 5 bytes shown: d_long_vlc.jpg's 16-bit AC code
+# (run 15, size 10, from bit 7) with a value of 1023, so that 4th byte is a
+# stuffed 0xFF, with 3 fill bytes before its 0x00
+assert (files_dir / long_vlc).read_bytes().startswith(head)   # its header and tables, as there
+mr_v_codes = [dc_tbl[3], (4, 3), ac_tbl[0x01], (1, 1), ac_tbl[0xFA], (1023, 10), ac_tbl[0x00]]
+mr_v_bits, mr_v_raw = Bits(), ""
+for value, length in mr_v_codes:
+    mr_v_bits.put(value, length)
+    mr_v_raw += format(value, f"0{length}b")
+mr_v_scan = mr_v_bits.flush()
+mr_v_raw += "1" * (-len(mr_v_raw) % 8)
+mr_v_shown = [int(mr_v_raw[i:i + 8], 2) for i in range(0, 40, 8)]
+assert mr_v_shown[3] == 0xFF and mr_v_scan[3:5] == b"\xff\x00"
+mr_case("MR_stuffed_fill_bytes5",
+        write("mr_long_vlc_fill.jpg", head + mr_v_scan[:3] + b"\xff" * 3 + mr_v_scan[3:] + b"\xff\xd9"),
+        f"^      \\[0x{len(head):08x}\\.7\\]: ZRL=\\[15\\] Val=\\[ 1023\\] Coef=\\[02\\.\\.17\\] "
+        f"Data=\\[0x {' '.join(f'{b:02x}' for b in mr_v_shown)} = 0b", flags="--ac --detail 0,0,1")
+# One run is "1 run"
+mr_case("MR_stuffed_one", write("mr_stuffed_one.jpg", mr_plain[:mr_ff[1]] + b"\xff" + mr_plain[mr_ff[1]:]),
+        f"^  WARNING: 0xFF fill bytes from 0x{mr_ff[1]:08x} before a stuffed 0xFF00 \\(1 run in the scan data\\), ")
+# Detailed Decode's bytes past the end of a file of 4 GiB - 1 bytes came from
+# its start (here FF FF 00 12 34, shown as "ff ff", or "ff 12" with the run
+# read as one): they are 0, as the decoder reads them. A scan of 2 MCUs with
+# no EOI ends the file; MCU 1's EOB, after a DC difference of 296 (category 9),
+# is in its last byte.
+mr_e, mr_e_at, mr_e_pos = dc_only_jpeg(16, 8, [(1, 1, 1)], lm_level)
+mr_e = mr_e[:-2]
+mr_e_eob = mr_e_pos[1][0] * 8 + mr_e_pos[1][1] + huff_codes(DC_COUNTS, DC_VALUES)[9][1] + 9
+assert mr_e_at + mr_e_eob // 8 == len(mr_e) - 1 and b"\xff" not in mr_e[-2:]
+mr_e_name, mr_e_start = wr_file("mr_wr_detail_end.bin", mr_e, b"\xff\xff\x00\x12\x34")
+case("MR_wr_detail_end", "MR", "decode", mr_e_name, f"--start {mr_e_start} --ac --detail 1,0,1", timeout=20,
+     expect=f"^      \\[0x{mr_e_start + mr_e_at + mr_e_eob // 8:08x}\\.{mr_e_eob % 8}\\]: ZRL=\\[ *0\\] Val=\\[ *0\\] "
+            f"Coef=\\[01\\.\\.01\\] Data=\\[0x {mr_e[-1]:02x} 00 00 00 = 0b")
+# Without them: no warning, as before
+mr_case("MR_stuffed_none", write("mr_stuffed_none.jpg", mr_plain), f"^  OFFSET: 0x{len(mr_plain) - 2:08x}$",
+        forbid="fill bytes before a stuffed")
+# In a thumbnail's scan data, likewise ("(0xFF00)" was read as its marker)
+mr_t_at, _ = ow_thumb_tail("mr_thumb_stuffed.jpg", mr_fill)
+mr_case("MR_thumb_stuffed", "mr_thumb_stuffed.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR")
+mr_case("MR_thumb_stuffed_count", "mr_thumb_stuffed.jpg", f"^    Skipped {len(mr_fill) - 2 - mr_at} bytes$")
+# With the main image's warning
+# One run, in a thumbnail too
+mr_one_at, _ = ow_thumb_tail("mr_thumb_stuffed_one.jpg", mr_plain[:mr_ff[1]] + b"\xff" + mr_plain[mr_ff[1]:])
+mr_case("MR_thumb_stuffed_one", "mr_thumb_stuffed_one.jpg",
+        f"^    WARNING: 0xFF fill bytes from 0x{mr_one_at + mr_ff[1]:08x} before a stuffed 0xFF00 \\(1 run in the scan "
+        "data\\), ")
+mr_case("MR_thumb_stuffed_warn", "mr_thumb_stuffed.jpg",
+        f"^    WARNING: 0xFF fill bytes from 0x{mr_t_at + mr_ff[0]:08x} before a stuffed 0xFF00 \\(2 runs in the scan "
+        "data\\), which T\\.81 allows only before a marker: each run is read as one 0xFF of data$")
+
+# The thumbnail's "Skipped N bytes" counted from the SOS's length, its header
+# included (and left out each RST's 0xFF and fill bytes, ML_thumb_rst*). The
+# header is its length, Ns and 2 bytes for each of the Ns components and 3
+# after them: 12 bytes for 3 components.
+mr_y3, mr_y3_at, _ = dc_only_jpeg(16, 16, LM_Y3, lm_level)
+ow_thumb_tail("mr_thumb_y3.jpg", mr_y3)
+mr_case("MR_thumb_count_y3", "mr_thumb_y3.jpg", f"^    Skipped {len(mr_y3) - 2 - mr_y3_at} bytes$")
+# Fill bytes before the EOI are the EOI's (ml_thumb_eoi.jpg's 1)
+mr_case("MR_thumb_count_fill", "ml_thumb_eoi.jpg", f"^    Skipped {len(ml_t_plain) - 2 - ml_t_plain_at} bytes$")
+# Scan data cut by the end of the file: to the end
+ow_thumb_tail("mr_thumb_cut.jpg", ml_t_plain[:-6])
+mr_case("MR_thumb_count_cut", "mr_thumb_cut.jpg", f"^    Skipped {len(ml_t_plain) - 6 - ml_t_plain_at} bytes$")
+# A header whose length says 64 (it is 8): the scan starts after its fields,
+# as the main image's does, not where the length says, past the EOI, and the
+# count is the same
+mr_ls = bytearray(ml_t_plain)
+assert mr_ls[ml_t_plain_at - 10:ml_t_plain_at - 6] == b"\xff\xda\x00\x08"
+mr_ls[ml_t_plain_at - 8:ml_t_plain_at - 6] = b"\x00\x40"
+ow_thumb_tail("mr_thumb_ls.jpg", bytes(mr_ls) + bytes(100))
+mr_case("MR_thumb_ls", "mr_thumb_ls.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR")
+mr_case("MR_thumb_ls_count", "mr_thumb_ls.jpg", f"^    Skipped {len(ml_t_plain) - 2 - ml_t_plain_at} bytes$")
+# A thumbnail length that ends 3 bytes into the scan data: the count stops
+# there (it took the byte after the thumbnail too)
+mr_len_at = len(RP_HEAD + ow_thumb(0, 0) + RP_REST)
+write("mr_thumb_len.jpg", RP_HEAD + ow_thumb(mr_len_at - OW_TIFF, ml_t_plain_at + 3) + RP_REST + ml_t_plain)
+mr_case("MR_thumb_len", "mr_thumb_len.jpg", "^    Skipped 3 bytes$")
+# A length that ends in a run before a stuffed 0xFF: the count stops there too
+write("mr_thumb_len_run.jpg", RP_HEAD + ow_thumb(mr_len_at - OW_TIFF, mr_ff[0] + 1) + RP_REST + mr_fill)
+mr_case("MR_thumb_len_run", "mr_thumb_len_run.jpg", f"^    Skipped {mr_ff[0] + 1 - mr_at} bytes$")
+mr_case("MR_thumb_len_error", "mr_thumb_len.jpg",
+        f"^ERROR: Thumbnail scan data runs past the thumbnail length \\({ml_t_plain_at + 3} bytes\\)$")
+# A marker whose length is cut by the end of the file: it was read past the
+# end as 0 ("Length = 0"), and at the end of the largest file from its start
+ow_thumb_tail("mr_thumb_code_cut.jpg", b"\xff\xd8\xff\xe0")
+mr_case("MR_thumb_code_cut", "mr_thumb_code_cut.jpg", "^ERROR: EXIF thumbnail runs past the end of the file$",
+        forbid="^    Length = 0$")
+# TEM in a thumbnail, after its SOI
+ow_thumb_tail("mr_thumb_tem.jpg", ml_t_plain[:2] + b"\xff\x01" + ml_t_plain[2:])
+mr_case("MR_thumb_tem", "mr_thumb_tem.jpg", "^  \\* Embedded Thumb Marker: EOI$", forbid="ERROR|Length = 65")
+# More than 4 components stop it, as they stop the main image's decode (the
+# scan was taken to start after a header of 5 components)
+mr_ns5 = bytearray(ml_t_plain)
+mr_ns5[ml_t_plain_at - 6] = 5
+ow_thumb_tail("mr_thumb_ns5.jpg", bytes(mr_ns5))
+mr_case("MR_thumb_ns5", "mr_thumb_ns5.jpg", "^ERROR: Thumbnail scan header has 5 components, more than 4$",
+        forbid="Skipped")
+# A scan header cut by it (4 of its 10 bytes missing): no scan data
+ow_thumb_tail("mr_thumb_sos_cut.jpg", ml_t_plain[:ml_t_plain_at - 4])
+mr_case("MR_thumb_sos_cut", "mr_thumb_sos_cut.jpg", "^    Skipped 0 bytes$")
+mr_case("MR_thumb_sos_cut_eof", "mr_thumb_sos_cut.jpg", "^ERROR: Thumbnail scan data runs past the end of the file$")
+# And one cut after its length: its Ns isn't read, and no scan data is
+# counted (the length's 2 bytes were)
+ow_thumb_tail("mr_thumb_sos_len.jpg", ml_t_plain[:ml_t_plain_at - 6])
+mr_case("MR_thumb_sos_len", "mr_thumb_sos_len.jpg", "^    Skipped 0 bytes$")
+# At the end of a file of 4 GiB - 1 bytes (a thumbnail at 0xFFFFFFD7, as
+# OW_wr_thumb_dqt, of 40 bytes: an SOI, a COM to 5 bytes before the end, and
+# an SOS's marker, length and Ns of 4), the header (14 bytes from its length,
+# at 0xFFFFFFFC) ends past 2^32: it is in 64 bits, and the file's end stops it
+mr_wr_tail = b"\xff\xd8" + seg(0xFE, bytes(29)) + b"\xff\xda\x00\x0e\x04"
+assert len(mr_wr_tail) == 40
+mr_wr_name, _ = wr_file("mr_wr_thumb_sos.bin", mr_wr_tail, ow_big_thumb)
+case("MR_wr_thumb_sos", "MR", "decode", mr_wr_name, "-", timeout=20,
+     expect="^ERROR: Thumbnail scan data runs past the end of the file$", forbid="thumbnail length")
+# And an SOS's marker as the last byte, or with only its length's first byte
+# after it: its Ns was read from the file's start (216, the SOI's D8, or 255)
+for mr_n, mr_t in ((1, b"\xff\xd8" + seg(0xFE, bytes(32)) + b"\xff\xda"),
+                   (2, b"\xff\xd8" + seg(0xFE, bytes(31)) + b"\xff\xda\x00")):
+    assert len(mr_t) == 40
+    mr_t_name, _ = wr_file(f"mr_wr_thumb_sos_end{mr_n}.bin", mr_t, ow_big_thumb)
+    case(f"MR_wr_thumb_sos_end{mr_n}", "MR", "decode", mr_t_name, "-", timeout=20,
+         expect="^ERROR: EXIF thumbnail runs past the end of the file$", forbid="Thumbnail scan header has")
+
+
+# --- ER: two RSTs in a row (an empty restart interval) -----------------------------------
+def er_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "ER", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def er_extra(data, scan_at, after, k=1, fill=0, before=b"", renumber=True):
+    """data with k more RSTs, each after `before` and then `fill` fill bytes,
+    put right after its RST number `after` (-1: at the start of its scan data,
+    scan_at), and all its RSTs renumbered in order, so that their sequence is
+    right (or, renumber=False, the extra ones all RST0)"""
+    assert data[-2:] == b"\xff\xd9"
+    scan = data[scan_at:-2]
+    spot = 0 if after < 0 else list(re.finditer(rb"\xff+[\xd0-\xd7]", scan))[after].end()
+    scan = scan[:spot] + (before + b"\xff" * fill + b"\xff\xd0") * k + scan[spot:]
+    if renumber:
+        num = iter(range(len(scan)))
+        scan = re.sub(rb"(\xff+)[\xd0-\xd7]", lambda m: m.group(1) + bytes([0xD0 + next(num) % 8]), scan)
+    return data[:scan_at] + scan + data[-2:]
+
+
+def er_code(pos, level, coef="00= DC"):
+    """Detailed Decode's line for a DC-only block's code at pos (offset, bit),
+    whose level is level (dc_only_jpeg(): quantiser 1)"""
+    return (f"^      \\[0x{pos[0]:08x}\\.{pos[1]}\\]: ZRL=\\[ 0\\] Val=\\[ *{round((level - 128) * 8)}\\] "
+            f"Coef=\\[{coef}\\]")
+
+
+def er_grey(x, y, level):
+    """The harness's line for a grey pixel at (x, y) of this level (within 1)"""
+    return f"^harness: pixel {x},{y} = {near(level, 1)},{near(level, 1)},{near(level, 1)}$"
+
+
+# Restart intervals (T.81 B.2.4.4): each holds the DRI's number of MCUs, and an
+# RST ends each but the last. Each interval's data is decoded at the MCUs the
+# restart interval sets, as libjpeg-turbo's djpeg decodes it: data that ends
+# early (at an RST) leaves the rest of its interval not decoded (grey), data
+# after an interval's last MCU is skipped to the next marker, and the RST found
+# there is taken by its number (RI below). The decoder went on decoding where
+# it found an RST, continuing the block or MCU it was in: when an interval had
+# lost data, the rest of the image was decoded one or more MCUs early, and
+# after an RST inside an MCU, in the wrong blocks and components.
+def ri_short(rst, rst_pos, mcu, last):
+    """The error for a restart interval whose data ends at RSTn rst at rst_pos,
+    in MCU mcu, the interval's last MCU being last"""
+    return (f"^\\*\\*\\* ERROR: Restart interval ends early, at RST{rst} @ 0x{rst_pos:08x}\\.0 "
+            f"in MCU\\({mcu[0]},{mcu[1]}\\): the rest of it, to MCU\\({last[0]},{last[1]}\\), not decoded$")
+
+
+def ri_end(rst, rst_pos):
+    """Detailed Decode's line where a restart interval's data ends early"""
+    return f"^      RST{rst} @ 0x{rst_pos:08x}\\.0: the data of its restart interval ends here$"
+
+
+# Detailed Decode's line for a block of an interval whose data ended before it
+RI_LOST = "^      Not decoded: the data of its restart interval ended before it$"
+ZERO_POS = "\\[0x00000000\\.0\\]"
+
+
+def ri_intervals(data, scan_at):
+    """The data of each restart interval of data's scan (at scan_at, to the
+    EOI), without the RSTs (and fill bytes) between them"""
+    assert data[-2:] == b"\xff\xd9"
+    return re.split(rb"\xff+[\xd0-\xd7]", data[scan_at:-2])
+
+
+def ri_join(data, scan_at, parts):
+    """data with its scan data made of these intervals, with an RST between
+    each two, numbered in order"""
+    out = bytearray()
+    for i, part in enumerate(parts):
+        if i:
+            out += bytes([0xFF, 0xD0 + (i - 1) % 8])
+        out += part
+    return data[:scan_at] + bytes(out) + data[-2:]
+
+
+def ri_at(data, scan_at, k):
+    """Offset of restart interval k's data in data (the one after RST k-1)"""
+    return scan_at + sum(len(p) + 2 for p in ri_intervals(data, scan_at)[:k])
+
+
+def ri_replace(data, scan_at, first, count, new):
+    """data with the data of restart intervals first.. (count of them) each new"""
+    parts = ri_intervals(data, scan_at)
+    parts[first:first + count] = [new] * count
+    return ri_join(data, scan_at, parts)
+
+
+def dc_interval(levels):
+    """The data of a restart interval of DC-only blocks of these levels, one
+    component's (as dc_only_jpeg() codes them, the predictor starting at 0)"""
+    dc, bits, pred = huff_codes(DC_COUNTS, DC_VALUES), Bits(), 0
+    for lev in levels:
+        coef = round((lev - 128) * 8)
+        diff, pred = coef - pred, coef
+        cat = abs(diff).bit_length()
+        bits.put(*dc[cat])
+        if cat:
+            bits.put(diff if diff > 0 else diff + (1 << cat) - 1, cat)
+        bits.put(0, 1)
+    return bits.flush()
+
+
+# An RST right after another (an empty restart interval): after the first, the
+# decoder found the second before any data, and went on with no code read. The
+# block took that for its first coefficient, a 0 at file position 0, so its
+# real DC was decoded as AC coefficient 1, and Detailed Decode showed a code at
+# [0x00000000.0] with the file's first bytes. Then each RST was passed over in
+# turn, so the file decoded as without the extra one. Now the empty interval's
+# MCU isn't decoded (grey), and the data after the second RST is the next
+# interval's, one MCU later.
+# 4 x 2 MCUs of 8 x 8, an RST after each but the last; the extra one is after
+# the first (RST0), before MCU [1,0], 2 bytes later than in the file without it.
+er_plain, er_at, er_pos = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=1)
+write("er_plain.jpg", er_plain)
+write("er_two.jpg", er_extra(er_plain, er_at, 0))
+ER_MCU1 = (er_at + er_pos[1][0], er_pos[1][1])
+er_case("ER_short", "er_two.jpg", ri_short(1, ER_MCU1[0], (1, 0), (1, 0)))
+er_case("ER_detail", "er_two.jpg", ri_end(1, ER_MCU1[0]), flags="--ac --detail 1,0,1", forbid=ZERO_POS)
+er_case("ER_detail_next", "er_two.jpg", er_code((ER_MCU1[0] + 2, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 2,0,1", forbid=ZERO_POS)
+er_case("ER_detail_none", "er_plain.jpg", er_code(ER_MCU1, lm_level(0, 8, 0)), flags="--ac --detail 1,0,1",
+        forbid="Restart interval ends early")
+# The empty interval's block is grey (with the AC shown or not), and the next
+# has MCU [1,0]'s level
+er_case("ER_pixel", "er_two.jpg", er_grey(12, 4, 128), flags="--pixels 12,4")
+er_case("ER_pixel_ac", "er_two.jpg", er_grey(12, 4, 128), flags="--ac --pixels 12,4")
+er_case("ER_pixel_next", "er_two.jpg", er_grey(20, 4, lm_level(0, 8, 0)), flags="--ac --pixels 20,4")
+# Three in a row (two empty intervals): two MCUs not decoded
+write("er_three.jpg", er_extra(er_plain, er_at, 0, k=2))
+er_case("ER_three", "er_three.jpg", er_code((ER_MCU1[0] + 4, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 3,0,1", forbid=ZERO_POS)
+er_case("ER_three_pixel", "er_three.jpg", er_grey(20, 4, 128), flags="--ac --pixels 20,4")
+er_case("ER_three_pixel_next", "er_three.jpg", er_grey(28, 4, lm_level(0, 8, 0)), flags="--ac --pixels 28,4")
+# With fill bytes (T.81 B.1.1.2) before the second, skipped to it, where the
+# empty interval ends
+write("er_fill.jpg", er_extra(er_plain, er_at, 0, fill=3))
+er_case("ER_fill", "er_fill.jpg", er_code((ER_MCU1[0] + 5, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 2,0,1", forbid=ZERO_POS)
+er_case("ER_fill_short", "er_fill.jpg", ri_short(1, ER_MCU1[0] + 3, (1, 0), (1, 0)))
+# Two at the start of the scan data, before the first MCU (one there was already
+# passed over): the first two MCUs aren't decoded, and the third is the first
+write("er_start.jpg", er_extra(er_plain, er_at, -1, k=2))
+er_case("ER_start", "er_start.jpg", er_code((er_at + 4, 0), lm_level(0, 0, 0)),
+        flags="--ac --detail 2,0,1", forbid=ZERO_POS)
+er_case("ER_start_short", "er_start.jpg", ri_short(0, er_at, (0, 0), (0, 0)))
+write("er_start_one.jpg", er_extra(er_plain, er_at, -1))
+er_case("ER_start_one", "er_start_one.jpg", er_code((er_at + 2, 0), lm_level(0, 0, 0)),
+        flags="--ac --detail 1,0,1", forbid=ZERO_POS)
+# An interval of 2 MCUs: neither MCU of the empty one is decoded, and the next
+# interval's are its own, the second's DC following the first's. (MCU [3,0]
+# was decoded, with MCU [2,0]'s DC following the lost MCU [1,0]'s.)
+er_ri2, er_ri2_at, er_ri2_pos = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=2)
+write("er_interval.jpg", er_extra(er_ri2, er_ri2_at, 0))
+er_case("ER_interval", "er_interval.jpg", er_grey(28, 4, 128), flags="--pixels 28,4")
+er_case("ER_interval_next", "er_interval.jpg", er_grey(12, 12, lm_level(0, 24, 0)), flags="--pixels 12,12")
+er_case("ER_interval_short", "er_interval.jpg", ri_short(1, er_ri2_at + er_ri2_pos[2][0], (2, 0), (3, 0)))
+
+
+# A Pillow 4:2:0 JPEG with AC data and an RST after each MCU (d_restart.jpg),
+# with three RSTs in a row after its sixth: MCUs 6 and 7 aren't decoded, and
+# MCUs 8 on are its MCUs 6 on (it decoded as without them, ML_PIL_MD5). Its
+# image is er_pil_ref.jpg's, made so: d_restart.jpg with two intervals of a grey
+# MCU (each block's DC difference 0, then an EOB) put in there, and its last two
+# left out. (The MD5 is er_pil_ref.jpg's: take it again from there if the
+# decoder's output changes.)
+def rc_dht(data, tc_th):
+    """The codes of data's DHT table tc_th (class << 4 | destination)"""
+    i = data.index(b"\xff\xc4")
+    while data[i:i + 2] == b"\xff\xc4":
+        end, j = i + 2 + struct.unpack(">H", data[i + 2:i + 4])[0], i + 4
+        while j < end:
+            counts = list(data[j + 1:j + 17])
+            if data[j] == tc_th:
+                return huff_codes(counts, list(data[j + 17:j + 17 + sum(counts)]))
+            j += 17 + sum(counts)
+        i = end
+    raise ValueError("no such table")
+
+
+def rc_bits(code):
+    return format(code[0], f"0{code[1]}b")
+
+
+def pil_mcu(data, dc=(0, ""), ac=()):
+    """The data of a restart interval of one MCU of data's (baseline) scan: its
+    first block's DC difference of category dc[0] and value bits dc[1], then
+    the AC (run/size symbol, value bits) pairs ac, then an EOB; every other
+    block's DC difference 0 and an EOB (grey)"""
+    sof, sos = marker_pos(data, 0xC0), sos_pos(data)
+    blocks = [(data[sof + 11 + 3 * c] >> 4) * (data[sof + 11 + 3 * c] & 15) for c in range(data[sof + 9])]
+    bits = Bits()
+    for c, nblocks in enumerate(blocks):
+        tables = data[sos + 6 + 2 * c]
+        dc_codes, ac_codes = rc_dht(data, tables >> 4), rc_dht(data, 0x10 | (tables & 15))
+        for b in range(nblocks):
+            first = (c, b) == (0, 0)
+            bits.put(*dc_codes[dc[0] if first else 0])
+            if first and dc[1]:
+                bits.put(int(dc[1], 2), len(dc[1]))
+            for sym, val in (ac if first else ()):
+                bits.put(*ac_codes[sym])
+                bits.put(int(val, 2), len(val))
+            bits.put(*ac_codes[0x00])
+    return bits.flush()
+
+
+er_pil_src = (files_dir / restart).read_bytes()
+er_pil_sos = sos_pos(er_pil_src)
+er_pil_at = er_pil_sos + 2 + struct.unpack(">H", er_pil_src[er_pil_sos + 2:er_pil_sos + 4])[0]
+er_pil_parts = ri_intervals(er_pil_src, er_pil_at)
+ER_PIL_MD5 = "^harness: preview md5=09cb9c5095ebd90dba07eca318a562b5$"
+write("er_pil.jpg", er_extra(er_pil_src, er_pil_at, 5, k=2))
+write("er_pil_ref.jpg", ri_join(er_pil_src, er_pil_at,
+                                er_pil_parts[:6] + [pil_mcu(er_pil_src)] * 2 + er_pil_parts[6:-2]))
+er_case("ER_pil", "er_pil.jpg", ER_PIL_MD5, flags="--ac --preview-md5", forbid=ML_PIL_MD5)
+er_case("ER_pil_ref", "er_pil_ref.jpg", ER_PIL_MD5, flags="--ac --preview-md5", forbid="ERROR")
+# Bits that never make a code before the second (a stuffed 0xFF: 8 1 bits): the
+# data of the interval between them, which ends at the RST with no code
+write("er_bits.jpg", er_extra(er_plain, er_at, 0, before=b"\xff\x00"))
+er_case("ER_bits", "er_bits.jpg", er_code((ER_MCU1[0] + 4, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 2,0,1")
+er_case("ER_bits_pixel", "er_bits.jpg", er_grey(12, 4, 128), flags="--ac --pixels 12,4")
+er_case("ER_bits_short", "er_bits.jpg", ri_short(1, ER_MCU1[0] + 2, (1, 0), (1, 0)))
+
+
+def er_rgb(x, y, lev_y, lev_cb, lev_cr):
+    """The harness's line for a pixel of these YCbCr levels, converted as JFIF
+    does (and the decoder), within 1"""
+    yy, cb, cr = lev_y - 128, lev_cb - 128, lev_cr - 128
+    r, b = cr * 1.402 + yy, cb * 1.772 + yy
+    g = (yy - 0.114 * b - 0.299 * r) / 0.587
+    return f"^harness: pixel {x},{y} = " + ",".join(near(min(255, max(0, int(c + 128))), 1) for c in (r, g, b)) + "$"
+
+
+# Inside an MCU: an RST before MCU [1,0]'s Cb block, in an interval of 2 MCUs,
+# as if an interval ended there. The interval's data ends there: MCU [1,0]'s Cb
+# and Cr aren't decoded (grey), and the next interval's data (that MCU's Cb and
+# Cr, so cut short at the RST after them) is decoded from MCU [2,0], as
+# libjpeg-turbo decodes it. The interval after that, MCUs [0,1] and [1,1], is
+# MCUs [2,0] and [3,0]. (The decoder went on with the MCU after the RST: it
+# decoded the file as the generator meant it, but where an interval's data was
+# cut short in an MCU, it put the next interval's in the wrong blocks and
+# components, to the end of the image.) Y, Cb and Cr are 110, 180 and 80 in MCU
+# [1,0] (with Cb and Cr 128: 110,110,110), and 120, 180 and 80 in MCU [2,0].
+def er_lev(c, x, y):
+    return (100 + 10 * (x // 8), 180, 80)[c]
+
+
+er_y3, er_y3_at, _ = dc_only_jpeg(32, 16, LM_Y3, er_lev, restart=2, rst_in={(1, 1)})
+write("er_mid_one.jpg", er_y3)
+er_case("ER_mid_one", "er_mid_one.jpg", er_rgb(12, 4, 110, 128, 128), flags="--ac --pixels 12,4")
+er_case("ER_mid_one_next", "er_mid_one.jpg", er_rgb(4, 12, *(er_lev(c, 16, 0) for c in range(3))),
+        flags="--ac --pixels 4,12")
+# The image window's status bar over MCU [1,0] shows its Y's DC (-144), and Cb's
+# and Cr's 0. (The restart inside the MCU cleared the DCs kept for it after its
+# Y block was decoded: Y showed 0.)
+case("ER_mid_one_hover", "ER", "gui", "er_mid_one.jpg", "--lookup close --hover 12,4", timeout=30,
+     expect=f'^harness: hover 12,4: "MCU \\[0001,0000\\]" .*"YCC DC=\\[{round((er_lev(0, 8, 0) - 128) * 8):05d},00000,00000\\]"')
+# Two there: Detailed Decode shows MCU [1,0]'s data ending at the first, the
+# empty interval's MCUs aren't decoded, and the next's (from MCU [1,0]'s Cb, so
+# cut short at the RST after its Cr) are cut short in MCU [0,1]: MCU [1,1]
+# isn't decoded
+ER_MID_RST = er_y3_at + re.search(rb"\xff[\xd0-\xd7]", er_y3[er_y3_at:]).start()
+write("er_mid.jpg", er_extra(er_y3, er_y3_at, 0))
+er_case("ER_mid", "er_mid.jpg", ri_end(0, ER_MID_RST), flags="--ac --detail 1,0,1", forbid=ZERO_POS)
+er_case("ER_mid_pixel", "er_mid.jpg", er_rgb(12, 12, 128, 128, 128), flags="--ac --pixels 12,12")
+# Tools > Lookup MCU Offset: MCU [1,0], not decoded, has no offset (it gave 0,
+# where the code after the second RST was read), and MCU [2,0] starts after it
+case("ER_lookup", "ER", "gui", "er_two.jpg", "--lookup x=12,y=4,recalc,close", timeout=30,
+     expect=lm_want(12, 4, (1, 0), None, rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+case("ER_lookup_next", "ER", "gui", "er_two.jpg", "--lookup x=20,y=4,recalc,close", timeout=30,
+     expect=lm_want(20, 4, (2, 0), (ER_MCU1[0] + 2, ER_MCU1[1]), rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+# 1 MB of RSTs in a row (2^19), each passed over in turn: in time. Now MCUs
+# [1,0] on are each an empty interval, and only the first 8 RSTs are read.
+write("er_run.jpg", er_extra(er_plain, er_at, 0, k=1 << 19))
+er_case("ER_run", "er_run.jpg", "^    Number of RESTART markers decoded: 8$", flags="--ac", timeout=5)
+er_case("ER_run_pixel", "er_run.jpg", er_grey(28, 12, 128), flags="--ac --pixels 28,12", timeout=5)
+
+
+# The same run all RST0s, each one with the wrong index (RST1 is expected): each
+# was reported ("Expected RST marker index"), 524,288 lines in 88 s. They are
+# reported up to the scan's error limit (20), on a count of their own: the 20th
+# (2 bytes apart from the first, at MCU [1,0]'s offset in the file without
+# them) and not the 21st. That error is now reported only without a DRI (with
+# one, the restart rule reports an RST out of order, below), so these cases are
+# on the files without their DRI (6 bytes, before the scan), whose RSTs are each
+# passed over where they are found.
+def er_index_err(want, got, pos):
+    return f"^  ERROR: Expected RST marker index RST{want} got RST{got} @ 0x{pos:08x}\\.0$"
+
+
+def er_nodri(data):
+    """data without its DRI segment (6 bytes, before the scan)"""
+    dri = data.index(b"\xff\xdd\x00\x04")
+    return data[:dri] + data[dri + 6:]
+
+
+ER_RUN_INDEX = er_extra(er_plain, er_at, 0, k=1 << 19, renumber=False)
+write("er_run_index.jpg", ER_RUN_INDEX)
+write("er_run_index_nodri.jpg", er_nodri(ER_RUN_INDEX))
+er_case("ER_run_index", "er_run_index_nodri.jpg", "^    Only reported first 20 instances of this message\\.\\.\\.$",
+        forbid=er_index_err(1, 0, ER_MCU1[0] - 6 + 2 * 20), timeout=5)
+er_case("ER_run_index_last", "er_run_index_nodri.jpg", er_index_err(1, 0, ER_MCU1[0] - 6 + 2 * 19), timeout=5)
+# They don't count against the scan's other messages (on the scan's count, the
+# EOI's was left out, and the error for a cut file)
+er_case("ER_run_index_end", "er_run_index_nodri.jpg",
+        f"^  Scan Data encountered marker   0xFFd9 @ 0x{len(ER_RUN_INDEX) - 2 - 6:08x}\\.0$", timeout=5)
+write("er_index_cut.jpg", er_nodri(er_extra(er_plain, er_at, 0, k=20, renumber=False))[:-4])
+er_case("ER_index_cut", "er_index_cut.jpg",
+        "^\\*\\*\\* ERROR: Scan data ends at the end of the file in MCU\\(3,1\\) @ ")
+# And their count starts again at each decode: after a file with 24 (the first
+# 20 reported), the next file's are reported. (24 RST0s after its RST1: the
+# first expects RST2 and each after it RST1, as it follows an RST0; the 20th
+# is 38 bytes after MCU [2,0]'s offset in the file without them.)
+write("er_index24.jpg", er_nodri(er_extra(er_plain, er_at, 0, k=24, renumber=False)))
+write("er_index24b.jpg", er_nodri(er_extra(er_plain, er_at, 1, k=24, renumber=False)))
+case("ER_index_twice", "ER", "gui", ["er_index24.jpg", "er_index24b.jpg"], "--log", timeout=30,
+     expect=er_index_err(1, 0, er_at - 6 + er_pos[2][0] + 2 * 19))
+
+
+# With its DRI, MCU [1,0]'s interval ends at the first. Each after it, then, is
+# an earlier RST than the one wanted after that interval (RST1), so each is
+# skipped, as libjpeg skips it, and MCU [1,0]'s data after them, to RST1: MCU
+# [2,0] on are in place. Each skip is reported, up to the scan's error limit,
+# on a count of its own; not as out of order where it is read too (each was
+# reported twice).
+def ri_earlier(want, mcu, got, pos, found):
+    return (f"^\\*\\*\\* ERROR: Expected RST{want} before MCU\\({mcu[0]},{mcu[1]}\\), found RST{got} @ "
+            f"0x{pos:08x}\\.0, an earlier one: skipped to {found}$")
+
+
+def ri_rst(rst, pos):
+    return f"RST{rst} @ 0x{pos:08x}\\.0"
+
+
+er_case("ER_run_index_detail", "er_run_index.jpg",
+        er_code((er_at + er_pos[2][0] + (1 << 20), 0), lm_level(0, 16, 0)), flags="--ac --detail 2,0,1", timeout=5)
+er_case("ER_run_index_skip", "er_run_index.jpg",
+        ri_earlier(1, (2, 0), 0, ER_MCU1[0] + 2 * 19, ri_rst(0, ER_MCU1[0] + 2 * 20)),
+        forbid=ri_earlier(1, (2, 0), 0, ER_MCU1[0] + 2 * 20, ri_rst(0, ER_MCU1[0] + 2 * 21)), timeout=5)
+er_case("ER_run_index_once", "er_run_index.jpg",
+        ri_earlier(1, (2, 0), 0, ER_MCU1[0], ri_rst(0, ER_MCU1[0] + 2)), forbid="Expected RST marker index", timeout=5)
+er_case("ER_run_index_dri_end", "er_run_index.jpg",
+        f"^  Scan Data encountered marker   0xFFd9 @ 0x{len(ER_RUN_INDEX) - 2:08x}\\.0$", timeout=5)
+# Two between a block's DC and its EOB (MCU [1,0]'s DC code, of 16 bits, ends
+# at a byte): Detailed Decode showed a code there too, as AC coefficient 1, and
+# the EOB as coefficient 2. Now the interval's data ends after the DC: the block
+# keeps it, and the data after the RSTs is the next intervals' (MCU [2,0]'s,
+# empty, then MCU [3,0]'s, the EOB): MCU [0,1] is MCU [2,0].
+er_dc = huff_codes(DC_COUNTS, DC_VALUES)[abs(round((lm_level(0, 8, 0) - 128) * 8)).bit_length()]
+assert er_dc[1] + abs(round((lm_level(0, 8, 0) - 128) * 8)).bit_length() == 16 and ER_MCU1[1] == 0
+ER_DC_END = ER_MCU1[0] + 2
+write("er_block.jpg", er_plain[:ER_DC_END] + b"\xff\xd0\xff\xd0" + er_plain[ER_DC_END:])
+er_block = (files_dir / "er_block.jpg").read_bytes()
+write("er_block.jpg", er_extra(er_block, er_at, 0, k=0))
+er_case("ER_block", "er_block.jpg", ri_end(1, ER_DC_END), flags="--ac --detail 1,0,1", forbid=ZERO_POS)
+er_case("ER_block_pixel", "er_block.jpg", er_grey(12, 4, lm_level(0, 8, 0)), flags="--ac --pixels 12,4")
+er_case("ER_block_next", "er_block.jpg", er_grey(4, 12, lm_level(0, 16, 0)), flags="--ac --pixels 4,12")
+
+
+# --- RC: a code cut short by an RST ---------------------------------------------------
+def rc_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "RC", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def rc_err(pos, mcu, rst, rst_pos):
+    """The error for a code at pos (offset, bit) in MCU mcu, cut short by RSTn
+    rst at rst_pos"""
+    return (f"^\\*\\*\\* ERROR: Huffman code @ 0x{pos[0]:08x}\\.{pos[1]} in MCU\\({mcu[0]},{mcu[1]}\\) "
+            f"cut short by RST{rst} @ 0x{rst_pos:08x}\\.0$")
+
+
+# An interval whose data ends inside a code's value bits: the decoder took the
+# code whole, with zeros for the bits past the RST, so it read more bits than
+# its buffer held and never saw the restart. The scan ended there ("Overread
+# scan segment"): each MCU after it was grey, and the errors were at
+# 0x00000000.2. Now the code is dropped, with an error where it starts, and the
+# interval's data ends at the RST: the rest of the interval isn't decoded
+# (grey), and the data after the RST is the next interval's. (libjpeg-turbo
+# decodes the code, and the rest of its MCU, from zero bits.) Here one more
+# interval, of the byte FC (MCU [1,0]'s first: its DC code, of 7 bits, for 9
+# value bits, of which 1), after er_plain's RST0: MCU [1,0] isn't decoded, and
+# MCUs [2,0] on are MCUs [1,0] on, 3 bytes later than in er_plain.
+OVERREAD = "Overread scan segment"
+write("rc_one.jpg", er_extra(er_plain, er_at, 0, before=b"\xfc"))
+rc_case("RC_error", "rc_one.jpg", rc_err(ER_MCU1, (1, 0), 1, ER_MCU1[0] + 1), forbid=OVERREAD, flags="--ac")
+rc_case("RC_short", "rc_one.jpg", ri_short(1, ER_MCU1[0] + 1, (1, 0), (1, 0)), forbid=OVERREAD, flags="--ac")
+rc_case("RC_detail", "rc_one.jpg", ri_end(1, ER_MCU1[0] + 1), flags="--ac --detail 1,0,1",
+        forbid="\\[0x00000000\\.")
+rc_case("RC_detail_next", "rc_one.jpg", er_code((ER_MCU1[0] + 3, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 2,0,1", forbid="\\[0x00000000\\.")
+# Detailed Decode reports it too (it decodes the MCU itself)
+rc_case("RC_detail_error", "rc_one.jpg", rc_err(ER_MCU1, (1, 0), 1, ER_MCU1[0] + 1), flags="--ac --detail 1,0,1")
+# The block is grey (it was 128 before too), MCU [2,0] is MCU [1,0], and the
+# image's last MCU is MCU [2,1] (all 8 RSTs read; 2 were)
+rc_case("RC_pixel", "rc_one.jpg", er_grey(12, 4, 128), flags="--pixels 12,4")
+rc_case("RC_pixel_ac", "rc_one.jpg", er_grey(12, 4, 128), flags="--ac --pixels 12,4")
+rc_case("RC_pixel_next", "rc_one.jpg", er_grey(20, 4, lm_level(0, 8, 0)), flags="--ac --pixels 20,4")
+rc_case("RC_end", "rc_one.jpg", er_grey(28, 12, lm_level(0, 16, 8)), flags="--ac --pixels 28,12")
+rc_case("RC_rsts", "rc_one.jpg", "^    Number of RESTART markers decoded: 8$", flags="--ac")
+# The code dropped isn't counted: of the 7 DC codes decoded (er_plain's but the
+# last MCU's), 1 is of 7 bits (level 77), as the cut one is. (er_plain's last,
+# level 174, is the other of 7 bits.)
+rc_case("RC_histo", "rc_one.jpg", "^      # codes of length 07 bits:        1 \\( 14%\\)$", flags="--ac")
+# Tools > Lookup MCU Offset: MCU [1,0] isn't decoded (it gave the cut code's
+# offset), and MCU [2,0] starts after the RST
+case("RC_lookup", "RC", "gui", "rc_one.jpg", "--lookup x=12,y=4,recalc,close", timeout=30,
+     expect=lm_want(12, 4, (1, 0), None, rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+case("RC_lookup_next", "RC", "gui", "rc_one.jpg", "--lookup x=20,y=4,recalc,close", timeout=30,
+     expect=lm_want(20, 4, (2, 0), (ER_MCU1[0] + 3, ER_MCU1[1]), rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+# The scan's first code, cut at a byte (FE: MCU [0,0]'s DC code, of 8 bits, with
+# none of its 10 value bits): MCU [1,0] is MCU [0,0]
+write("rc_first.jpg", er_extra(er_plain, er_at, -1, before=b"\xfe"))
+rc_case("RC_first", "rc_first.jpg", rc_err((er_at, 0), (0, 0), 0, er_at + 1), forbid=OVERREAD, flags="--ac")
+rc_case("RC_first_detail", "rc_first.jpg", er_code((er_at + 3, 0), lm_level(0, 0, 0)), flags="--ac --detail 1,0,1",
+        forbid="\\[0x00000000\\.")
+# Three in a row, each reported where its code starts, each in its own MCU
+write("rc_three.jpg", er_extra(er_plain, er_at, 0, k=3, before=b"\xfc"))
+rc_case("RC_three_first", "rc_three.jpg", rc_err(ER_MCU1, (1, 0), 1, ER_MCU1[0] + 1), flags="--ac")
+rc_case("RC_three_second", "rc_three.jpg", rc_err((ER_MCU1[0] + 3, 0), (2, 0), 2, ER_MCU1[0] + 4), flags="--ac")
+rc_case("RC_three", "rc_three.jpg", rc_err((ER_MCU1[0] + 6, 0), (3, 0), 3, ER_MCU1[0] + 7), flags="--ac")
+rc_case("RC_three_detail", "rc_three.jpg", er_code((ER_MCU1[0] + 9, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 0,1,1", forbid="\\[0x00000000\\.")
+# With an empty interval before it (MCU [1,0]'s), and after it (MCU [2,0]'s)
+write("rc_empty_cut.jpg", er_extra((files_dir / "rc_one.jpg").read_bytes(), er_at, 0))
+rc_case("RC_empty_cut", "rc_empty_cut.jpg", er_code((ER_MCU1[0] + 5, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 3,0,1", forbid="\\[0x00000000\\.")
+rc_case("RC_empty_cut_error", "rc_empty_cut.jpg", rc_err((ER_MCU1[0] + 2, 0), (2, 0), 2, ER_MCU1[0] + 3), flags="--ac")
+write("rc_cut_empty.jpg", er_extra((files_dir / "er_two.jpg").read_bytes(), er_at, 0, before=b"\xfc"))
+rc_case("RC_cut_empty", "rc_cut_empty.jpg", er_code((ER_MCU1[0] + 5, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 3,0,1", forbid="\\[0x00000000\\.")
+rc_case("RC_cut_empty_error", "rc_cut_empty.jpg", rc_err(ER_MCU1, (1, 0), 1, ER_MCU1[0] + 1), flags="--ac")
+# Inside an MCU (er_mid_one.jpg's RST before MCU [1,0]'s Cb, then one more
+# interval, of FC: a DC code for 416, with 1 of its 9 value bits): MCU [1,0]'s
+# Cb and Cr aren't decoded, and FC is MCU [2,0]'s Y, cut short there. The
+# intervals after it are as in er_mid_one.jpg, one later: MCU [1,1] isn't
+# decoded (its interval's data cut short in MCU [0,1]).
+RC_CB_AT = er_y3_at + re.search(rb"\xff[\xd0-\xd7]", er_y3[er_y3_at:]).end()
+write("rc_cb.jpg", er_extra(er_y3, er_y3_at, 0, before=b"\xfc"))
+rc_case("RC_cb", "rc_cb.jpg", er_rgb(12, 4, 110, 128, 128), flags="--ac --pixels 12,4")
+rc_case("RC_cb_next", "rc_cb.jpg", er_rgb(12, 12, 128, 128, 128), flags="--ac --pixels 12,12")
+rc_case("RC_cb_error", "rc_cb.jpg", rc_err((RC_CB_AT, 0), (2, 0), 1, RC_CB_AT + 1), flags="--ac")
+# A code whose value bits end right at the RST isn't cut: MCU [1,0]'s DC alone
+# (16 bits, ER_DC_END) in an interval put in is decoded, and the block has only
+# that (its EOB missing). MCU [3,0] is MCU [2,0].
+write("rc_fit.jpg", er_extra(er_plain, er_at, 0, before=er_plain[ER_MCU1[0]:ER_DC_END]))
+rc_case("RC_fit", "rc_fit.jpg", er_code(ER_MCU1, lm_level(0, 8, 0)), flags="--ac --detail 1,0,1",
+        forbid=f"Huffman code @ 0x{ER_MCU1[0]:08x}\\.0 ")
+rc_case("RC_fit_next", "rc_fit.jpg", er_grey(28, 4, lm_level(0, 16, 0)), flags="--ac --pixels 28,4")
+# An AC code cut (Pillow's d_restart.jpg, with the tables of T.81 K.3 and K.5,
+# read from it): one more interval after its sixth RST, before MCU [2,1], of a
+# byte: Y's DC code for 0, then AC coefficient 1's code and value bit (1), then
+# coefficient 2's code (0/2) with 1 of its 2 value bits. MCU [2,1]'s data was
+# read as that block's coefficients from 2 on. Its image is rc_ac_ref.jpg's:
+# d_restart.jpg with an interval of that MCU put in there (its first block's
+# DC difference 0 and coefficient 1, then an EOB; every other block grey), and
+# its last interval left out. (The MD5 is rc_ac_ref.jpg's.)
+rc_pil_dc, rc_pil_ac = rc_dht(er_pil_src, 0x00), rc_dht(er_pil_src, 0x10)
+rc_pil_head = rc_bits(rc_pil_dc[0]) + rc_bits(rc_pil_ac[0x01]) + "1"
+rc_pil_byte = rc_pil_head + rc_bits(rc_pil_ac[0x02]) + "1"
+assert len(rc_pil_byte) == 8 and "0" in rc_pil_byte
+RC_PIL_AT = er_pil_at + list(re.finditer(rb"\xff+[\xd0-\xd7]", er_pil_src[er_pil_at:]))[5].end()
+write("rc_ac.jpg", er_extra(er_pil_src, er_pil_at, 5, before=bytes([int(rc_pil_byte, 2)])))
+rc_case("RC_ac", "rc_ac.jpg", rc_err((RC_PIL_AT, len(rc_pil_head)), (2, 1), 6, RC_PIL_AT + 1), forbid=OVERREAD,
+        flags="--ac")
+RC_AC_MD5 = "^harness: preview md5=00ae61c625af13151a5d9f9c5ad0ef42$"
+write("rc_ac_ref.jpg", ri_join(er_pil_src, er_pil_at,
+                               er_pil_parts[:6] + [pil_mcu(er_pil_src, ac=[(0x01, "1")])] + er_pil_parts[6:-1]))
+rc_case("RC_ac_image", "rc_ac.jpg", RC_AC_MD5, flags="--ac --preview-md5")
+rc_case("RC_ac_ref", "rc_ac_ref.jpg", RC_AC_MD5, flags="--ac --preview-md5", forbid="ERROR")
+# A code read before its RST is: 4 bytes, the buffer's fill, so the RST is
+# read only after the code, when the buffer is filled again for its value bits.
+# Y's DC (1), coefficient 1 (1), then coefficient 2's 0/10 code (16 bits, at
+# bit 7) with 9 of its 10 value bits. Its second byte is 0xFF, stuffed. Its
+# image is rc_late_ref.jpg's, made as rc_ac_ref.jpg.
+rc_late_head = rc_bits(rc_pil_dc[1]) + "1" + rc_bits(rc_pil_ac[0x01]) + "1"
+rc_late_bits = rc_late_head + rc_bits(rc_pil_ac[0x0A]) + "0" * 9
+assert len(rc_late_head) == 7 and rc_pil_ac[0x0A][1] == 16 and len(rc_late_bits) == 32
+rc_late = int(rc_late_bits, 2).to_bytes(4, "big").replace(b"\xff", b"\xff\x00")
+assert len(rc_late) == 5
+write("rc_late.jpg", er_extra(er_pil_src, er_pil_at, 5, before=rc_late))
+rc_case("RC_late", "rc_late.jpg", rc_err((RC_PIL_AT, 7), (2, 1), 6, RC_PIL_AT + 5), forbid=OVERREAD, flags="--ac")
+RC_LATE_MD5 = "^harness: preview md5=40eabf37e294874de316317fb53b55cd$"
+write("rc_late_ref.jpg", ri_join(er_pil_src, er_pil_at, er_pil_parts[:6]
+                                 + [pil_mcu(er_pil_src, dc=(1, "1"), ac=[(0x01, "1")])] + er_pil_parts[6:-1]))
+rc_case("RC_late_image", "rc_late.jpg", RC_LATE_MD5, flags="--ac --preview-md5")
+rc_case("RC_late_ref", "rc_late_ref.jpg", RC_LATE_MD5, flags="--ac --preview-md5", forbid="ERROR")
+# On a wider image (32 x 2 MCUs), 24 of them after RST0, each in its own MCU:
+# reported up to the scan's error limit (20), as its other errors are (the
+# 20th, in MCU [20,0] by RST4, and not the 21st), and each interval's early end
+# likewise, on a count of its own
+rc_wide, rc_wide_at, rc_wide_pos = dc_only_jpeg(256, 16, [(1, 1, 1)], lm_level, restart=1)
+RW_MCU1 = rc_wide_at + rc_wide_pos[1][0]
+write("rc_run.jpg", er_extra(rc_wide, rc_wide_at, 0, k=24, before=b"\xfc"))
+rc_case("RC_run", "rc_run.jpg", "^    Only reported first 20 instances of this message\\.\\.\\.$",
+        forbid=rc_err((RW_MCU1 + 3 * 20, 0), (21, 0), 21 % 8, RW_MCU1 + 3 * 20 + 1))
+rc_case("RC_run_last", "rc_run.jpg", rc_err((RW_MCU1 + 3 * 19, 0), (20, 0), 20 % 8, RW_MCU1 + 3 * 19 + 1))
+rc_case("RC_run_short", "rc_run.jpg", ri_short(20 % 8, RW_MCU1 + 3 * 19 + 1, (20, 0), (20, 0)),
+        forbid=ri_short(21 % 8, RW_MCU1 + 3 * 20 + 1, (21, 0), (21, 0)))
+# On a count of their own, so as not to hide the scan's other errors (on the
+# scan's count, 20 of them left out the error for a file cut short after them):
+# 20 intervals' data each FC, and the file cut short in its last MCU
+write("rc_cut_trunc.jpg", ri_replace(rc_wide, rc_wide_at, 1, 20, b"\xfc")[:-4])
+rc_case("RC_cut_trunc", "rc_cut_trunc.jpg",
+        "^\\*\\*\\* ERROR: Scan data ends at the end of the file in MCU\\(31,1\\) @ ")
+# And their count starts again at each decode: after a file with 24 (the first
+# 20 reported), the next file's 20th is reported (24 from MCU [2,0]: the 20th in
+# MCU [21,0], by RST5)
+write("rc_cut24.jpg", ri_replace(rc_wide, rc_wide_at, 1, 24, b"\xfc"))
+RC_CUT24B = ri_replace(rc_wide, rc_wide_at, 2, 24, b"\xfc")
+write("rc_cut24b.jpg", RC_CUT24B)
+RC_CUT24B_AT = ri_at(RC_CUT24B, rc_wide_at, 21)
+case("RC_twice", "RC", "gui", ["rc_cut24.jpg", "rc_cut24b.jpg"], "--log", timeout=30,
+     expect=rc_err((RC_CUT24B_AT, 0), (21, 0), 21 % 8, RC_CUT24B_AT + 1))
+# Nor do the scan's other errors hide them: in intervals of 16 MCUs, after the
+# first's data, 40 stuffed 0xFF (no code: its MCUs' errors reach the scan's
+# limit), an empty interval (MCUs [16,0] to [31,0]), then one of FC: reported
+# (and the first's end, its data running on past its last MCU)
+rc_wide16, rc_wide16_at, _ = dc_only_jpeg(256, 16, [(1, 1, 1)], lm_level, restart=16)
+RC_SHARED = ri_join(rc_wide16, rc_wide16_at,
+                    [b"\xff\x00" * 40, b"", b"\xfc"] + ri_intervals(rc_wide16, rc_wide16_at)[3:])
+write("rc_shared.jpg", RC_SHARED)
+RC_SHARED_CUT = ri_at(RC_SHARED, rc_wide16_at, 2)
+rc_case("RC_shared", "rc_shared.jpg", rc_err((RC_SHARED_CUT, 0), (0, 1), 2, RC_SHARED_CUT + 1), flags="--ac")
+rc_case("RC_shared_full", "rc_shared.jpg", "^    Only reported first 20 instances of this message\\.\\.\\.$",
+        flags="--ac")
+rc_case("RC_shared_short", "rc_shared.jpg", ri_short(1, RC_SHARED_CUT - 2, (16, 0), (31, 0)), flags="--ac")
+rc_case("RC_shared_sync", "rc_shared.jpg",
+        f"^    ERROR: Restart marker not detected: data skipped to RST0 @ 0x{RC_SHARED_CUT - 4:08x}\\.0$", flags="--ac")
+# Or the one for an RST out of place: 24 intervals' data each FC, and every
+# other RST 4 after the one wanted, taken for it, as libjpeg takes it. The 20th
+# of each is reported. (Each is out of order for the RST before it, too, but
+# that error is only reported without a DRI.)
+def ri_numbers(data, scan_at, num):
+    """data with its scan's k-th RST numbered num(k) (mod 8)"""
+    k = iter(range(1 << 30))
+    scan = re.sub(rb"(\xff+)[\xd0-\xd7]", lambda m: m.group(1) + bytes([0xD0 + num(next(k)) % 8]),
+                  data[scan_at:-2])
+    return data[:scan_at] + scan + data[-2:]
+
+
+def ri_far(want, mcu, got, pos):
+    return (f"^\\*\\*\\* ERROR: Expected RST{want} before MCU\\({mcu[0]},{mcu[1]}\\), found RST{got} @ "
+            f"0x{pos:08x}\\.0: taken for it$")
+
+
+RC_INDEX = ri_numbers(ri_replace(rc_wide, rc_wide_at, 1, 24, b"\xfc"), rc_wide_at, lambda k: k + 4 * (k % 2))
+write("rc_index.jpg", RC_INDEX)
+RC_INDEX_20 = ri_at(RC_INDEX, rc_wide_at, 20)
+rc_case("RC_index", "rc_index.jpg", rc_err((RC_INDEX_20, 0), (20, 0), 4, RC_INDEX_20 + 1), flags="--ac")
+rc_case("RC_index_first", "rc_index.jpg", ri_far(1, (2, 0), 5, ri_at(RC_INDEX, rc_wide_at, 2) - 2),
+        forbid="Expected RST marker index", flags="--ac")
+rc_case("RC_index_far", "rc_index.jpg", ri_far(7, (8, 1), 3, ri_at(RC_INDEX, rc_wide_at, 40) - 2), flags="--ac")
+
+
+# --- RI: restart intervals, each where the restart interval puts it -----------------
+def ri_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "RI", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def ri_rst_pos(k):
+    """Offset of er_plain's RSTk (before MCU k+1)"""
+    return er_at + er_pos[k + 1][0] - 2
+
+
+def ri_put(data, pos, more):
+    return data[:pos] + more + data[pos:]
+
+
+def ri_elapsed(pos):
+    return f"^  Expect Restart interval elapsed @ 0x{pos[0]:08x}\\.{pos[1]}$"
+
+
+def ri_skipped(found):
+    return f"^    ERROR: Restart marker not detected: data skipped to {found}$"
+
+
+def ri_later(want, mcu, got, pos, lost):
+    return (f"^\\*\\*\\* ERROR: Expected RST{want} before MCU\\({mcu[0]},{mcu[1]}\\), found RST{got} @ "
+            f"0x{pos:08x}\\.0: taken as a later one, so {lost} not decoded$")
+
+
+def ri_nomore(mcu, found):
+    return (f"^\\*\\*\\* ERROR: No RST found before MCU\\({mcu[0]},{mcu[1]}\\), but {found}: "
+            "no MCU from there on decoded$")
+
+
+def ri_marker(code, pos):
+    return f"marker 0xFF{code:02x} @ 0x{pos:08x}\\.0"
+
+
+# Where MCU [1,0]'s data ends in er_plain: its DC code, value bits and EOB
+ri_dc_cat = abs(round((lm_level(0, 8, 0) - 128) * 8)).bit_length()
+ri_mcu1_bits = huff_codes(DC_COUNTS, DC_VALUES)[ri_dc_cat][1] + ri_dc_cat + 1
+RI_MCU1_END = (ER_MCU1[0] + ri_mcu1_bits // 8, ri_mcu1_bits % 8)
+# Data after an interval's last MCU, before its RST (2 bytes after MCU [1,0]'s,
+# before RST1): skipped to the RST, as libjpeg skips it, so MCU [2,0] on are in
+# place. (The decoder decoded it as MCU [2,0], whose data ran on past RST1 into
+# MCU [3,0]'s: each MCU after it was out of place.)
+write("ri_late.jpg", ri_put(er_plain, ri_rst_pos(1), b"\x12\x34"))
+ri_case("RI_late", "ri_late.jpg", ri_elapsed(RI_MCU1_END))
+ri_case("RI_late_skip", "ri_late.jpg", ri_skipped(ri_rst(1, ri_rst_pos(1) + 2)), forbid="Expected RST marker index")
+# RST1, which the scan buffer had read, is read once: 7 RSTs
+ri_case("RI_late_rsts", "ri_late.jpg", "^    Number of RESTART markers decoded: 7$")
+ri_case("RI_late_pixel", "ri_late.jpg", er_grey(20, 4, lm_level(0, 16, 0)), flags="--ac --pixels 20,4")
+ri_case("RI_late_none", "er_plain.jpg", er_grey(20, 4, lm_level(0, 16, 0)), flags="--ac --pixels 20,4",
+        forbid="Restart marker not detected")
+# More than the scan buffer holds (2 MB), searched once, in time
+write("ri_late_long.jpg", ri_put(er_plain, ri_rst_pos(1), b"\x12" * (2 << 20)))
+ri_case("RI_late_long", "ri_late_long.jpg", ri_skipped(ri_rst(1, ri_rst_pos(1) + (2 << 20))), timeout=5)
+ri_case("RI_late_long_pixel", "ri_late_long.jpg", er_grey(20, 4, lm_level(0, 16, 0)),
+        flags="--ac --pixels 20,4", timeout=5)
+# Stuffed 0xFF (fill bytes before one too) are data, and a marker below SOF0
+# (TEM, 0xFF01) is passed over, as libjpeg passes it (8 bytes in, so the scan
+# buffer hadn't read them)
+write("ri_late_ff.jpg", ri_put(er_plain, ri_rst_pos(1), b"\x12" * 8 + b"\xff\x00\xff\xff\x00\xff\x01" + b"\x34" * 8))
+ri_case("RI_late_ff", "ri_late_ff.jpg", ri_skipped(ri_rst(1, ri_rst_pos(1) + 23)))
+ri_case("RI_late_ff_pixel", "ri_late_ff.jpg", er_grey(20, 4, lm_level(0, 16, 0)), flags="--ac --pixels 20,4")
+# Runs of 1 MB of 0xFF in it, searched once, in time, ending in: 0x00 (data, then
+# RST1), 0x01 (TEM, passed over, then RST1), RST1's code (fill bytes before it),
+# 0xC4 (a marker that isn't an RST: no MCU decoded after it) and the EOI's
+RI_RUN = b"\x12" * 8 + b"\xff" * (1 << 20)
+RI_RUN_END = ri_rst_pos(1) + len(RI_RUN)
+write("ri_run00.jpg", ri_put(er_plain, ri_rst_pos(1), RI_RUN + b"\x00\x34"))
+ri_case("RI_run00", "ri_run00.jpg", ri_skipped(ri_rst(1, RI_RUN_END + 2)), timeout=5)
+write("ri_run01.jpg", ri_put(er_plain, ri_rst_pos(1), RI_RUN + b"\x01\x34"))
+ri_case("RI_run01", "ri_run01.jpg", ri_skipped(ri_rst(1, RI_RUN_END + 2)), timeout=5)
+write("ri_runrst.jpg", er_plain[:ri_rst_pos(1)] + RI_RUN + er_plain[ri_rst_pos(1) + 1:])
+ri_case("RI_runrst", "ri_runrst.jpg", ri_skipped(ri_rst(1, RI_RUN_END - 1)), timeout=5)
+ri_case("RI_runrst_pixel", "ri_runrst.jpg", er_grey(20, 4, lm_level(0, 16, 0)), flags="--ac --pixels 20,4",
+        timeout=5)
+write("ri_runc4.jpg", ri_put(er_plain, ri_rst_pos(1), RI_RUN + b"\xc4"))
+ri_case("RI_runc4", "ri_runc4.jpg", ri_nomore((2, 0), ri_marker(0xC4, RI_RUN_END - 1)), timeout=5)
+ri_case("RI_runc4_pixel", "ri_runc4.jpg", er_grey(20, 4, 128), flags="--ac --pixels 20,4", timeout=5)
+write("ri_runeoi.jpg", er_plain[:ri_rst_pos(1)] + RI_RUN + b"\xd9")
+ri_case("RI_runeoi", "ri_runeoi.jpg", ri_nomore((2, 0), ri_marker(0xD9, RI_RUN_END - 1)), timeout=5)
+# An RST left out (RST1): after MCU [1,0]'s interval the RST found is RST2, one
+# after the one wanted, so taken for the next interval's, as libjpeg takes it:
+# MCU [2,0]'s interval (whose data is skipped to RST2) isn't decoded, and MCU
+# [3,0] on are in place. (The decoder decoded MCU [2,0] from its data, its DC
+# following MCU [1,0]'s, with "Restart marker not detected".)
+RI_MISSING = er_plain[:ri_rst_pos(1)] + er_plain[ri_rst_pos(1) + 2:]
+write("ri_missing.jpg", RI_MISSING)
+ri_case("RI_missing", "ri_missing.jpg", ri_later(1, (2, 0), 2, ri_rst_pos(2) - 2, "MCU\\(2,0\\)"))
+ri_case("RI_missing_pixel", "ri_missing.jpg", er_grey(20, 4, 128), flags="--ac --pixels 20,4")
+ri_case("RI_missing_next", "ri_missing.jpg", er_grey(28, 4, lm_level(0, 24, 0)), flags="--ac --pixels 28,4")
+# Tools > Lookup MCU Offset: MCU [2,0] has no offset, and MCU [3,0] has its own
+case("RI_missing_lookup", "RI", "gui", "ri_missing.jpg", "--lookup x=20,y=4,recalc,close", timeout=30,
+     expect=lm_want(20, 4, (2, 0), None, rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+case("RI_missing_lookup_next", "RI", "gui", "ri_missing.jpg", "--lookup x=28,y=4,recalc,close", timeout=30,
+     expect=lm_want(28, 4, (3, 0), (er_at + er_pos[3][0] - 2, 0), rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+# RST1 numbered RST7, one of the two before the one wanted: skipped, with MCU
+# [2,0]'s data after it, to RST2, which is then one after: so MCU [2,0] isn't
+# decoded, and MCU [3,0] on are in place
+write("ri_prior.jpg", er_plain[:ri_rst_pos(1) + 1] + b"\xd7" + er_plain[ri_rst_pos(1) + 2:])
+ri_case("RI_prior", "ri_prior.jpg", ri_earlier(1, (2, 0), 7, ri_rst_pos(1), ri_rst(2, ri_rst_pos(2))))
+ri_case("RI_prior_later", "ri_prior.jpg", ri_later(1, (2, 0), 2, ri_rst_pos(2), "MCU\\(2,0\\)"))
+ri_case("RI_prior_pixel", "ri_prior.jpg", er_grey(20, 4, 128), flags="--ac --pixels 20,4")
+ri_case("RI_prior_next", "ri_prior.jpg", er_grey(28, 4, lm_level(0, 24, 0)), flags="--ac --pixels 28,4")
+# Numbered RST5, further off: taken for RST1, so every MCU is in place
+write("ri_far.jpg", er_plain[:ri_rst_pos(1) + 1] + b"\xd5" + er_plain[ri_rst_pos(1) + 2:])
+ri_case("RI_far", "ri_far.jpg", ri_far(1, (2, 0), 5, ri_rst_pos(1)))
+ri_case("RI_far_pixel", "ri_far.jpg", er_grey(20, 4, lm_level(0, 16, 0)), flags="--ac --pixels 20,4")
+# Numbered RST3, two after: taken for the interval after the next, so MCUs [2,0]
+# and [3,0] aren't decoded, and MCU [0,1] is MCU [2,0]
+write("ri_plus2.jpg", er_plain[:ri_rst_pos(1) + 1] + b"\xd3" + er_plain[ri_rst_pos(1) + 2:])
+ri_case("RI_plus2", "ri_plus2.jpg", ri_later(1, (2, 0), 3, ri_rst_pos(1), "MCU\\(2,0\\)"))
+ri_case("RI_plus2_second", "ri_plus2.jpg", ri_later(2, (3, 0), 3, ri_rst_pos(1), "MCU\\(3,0\\)"))
+ri_case("RI_plus2_pixel", "ri_plus2.jpg", er_grey(28, 4, 128), flags="--ac --pixels 28,4")
+ri_case("RI_plus2_next", "ri_plus2.jpg", er_grey(4, 12, lm_level(0, 16, 0)), flags="--ac --pixels 4,12")
+# A DRI, but no RSTs: after MCU [0,0]'s interval the next marker is the EOI, so
+# no MCU after it is decoded, as libjpeg decodes none. (The decoder decoded the
+# rest from its data, with no restarts.)
+RI_NORST = er_plain[:er_at] + re.sub(rb"\xff[\xd0-\xd7]", b"", er_plain[er_at:-2]) + b"\xff\xd9"
+write("ri_norst.jpg", RI_NORST)
+ri_case("RI_norst", "ri_norst.jpg", ri_nomore((1, 0), ri_marker(0xD9, len(RI_NORST) - 2)),
+        forbid="No RST found before MCU\\(2,0\\)")
+ri_case("RI_norst_skip", "ri_norst.jpg", ri_skipped(ri_marker(0xD9, len(RI_NORST) - 2)))
+ri_case("RI_norst_pixel", "ri_norst.jpg", er_grey(28, 12, 128), flags="--ac --pixels 28,12")
+ri_case("RI_norst_first", "ri_norst.jpg", er_grey(4, 4, lm_level(0, 0, 0)), flags="--ac --pixels 4,4")
+# Or the end of the file (no EOI either)
+write("ri_eof.jpg", RI_NORST[:-2])
+ri_case("RI_eof", "ri_eof.jpg", ri_nomore((1, 0), f"the end of the file @ 0x{len(RI_NORST) - 2:08x}\\.0"))
+ri_case("RI_eof_pixel", "ri_eof.jpg", er_grey(28, 12, 128), flags="--ac --pixels 28,12")
+# A marker that isn't an RST (from SOF0 on) after an interval's last MCU, where
+# its RST should be (2 bytes after MCU [1,0]'s data, before RST1): no MCU after
+# it is decoded, as libjpeg decodes none, though the scan buffer had read past
+# it. (One inside an interval's data is still decoded through: libjpeg stops
+# there too.)
+write("ri_stray.jpg", ri_put(er_plain, ri_rst_pos(1), b"\xff\xc4"))
+ri_case("RI_stray", "ri_stray.jpg", ri_nomore((2, 0), ri_marker(0xC4, ri_rst_pos(1))))
+ri_case("RI_stray_pixel", "ri_stray.jpg", er_grey(20, 4, 128), flags="--ac --pixels 20,4")
+# A TEM marker there is passed over
+write("ri_tem.jpg", ri_put(er_plain, ri_rst_pos(1), b"\xff\x01"))
+ri_case("RI_tem", "ri_tem.jpg", ri_skipped(ri_rst(1, ri_rst_pos(1) + 2)))
+ri_case("RI_tem_pixel", "ri_tem.jpg", er_grey(20, 4, lm_level(0, 16, 0)), flags="--ac --pixels 20,4")
+# An interval of 4 MCUs whose data ends after its second: its last two aren't
+# decoded (Detailed Decode says so for each block), and the next interval is in
+# place
+ri4, ri4_at, _ = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=4)
+RI4_TWO = dc_interval([lm_level(0, 0, 0), lm_level(0, 8, 0)])
+write("ri_ri4.jpg", ri_join(ri4, ri4_at, [RI4_TWO] + ri_intervals(ri4, ri4_at)[1:]))
+write("ri_ri4_plain.jpg", ri4)
+ri_case("RI_ri4", "ri_ri4.jpg", ri_short(0, ri4_at + len(RI4_TWO), (2, 0), (3, 0)),
+        forbid=ri_short(0, ri4_at + len(RI4_TWO), (3, 0), (3, 0)))
+ri_case("RI_ri4_lost", "ri_ri4.jpg", RI_LOST, flags="--ac --detail 3,0,1")
+ri_case("RI_ri4_lost_none", "ri_ri4_plain.jpg", "^    Lum \\(Tbl #0\\), MCU=\\[3,0\\]$", flags="--ac --detail 3,0,1",
+        forbid=RI_LOST)
+ri_case("RI_ri4_kept", "ri_ri4.jpg", er_grey(12, 4, lm_level(0, 8, 0)), flags="--ac --pixels 12,4")
+# Detailed Decode over all of it only adds its own lines (those two included)
+ri_case("RI_ri4_detail_same", "ri_ri4.jpg", SAME, flags="--ac --detail 0,0,8")
+ri_case("RI_ri4_pixel", "ri_ri4.jpg", er_grey(28, 4, 128), flags="--ac --pixels 28,4")
+# MCU [2,0], whose DC wasn't read, is grey too (not MCU [1,0]'s level, its
+# predictor)
+ri_case("RI_ri4_cut", "ri_ri4.jpg", er_grey(20, 4, 128), flags="--ac --pixels 20,4")
+ri_case("RI_ri4_cut_detail", "ri_ri4.jpg", er_grey(20, 4, 128), flags="--ac --detail 2,0,1 --pixels 20,4")
+ri_case("RI_ri4_next", "ri_ri4.jpg", er_grey(4, 12, lm_level(0, 0, 8)), flags="--ac --pixels 4,12")
+# In a colour image, an interval whose data ends after its MCU's Y block (MCU
+# [1,0]'s Cb and Cr left out): its Cb and Cr aren't decoded (grey), and MCU
+# [2,0] on are in place. (The decoder read MCU [2,0]'s Y as MCU [1,0]'s Cb, and
+# so on: every MCU after it had its components out of place.)
+ri_col, ri_col_at, _ = dc_only_jpeg(32, 16, LM_Y3, er_lev, restart=1)
+RI_COLOR = ri_replace(ri_col, ri_col_at, 1, 1, dc_interval([er_lev(0, 8, 0)]))
+write("ri_color.jpg", RI_COLOR)
+ri_case("RI_color", "ri_color.jpg", er_rgb(12, 4, er_lev(0, 8, 0), 128, 128), flags="--ac --pixels 12,4")
+ri_case("RI_color_next", "ri_color.jpg", er_rgb(20, 4, *(er_lev(c, 16, 0) for c in range(3))),
+        flags="--ac --pixels 20,4")
+ri_case("RI_color_short", "ri_color.jpg", ri_short(1, ri_at(RI_COLOR, ri_col_at, 2) - 2, (1, 0), (1, 0)))
+# The scan ending in an interval whose data ends at once (an RST after RST6,
+# before the last MCU): the next position in the scan is that RST's (it was
+# 0x00000000.0, the buffer's position before it read a byte after RST6)
+write("ri_end.jpg", er_extra(er_plain, er_at, 6))
+ri_case("RI_end", "ri_end.jpg", f"^    Next position in scan buffer: Offset 0x{ri_rst_pos(6) + 2:08x}\\.0$",
+        forbid="Offset 0x00000000\\.0")
+# Without a DRI there are no restart intervals: an RST is passed over where it is
+# found, and the decode goes on, as before (er_two.jpg without its DRI)
+ri_two = (files_dir / "er_two.jpg").read_bytes()
+ri_dri = ri_two.index(b"\xff\xdd\x00\x04")
+write("ri_nodri.jpg", ri_two[:ri_dri] + ri_two[ri_dri + 6:])
+ri_case("RI_nodri", "ri_nodri.jpg", er_code((ER_MCU1[0] - 6 + 2, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 1,0,1", forbid="Restart interval ends early")
+# Tools > Lookup MCU Offset and the status bar after a TEM passed over there:
+# MCU [2,0] is decoded in its place, so it has its offset. (The scan buffer had
+# read on past the TEM, which ended the scan's data for the MCU map: "Not
+# decoded" for every MCU after it.)
+case("RI_tem_lookup", "RI", "gui", "ri_tem.jpg", "--lookup x=20,y=4,recalc,close --hover 20,4", timeout=30,
+     expect=lm_want(20, 4, (2, 0), (er_at + er_pos[2][0] + 2, 0), rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+case("RI_tem_hover", "RI", "gui", "ri_tem.jpg", "--lookup close --hover 20,4", timeout=30,
+     expect=f'^harness: hover 20,4: "MCU \\[0002,0000\\]" "File 0x{er_at + er_pos[2][0] + 2:08x}:0" ')
+# One inside an interval's data (MCU [1,0]'s, after its first byte) is decoded
+# through, as before; MCUs after it have their offsets (MCU [3,0], 2 bytes on)
+write("ri_tem_in.jpg", ri_put(er_plain, ER_MCU1[0] + 1, b"\xff\x01"))
+case("RI_tem_in_lookup", "RI", "gui", "ri_tem_in.jpg", "--lookup x=28,y=4,recalc,close", timeout=30,
+     expect=lm_want(28, 4, (3, 0), (er_at + er_pos[3][0] + 2, 0), rng=r"\(0\.\.31\)x\(0\.\.15\)"))
+ri_case("RI_tem_in_pixel", "ri_tem_in.jpg", er_grey(28, 4, lm_level(0, 24, 0)), flags="--ac --pixels 28,4")
+# Detailed Decode says each block of an interval taken as lost at its start is
+# not decoded: after an RST one after the one wanted, and after no RST at all
+ri_case("RI_missing_detail", "ri_missing.jpg", RI_LOST, flags="--ac --detail 2,0,1")
+ri_case("RI_norst_detail", "ri_norst.jpg", RI_LOST, flags="--ac --detail 1,0,1")
+# 8 x 4 MCUs in intervals of 2 (RST numbers go round past RST7)
+ri_w, ri_w_at, ri_w_pos = dc_only_jpeg(64, 32, [(1, 1, 1)], lm_level, restart=2)
+ri_w_parts = ri_intervals(ri_w, ri_w_at)
+# RST6 and RST7 left out: after MCUs [4,1] and [5,1] the data of 2 more
+# intervals is skipped to RST0, then one after RST6 and two after RST7, each
+# taken as a later one (counted round past RST7): MCUs [6,1] to [1,2] aren't
+# decoded, and MCU [2,2] on are in place
+RI_WRAP = ri_numbers(ri_join(ri_w, ri_w_at, ri_w_parts[:6] + [b"".join(ri_w_parts[6:9])] + ri_w_parts[9:]),
+                     ri_w_at, lambda k: k if k < 6 else k + 2)
+RI_WRAP_RST = ri_at(RI_WRAP, ri_w_at, 7) - 2
+write("ri_wrap.jpg", RI_WRAP)
+ri_case("RI_wrap", "ri_wrap.jpg", ri_later(6, (6, 1), 0, RI_WRAP_RST, "MCU\\(6,1\\) to MCU\\(7,1\\)"))
+ri_case("RI_wrap_second", "ri_wrap.jpg", ri_later(7, (0, 2), 0, RI_WRAP_RST, "MCU\\(0,2\\) to MCU\\(1,2\\)"))
+ri_case("RI_wrap_pixel", "ri_wrap.jpg", er_grey(12, 20, 128), flags="--ac --pixels 12,20")
+ri_case("RI_wrap_next", "ri_wrap.jpg", er_grey(20, 20, lm_level(0, 16, 16)), flags="--ac --pixels 20,20")
+# The RST after MCU [5,0] numbered 3 and 5 after the one wanted (RST2), the
+# nearest that are taken for it: MCU [6,0] on are in place
+for ri_k in (3, 5):
+    ri_ahead = ri_numbers(ri_w, ri_w_at, lambda k, n=ri_k: k + (n if k == 2 else 0))
+    write(f"ri_ahead{ri_k}.jpg", ri_ahead)
+    ri_case(f"RI_ahead{ri_k}", f"ri_ahead{ri_k}.jpg", ri_far(2, (6, 0), 2 + ri_k, ri_at(ri_w, ri_w_at, 3) - 2))
+    ri_case(f"RI_ahead{ri_k}_pixel", f"ri_ahead{ri_k}.jpg", er_grey(52, 4, lm_level(0, 48, 0)),
+            flags="--ac --pixels 52,4")
+# An interval larger than the image (DRI 1000), with er_plain's RSTs: its data
+# ends at RST0, and the rest of the image isn't decoded (the range ends at the
+# image's last MCU)
+ri_dri = er_plain.index(b"\xff\xdd\x00\x04")
+write("ri_bigdri.jpg", er_plain[:ri_dri + 4] + struct.pack(">H", 1000) + er_plain[ri_dri + 6:])
+ri_case("RI_bigdri", "ri_bigdri.jpg", ri_short(0, ri_rst_pos(0), (1, 0), (3, 1)))
+ri_case("RI_bigdri_pixel", "ri_bigdri.jpg", er_grey(28, 12, 128), flags="--ac --pixels 28,12")
+# A DRI of 0 is no restart interval: an RST is passed over where it is found
+ri_two_dri = ri_two.index(b"\xff\xdd\x00\x04")
+write("ri_dri0.jpg", ri_two[:ri_two_dri + 4] + b"\x00\x00" + ri_two[ri_two_dri + 6:])
+ri_case("RI_dri0", "ri_dri0.jpg", er_code((ER_MCU1[0] + 2, ER_MCU1[1]), lm_level(0, 8, 0)),
+        flags="--ac --detail 1,0,1", forbid="Restart interval ends early")
+# An RST after the last MCU, before the EOI (numbered out of order): nothing
+# is decoded after it, so it is no error
+write("ri_rst_eoi.jpg", er_plain[:-2] + b"\xff\xd3\xff\xd9")
+ri_case("RI_rst_eoi", "ri_rst_eoi.jpg", er_grey(28, 12, lm_level(0, 24, 8)), flags="--ac --pixels 28,12",
+        forbid="Restart interval ends early|No RST found|Restart marker not detected|Expected RST")
+# An EOI right after RST5, its 0xFF read as data by MCUs [4,1] and [5,1]: found
+# where their data ends, at the start of the byte their last bits are in. (It
+# was searched from the byte after it, so the EOI was missed and the search
+# went on to the end of the file.)
+RI_EOI_MID = ri_w[:ri_at(ri_w, ri_w_at, 6)] + b"\xff\xd9"
+write("ri_eoi_mid.jpg", RI_EOI_MID)
+ri_case("RI_eoi_mid", "ri_eoi_mid.jpg", ri_skipped(ri_marker(0xD9, len(RI_EOI_MID) - 2)))
+# At the end of a file of 4 GiB - 1 bytes (sparse), a scan whose last bytes are
+# RST5: the search for the next marker starts in the bytes past the end, and
+# stops at once. (Its position, one past 0xFFFFFFFF, wrapped round to 0: the
+# search went through the 4 GiB from the start of the file, to the JPEG's own
+# SOI, in 20 s.)
+RI_HUGE_JPEG = ri_w[:ri_at(ri_w, ri_w_at, 6)]
+RI_HUGE_AT = 0xFFFFFFFF - len(RI_HUGE_JPEG)
+with open(files_dir / "ri_huge_end.bin", "wb") as f:
+    f.write(bytes(random.Random(7).randrange(256) for _ in range(4096)))
+    f.seek(RI_HUGE_AT)
+    f.write(RI_HUGE_JPEG)
+ri_case("RI_huge_end", "ri_huge_end.bin", ri_skipped("the end of the file @ 0xffffffff\\.0"),
+        flags=f"--start {RI_HUGE_AT}", forbid="0xFFd8", timeout=5)
+# Data that ends in a row (cut 1 byte into MCU [4,0], in intervals of 3): no
+# MCU after it is decoded, so MCU [0,1] is grey and no RST is reported missing.
+# (The rest of the row was skipped without counting its MCUs, so the restart
+# interval's count was off after it, and MCU [0,1] was decoded from zeros.)
+ri_w3, ri_w3_at, ri_w3_pos = dc_only_jpeg(64, 32, [(1, 1, 1)], lm_level, restart=3)
+write("ri_cut_row.jpg", ri_w3[:ri_w3_at + ri_w3_pos[4][0] + 1])
+ri_case("RI_cut_row", "ri_cut_row.jpg", er_grey(4, 12, 128), flags="--ac --pixels 4,12",
+        forbid="No RST found|Restart marker not detected")
+ri_case("RI_cut_row_eof", "ri_cut_row.jpg",
+        "^\\*\\*\\* ERROR: Scan data ends at the end of the file in MCU\\(4,0\\) @ ")
+# Each interval's early end, and each RST missing, late or out of order, is
+# reported up to the scan's error limit (20), on a count of its own, so as not
+# to hide the scan's other errors: 24 intervals with no data (MCUs [1,0] to
+# [24,0]), or with 2 bytes after their MCU's, then the file cut short in its
+# last MCU
+RI_EMPTY24 = ri_replace(rc_wide, rc_wide_at, 1, 24, b"")
+write("ri_empty24.jpg", RI_EMPTY24[:-4])
+ri_case("RI_short_cap", "ri_empty24.jpg", ri_short(20 % 8, ri_at(RI_EMPTY24, rc_wide_at, 21) - 2, (20, 0), (20, 0)),
+        forbid=ri_short(21 % 8, ri_at(RI_EMPTY24, rc_wide_at, 22) - 2, (21, 0), (21, 0)))
+ri_case("RI_short_cap_end", "ri_empty24.jpg",
+        "^\\*\\*\\* ERROR: Scan data ends at the end of the file in MCU\\(31,1\\) @ ")
+ri_late24_parts = ri_intervals(rc_wide, rc_wide_at)
+ri_late24_parts[1:25] = [p + b"\x12\x34" for p in ri_late24_parts[1:25]]
+RI_LATE24 = ri_join(rc_wide, rc_wide_at, ri_late24_parts)
+write("ri_late24.jpg", RI_LATE24[:-4])
+ri_case("RI_sync_cap", "ri_late24.jpg", ri_skipped(ri_rst(20 % 8, ri_at(RI_LATE24, rc_wide_at, 21) - 2)),
+        forbid=ri_skipped(ri_rst(21 % 8, ri_at(RI_LATE24, rc_wide_at, 22) - 2)))
+ri_case("RI_sync_cap_end", "ri_late24.jpg",
+        "^\\*\\*\\* ERROR: Scan data ends at the end of the file in MCU\\(31,1\\) @ ")
+# And their counts start again at each decode: after a file with 24 (the first
+# 20 reported), the next file's 20th is reported (24 from MCU [2,0]: the 20th in
+# MCU [21,0], at RST5)
+RI_EMPTY24B = ri_replace(rc_wide, rc_wide_at, 2, 24, b"")
+write("ri_empty24b.jpg", RI_EMPTY24B)
+case("RI_twice", "RI", "gui", ["ri_empty24.jpg", "ri_empty24b.jpg"], "--log", timeout=30,
+     expect=ri_short(21 % 8, ri_at(RI_EMPTY24B, rc_wide_at, 22) - 2, (21, 0), (21, 0)))
+ri_late24b_parts = ri_intervals(rc_wide, rc_wide_at)
+ri_late24b_parts[2:26] = [p + b"\x12\x34" for p in ri_late24b_parts[2:26]]
+RI_LATE24B = ri_join(rc_wide, rc_wide_at, ri_late24b_parts)
+write("ri_late24b.jpg", RI_LATE24B)
+case("RI_twice_sync", "RI", "gui", ["ri_late24.jpg", "ri_late24b.jpg"], "--log", timeout=30,
+     expect=ri_skipped(ri_rst(21 % 8, ri_at(RI_LATE24B, rc_wide_at, 22) - 2)))
 
 
 with open(out_dir / "cases.tsv", "w") as f:

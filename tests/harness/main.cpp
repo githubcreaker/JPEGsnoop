@@ -669,7 +669,9 @@ static QString withoutDetail(const QString &strLog)
   static const QRegularExpression reDetail(
     QStringLiteral("^(    \\S+ \\(Tbl #\\d+\\), MCU=\\[.*|      \\[0x.*|.*DCT Matrix=.*| {20,}\\[.*"
                    "|  Detailed IDCT Dump \\(RGB\\):|    MCU \\[.*|      \\[ x.*|    \\(No IDCT mode: .*"
-                   "|  Detailed Decode: .*|  NOTE: Detailed Decode .*|\\s*)$"));
+                   "|  Detailed Decode: .*|  NOTE: Detailed Decode .*"
+                   "|      RST\\d @ 0x[0-9a-f]+\\.\\d: the data of its restart interval ends here"
+                   "|      Not decoded: the data of its restart interval ended before it|\\s*)$"));
   QStringList astrKept;
   const QStringList astrLines = strLog.split('\n');
   for(const QString &strLine : astrLines)

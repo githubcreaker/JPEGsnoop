@@ -8026,10 +8026,17 @@ uint32_t CjfifDecode::DecodeMarker()
 
       bool bScanDumpTrunc;
 
+      // Fill bytes before a stuffed 0xFF (see below): how many times, and
+      // where first
+      uint32_t nFillStuffed;
+      uint32_t nPosFillStuffed;
+
       bSkipDone = false;
       nSkipCount = 0;
       nSkipPos = 0;
       bScanDumpTrunc = false;
+      nFillStuffed = 0;
+      nPosFillStuffed = 0;
 
       strFull = "";
 
@@ -8048,7 +8055,10 @@ uint32_t CjfifDecode::DecodeMarker()
           // Fill bytes (T.81 B.1.1.2): 0xFF bytes before an RSTn are skipped
           // with it. The first ended the scan here, so the marker list took
           // the RSTn for one outside the scan, and stopped. (Before any other
-          // marker, its parsing skips them, as before.)
+          // marker, its parsing skips them, as before.) Before the 0x00 of a
+          // stuffed 0xFF they aren't allowed, but are skipped likewise: the
+          // run is one 0xFF of data, as libjpeg documents and the decoder now
+          // reads it. The marker list took it for a marker 0xFF00 and stopped.
           if(nSkipData == 0xFF)
           {
             uint32_t nPosFill = m_nPos;
@@ -8058,8 +8068,14 @@ uint32_t CjfifDecode::DecodeMarker()
               nPosFill++;
             }
 
-            if((nPosFill < nPosEof) && (Buf(nPosFill) >= JFIF_RST0) && (Buf(nPosFill) <= JFIF_RST7))
+            if((nPosFill < nPosEof) &&
+               (((Buf(nPosFill) >= JFIF_RST0) && (Buf(nPosFill) <= JFIF_RST7)) || (Buf(nPosFill) == 0x00)))
             {
+              if((Buf(nPosFill) == 0x00) && (nFillStuffed++ == 0))
+              {
+                nPosFillStuffed = m_nPos - 2;
+              }
+
               nSkipData = Buf(nPosFill);
               m_nPos = nPosFill + 1;
             }
@@ -8131,6 +8147,14 @@ uint32_t CjfifDecode::DecodeMarker()
       }
 
       m_pLog->AddLine(strFull);
+
+      if(nFillStuffed > 0)
+      {
+        m_pLog->AddLineWarn(QString("  WARNING: 0xFF fill bytes from 0x%1 before a stuffed 0xFF00 (%2 in the scan data), "
+                                    "which T.81 allows only before a marker: each run is read as one 0xFF of data")
+                              .arg(nPosFillStuffed, 8, 16, QChar('0'))
+                              .arg((nFillStuffed == 1) ? QString("1 run") : QString("%1 runs").arg(nFillStuffed)));
+      }
 
 //              }
 
@@ -8300,7 +8324,6 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_JPG11:
     case JFIF_JPG12:
     case JFIF_JPG13:
-    case JFIF_TEM:
       // Unsupported marker
       // - Provide generic decode based on length
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Length
@@ -8308,6 +8331,13 @@ uint32_t CjfifDecode::DecodeMarker()
       m_pLog->AddLine(strTmp);
       m_pLog->AddLineWarn("  Skipping unsupported marker");
       m_nPos += nLength;
+      break;
+
+    case JFIF_TEM:
+      // Unsupported, and with no length (T.81 Table B.1, as RSTn, SOI and
+      // EOI): the next 2 bytes were taken for one, so the marker after it was
+      // skipped with them (a length of 65534 before a COM)
+      m_pLog->AddLineWarn("  Skipping unsupported marker");
       break;
 
     case JFIF_RST0:
@@ -8336,18 +8366,33 @@ uint32_t CjfifDecode::DecodeMarker()
       else
       {
         // Ignore
-        // Check to see if standalone marker treatment looks OK
-        if(Buf(m_nPos + 2) == 0xFF)
+        // Check to see if standalone marker treatment looks OK: the next
+        // marker, or the end of the file, follows it. (This looked 2 bytes
+        // further on: before a COM it took the COM's marker, FF FE, for a
+        // length of 65534, and where it found a 0xFF there it went on from
+        // it, 2 bytes too far.) Otherwise it is taken to have a length, if
+        // that ends at a marker or the end of the file: any 2 bytes were (a
+        // length of 0 or 1 ends in its own bytes, so not at a marker). If
+        // not, what follows isn't a marker, which reading the next one
+        // reports.
+        bool bWithLength = false;
+
+        if((m_nPos < nPosEof) && (Buf(m_nPos) != 0xFF))
+        {
+          nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
+          const quint64 nPosAfter = quint64(m_nPos) + nLength;
+
+          bWithLength = (nPosAfter == nPosEof) || ((nPosAfter < nPosEof) && (Buf(static_cast<uint32_t>(nPosAfter)) == 0xFF));
+        }
+
+        if(!bWithLength)
         {
           // Looks like standalone
           m_pLog->AddLineWarn("  Ignoring standalone marker. Proceeding with decode.");
-          m_nPos += 2;
         }
         else
         {
           // Looks like marker with length
-
-          nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
           strTmp = QString("  Header length = %1").arg(nLength);
           m_pLog->AddLine(strTmp);
           m_pLog->AddLineWarn("  Skipping marker");
@@ -9842,6 +9887,19 @@ void CjfifDecode::DecodeEmbeddedThumb()
       {
         nCode = Buf(m_nPos++);
 
+        // A marker's length (all but SOI, EOI, TEM and RSTn have one), from
+        // the file, cut by its end: it was read past the end as 0 ("Length =
+        // 0"), and at the end of the largest file from its start (a length of
+        // 255, or a scan header's Ns of 216)
+        if((nCode != JFIF_SOI) && (nCode != JFIF_EOI) && (nCode != JFIF_TEM) &&
+           ((nCode < JFIF_RST0) || (nCode > JFIF_RST7)) && (quint64(m_nPos) + 2 > nPosEof))
+        {
+          m_pLog->AddLineErr("ERROR: EXIF thumbnail runs past the end of the file");
+          bErrorAny = true;
+          bDone = true;
+          continue;
+        }
+
         // (An RST outside a scan reports nothing, and isn't given a blank
         // line either: a thumbnail of RSTs added one for every 2 bytes.)
         if((nCode < JFIF_RST0) || (nCode > JFIF_RST7))
@@ -10009,10 +10067,40 @@ void CjfifDecode::DecodeEmbeddedThumb()
             break;
 
           case JFIF_SOS:       // SOS
+          {
             m_pLog->AddLine("  * Embedded Thumb Marker: SOS");
             m_pLog->AddLine("    Skipping scan data");
             bScanSkipDone = false;
-            nSkipCount = 0;
+
+            // The scan data starts after the scan header: its length, Ns, 2
+            // bytes for each of the Ns components and 3 after them, where the
+            // main image's scan starts (a length that says otherwise is
+            // passed over there too). The count included the header, and
+            // left out each RST's 0xFF and the fill bytes before it: it is
+            // now the bytes from there to the marker that ends the scan, or
+            // to where it stopped, but not past the thumbnail. (In 64 bits,
+            // and at most the end of the file, which the check below then
+            // reports.) More than 4 components stop it, as they stop the
+            // main image's decode. (Ns past the end of the file is 0, not
+            // read there.)
+            const uint32_t nNs = (quint64(m_nPos) + 2 < nPosEof) ? Buf(m_nPos + 2) : 0;
+
+            if(nNs > MAX_SOS_COMP_NS)
+            {
+              m_pLog->AddLineErr(QString("ERROR: Thumbnail scan header has %1 components, more than %2")
+                                   .arg(nNs).arg(MAX_SOS_COMP_NS));
+              bErrorAny = true;
+              bDone = true;
+              break;
+            }
+
+            m_nPos = static_cast<uint32_t>(qMin<quint64>(quint64(m_nPos) + 6 + 2 * quint64(nNs), nPosEof));
+            const uint32_t nPosScanData = m_nPos;
+
+            // Fill bytes before a stuffed 0xFF (see below): how many times,
+            // and where first
+            uint32_t nFillStuffed = 0;
+            uint32_t nPosFillStuffed = 0;
 
             while(!bScanSkipDone)
             {
@@ -10035,7 +10123,9 @@ void CjfifDecode::DecodeEmbeddedThumb()
               {
                 // Was it a restart marker? After any fill bytes (T.81
                 // B.1.1.2): the first ended the scan, and the marker after
-                // it was then read from the next 0xFF.
+                // it was then read from the next 0xFF. Or fill bytes before
+                // a stuffed 0xFF, data as in the main image's scan (they
+                // ended it at a "marker" 0xFF00)
                 uint32_t nPosCode = m_nPos + 1;
 
                 while((nPosCode < nPosEof) && (Buf(nPosCode) == 0xFF))
@@ -10043,8 +10133,14 @@ void CjfifDecode::DecodeEmbeddedThumb()
                   nPosCode++;
                 }
 
-                if((nPosCode < nPosEof) && (Buf(nPosCode) >= JFIF_RST0) && (Buf(nPosCode) <= JFIF_RST7))
+                if((nPosCode < nPosEof) &&
+                   (((Buf(nPosCode) >= JFIF_RST0) && (Buf(nPosCode) <= JFIF_RST7)) || (Buf(nPosCode) == 0x00)))
                 {
+                  if((Buf(nPosCode) == 0x00) && (nFillStuffed++ == 0))
+                  {
+                    nPosFillStuffed = m_nPos;
+                  }
+
                   m_nPos = nPosCode;
                 }
                 else
@@ -10056,13 +10152,26 @@ void CjfifDecode::DecodeEmbeddedThumb()
               else
               {
                 m_nPos++;
-                nSkipCount++;
               }
             }
 
+            const quint64 nPosCountEnd = qMin<quint64>(m_nPos, m_nImgExifThumbOffset + m_nImgExifThumbLen);
+
+            nSkipCount = (nPosCountEnd > nPosScanData) ? static_cast<uint32_t>(nPosCountEnd - nPosScanData) : 0;
             strTmp = QString("    Skipped %1 bytes").arg(nSkipCount);
             m_pLog->AddLine(strTmp);
+
+            if(nFillStuffed > 0)
+            {
+              m_pLog->AddLineWarn(QString("    WARNING: 0xFF fill bytes from 0x%1 before a stuffed 0xFF00 (%2 in the "
+                                          "scan data), which T.81 allows only before a marker: each run is read as one "
+                                          "0xFF of data")
+                                    .arg(nPosFillStuffed, 8, 16, QChar('0'))
+                                    .arg((nFillStuffed == 1) ? QString("1 run") : QString("%1 runs").arg(nFillStuffed)));
+            }
+
             break;
+          }
 
           case JFIF_EOI:
             m_pLog->AddLine("  * Embedded Thumb Marker: EOI");
@@ -10077,6 +10186,12 @@ void CjfifDecode::DecodeEmbeddedThumb()
           case JFIF_RST5:
           case JFIF_RST6:
           case JFIF_RST7:
+            break;
+
+          // No length (T.81 Table B.1): the next 2 bytes were taken for one
+          case JFIF_TEM:
+            GetMarkerName(nCode, strMarker);
+            m_pLog->AddLine(QString("  * Embedded Thumb Marker: %1").arg(strMarker));
             break;
 
           default:

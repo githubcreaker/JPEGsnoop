@@ -182,7 +182,8 @@ enum teRsvRet
   RSV_OK,                       // OK
   RSV_EOB,                      // End of Block
   RSV_UNDERFLOW,                // Ran out of data in buffer
-  RSV_RST_TERM                  // No huffman code found, but restart marker seen
+  RSV_RST_TERM,                 // No huffman code found, but restart marker seen
+  RSV_RST_CUT                   // A code's bits ran on past a restart marker
 };
 
 // Scan decode errors (in m_anScanBuffPtr_err[] buffer array)
@@ -460,6 +461,16 @@ private:
   QString GetScanBufPos(uint32_t pos, uint32_t align);
   QString GetMcuFilePos(uint32_t nMcuX, uint32_t nMcuY);
   void RecordMcuPos(uint32_t nPos, uint32_t nAlign);
+  void ReportRestartCut(uint32_t nPos, uint32_t nAlign, uint32_t nMcuX, uint32_t nMcuY);
+  void DecodeRestartNext(uint32_t nMcuX, uint32_t nMcuY);
+  void DecodeRestartShort(uint32_t nMcuX, uint32_t nMcuY);
+  void DecodeRestartLostBlock();
+  void RestartPassMarker();
+  uint32_t RestartSkipToMarker(uint32_t nPos, uint32_t &nMarkerPos);
+  QString RestartMarkerStr(uint32_t nMarker, uint32_t nMarkerPos) const;
+  QString RestartMcuRange(uint64_t nMcuFirst, uint64_t nMcuCount) const;
+  bool RestartSyncReportable() const;
+  void ReportRestartSync(const QString &strMsg);
   void ScanBuffPtrAdvance(uint32_t nBytes);
 
   void ConvertYCCtoRGB(uint32_t nMcuX, uint32_t nMcuY, PixelCc & sPix);
@@ -485,6 +496,8 @@ private:
   void DecodeRestartDcState();
   void DecodeRestartScanBuf(uint32_t nFilePos, bool bRestart);
   uint32_t BuffAddByte();
+  void ScanFillForget();
+  bool ScanFillRun(uint32_t nPos, uint32_t &nPosEnd);
   void BuffTopup();
   void ScanBuffConsume(uint32_t nNumBits);
   void ScanBuffAdd(uint32_t nNewByte, uint32_t nPtr);
@@ -692,13 +705,21 @@ private:
   bool m_bScanEofReported;      // Reported that the scan data ran past the end of the file?
 
   bool m_bRestartRead;          // Have we seen a restart marker?
-  // A run of 0xFF bytes in the scan data, [start, end), found not to end in an
-  // RSTn (see BuffAddByte()): so a long one is searched only once
-  uint32_t m_nScanFillStart;
-  uint32_t m_nScanFillEnd;
+  // The last runs of 0xFF bytes in the scan data, [start, end), and whether
+  // each is skipped (see ScanFillRun()): so a long one is searched only once
+  static const uint32_t SCAN_FILL_RUNS = 8;
+  uint32_t m_anScanFillStart[SCAN_FILL_RUNS];
+  uint32_t m_anScanFillEnd[SCAN_FILL_RUNS];
+  bool m_abScanFillSkipped[SCAN_FILL_RUNS];
+  uint32_t m_nScanFillNext;     // The one replaced next
   uint32_t m_nRestartLastInd;   // Last Restart marker read (0..7)
   uint32_t m_nRestartExpectInd; // Next Restart marker expected (0..7)
   uint32_t m_nRestartMcusLeft;  // How many MCUs until next RST?
+  uint32_t m_nRestartWantInd;   // The RST that starts the next restart interval (0..7): libjpeg's next_restart_num
+  bool m_bRestartLost;          // The rest of this restart interval isn't decoded: its data ended early, at an
+                                // RST, or the RST before it is a later interval's (DecodeRestartNext())
+  bool m_bRestartNoMore;        // No RST after a restart interval, but another marker or the end of the file:
+                                // no MCU after it is decoded
 
   bool m_bSkipDone;
   uint32_t m_nSkipCount;
@@ -707,6 +728,10 @@ private:
   bool m_bVerbose;
   uint32_t m_nWarnYccClipNum;
   uint32_t m_nWarnBadScanNum;
+  uint32_t m_nWarnRstIndexNum;  // "Expected RST marker index" errors reported (their own limit)
+  uint32_t m_nWarnRstCutNum;    // Codes cut short by an RST reported (their own limit)
+  uint32_t m_nWarnRstShortNum;  // Restart intervals ended early reported (their own limit)
+  uint32_t m_nWarnRstSyncNum;   // RSTs missing, late or out of order reported (their own limit)
 
   uint32_t m_nScanBitsUsed1;
   uint32_t m_nScanBitsUsed2;

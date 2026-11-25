@@ -4452,10 +4452,563 @@ adding 1 to a number in it fails the case.
   `FF D8 FF D0 FF FE 00 04 61 62 FF D9`, "Header length = 65534" and Early EOF, not the
   COM (inherited).
 - **Fill bytes before a stuffed 0xFF00** in scan data (`FF FF 00`, which isn't valid: a
-  fill byte comes before a marker): the decoder takes it for data, as libjpeg does, but
-  the marker list says "WARNING: Unknown marker [0xFF00]" and stops, so no EOI is found.
+  fill byte comes before a marker): the decoder takes it for data, but the marker list
+  says "WARNING: Unknown marker [0xFF00]" and stops, so no EOI is found. (This said the
+  decoder reads it as libjpeg does. It doesn't: it took each 0xFF for data, where
+  libjpeg documents one 0xFF for the run.)
 - **The thumbnail's "Skipped N bytes"** counts from the SOS's length, its header included,
   and leaves out the 0xFF of each RST (inherited).
+
+(All three fixed since: see "A stray RST, fill bytes before a stuffed 0xFF, and the
+thumbnail's count".)
+
+### A stray RST, fill bytes before a stuffed 0xFF, and the thumbnail's count
+
+The three things the section before found and left are fixed, with the rest of their
+class that six reviews of the changes found. All are inherited from Windows (by reading
+its code).
+
+**An RST outside a scan, with Relaxed Parsing:**
+- **It is passed over when a marker follows it.** That was looked for 2 bytes further on,
+  past the byte after the RST: before a COM, the COM's marker (FF FE) was taken for the
+  RST's length, 65534, so neither the COM nor the EOI was read ("Early EOF"); where a
+  0xFF was found there, the parsing went on from it, 2 bytes too far, so a second RST in
+  a row was passed over unseen. Now the byte right after the RST is checked, and one
+  that ends the file is passed over too (its "length" was read past the end).
+- **Otherwise it is taken to have a length only if that ends at a marker or the end of
+  the file.** Any 2 bytes were taken for one (0x1234 ran past the end of the file). If
+  not, the bytes after it aren't a marker, which reading the next one reports ("Expected
+  marker 0xFF, got 0x12"). Two such bytes used to be passed over, by the 2 bytes too far.
+- Without Relaxed Parsing it still stops the decode.
+
+**TEM** (0xFF01) has no length (T.81 Table B.1, as RSTn, SOI and EOI), but its next 2
+bytes were read as one, with or without Relaxed Parsing: before a COM it took a length of
+65534, as the RST did. Likewise in the EXIF thumbnail's marker list.
+
+**Fill bytes before a stuffed 0xFF** in scan data (`FF FF 00`), which T.81 doesn't allow,
+as a fill byte comes before a marker:
+- **The report's marker list** took them for a marker 0xFF00 and stopped ("WARNING:
+  Unknown marker [0xFF00]"), so no EOI was found.
+- **The decoder** took each 0xFF for data, 8 more 1 bits for each fill byte, so the MCUs
+  after it were decoded wrongly.
+- **The EXIF thumbnail's marker list** took them for its marker "(0xFF00)".
+
+The run is now one 0xFF of data in all three, as IJG libjpeg documents ("multiple FF's
+followed by a 0 as meaning a single FF data byte") and libjpeg-turbo's djpeg 3.2.1 read
+7 of 10 tried (its fast path reads the others differently), and the report says so once
+for the main image and once for the thumbnail: "WARNING: 0xFF fill bytes from 0x000000a2
+before a stuffed 0xFF00 (2 runs in the scan data), which T.81 allows only before a marker:
+each run is read as one 0xFF of data". (The section before said the decoder read it as
+libjpeg does; it didn't.)
+
+**Detailed Decode's "Data=" bytes** for a code are now the bytes the decoder read: they
+showed fill bytes, before a stuffed 0xFF (in the code's bits: they contradicted its value)
+or before an RST (after them), and past the end of a file of 4 GiB - 1 bytes they came
+from its start (they are 0, as the decoder reads them).
+
+**A run of 0xFF is searched to its end once.** The decoder and Detailed Decode remember
+the last 8 runs, with whether each is skipped. Each version with less, made by these
+changes and found by the reviews, was slow on crafted files: a run of 1 MB the decoder
+reads through took over a minute (the section before); one before an EOI took 12 to 31 s
+for 2 MB, as the byte after it, read again for each 0xFF, made the file's window load
+twice each time (HEAD: 0.3 s); and Detailed Decode searched a run again for each code
+near it (16 MB before an RST: 1.9 s, HEAD 0.4 s). On the files measured, each is now
+within 0.1 s of HEAD where HEAD reads them to the end (it stops at fill bytes before a
+stuffed 0xFF).
+
+**The thumbnail's "Skipped N bytes"** counted from the SOS's length, so its header too,
+and left out each RST's 0xFF and the fill bytes before it. It is now the scan data's
+bytes: from the end of the header, where the main image's scan starts (6 + 2 Ns bytes from
+its length, whatever the length says; more than 4 components stop it, as they stop the
+main image's decode), to the marker that ends the scan, or to where the end of the file or
+the thumbnail's length stopped it (not the byte after the thumbnail, which it took). Fill
+bytes before that marker are the marker's. A marker's length cut by the end of the file
+was read past it as 0 ("Length = 0"), and at the end of a file of 4 GiB - 1 bytes from its
+start (a scan header of 216 components): it is "ERROR: EXIF thumbnail runs past the end of
+the file".
+
+**Tests:** 45 new `MR` cases (1,851 in all), and the 2 `ML` thumbnail counts changed. On
+the code before, 36 of the 45 and the 2 fail; the other 9 check what was right (an RST
+followed by a length, also one ending at the end of the file, still skipped with it; a
+2 MB run before an EOI decoded in time, and shown byte by byte; a stuffed 0xFF without
+fill bytes not warned about; a scan header whose length is wrong; the errors for a
+thumbnail longer than its length and for a scan header cut by the end of the file; and
+the end of a file of 4 GiB - 1 bytes in a scan header). The `ML` cases with fill bytes
+before an RST now also check that it isn't warned about. Each of 28 switches, put in a
+scratch copy, fails its own cases when on and passes when off: one for each fix, and one
+each for the bounds at the end of the file and 2^32, the runs remembered (and forgotten
+at the next decode), and the display's bytes. How many runs are remembered isn't tested:
+it changes the time by a constant factor. In each passing output, deleting the matched
+line or adding 1 to a number in it fails the case.
+
+**Checks:**
+- **Only these reports change.** Old against new:
+  - **Case files:** of the 457 under 64 MB, 433 are unchanged: the others are 8 whose
+    thumbnail's count changes (`h5_thumb_sos`, `h5_thumb_sos_eof`, `h5_thumb_sos_len`,
+    `r13_be_thumb` and 4 `ml_thumb`) and 16 new ones. With Relaxed Parsing, also the 5
+    new ones with a stray RST.
+  - **Made files:** 978 for this round: 81 with 1 or 2 RSTs (0 to 2 fill bytes before)
+    before each header segment, at the end of the file, before the EOI and followed by
+    "lengths" of 0 to 65535; 607 with 1 to 4 fill bytes before every, the first or the
+    last stuffed 0xFF of Pillow's and the test generator's scans, whole and cut; and
+    thumbnails with scan headers of 1 and 3 components, RSTs and fill bytes, and `FF FF
+    00`, whole and cut after each byte from the SOS on.
+    - **With Relaxed Parsing,** 75 of the 81 change, none without it. Each of the 54
+      with RSTs among the header segments now gives the report of the file without them
+      but for the RSTs' own lines (27 didn't before); the 6 that end in an RST, or with
+      one byte after it, pass over it; 12 followed by a "length" of 0, 1, 2 or 6 bytes
+      that doesn't end at a marker report those bytes; and 3 followed by FF FF and two
+      letters take the FF FF for fill bytes before a marker 0xFF61 ("a"), where it was a
+      length of 65535 that ran past the end of the file; both stop there.
+    - **Each of the 607** decodes as the same file without the fill bytes (the preview's
+      MD5, the errors, and Detailed Decode's line for every code, its bytes shown
+      included), and warns once with their number. So do the 69 made in the section
+      before with 1 to 8 fill bytes before their RSTs, without a warning.
+  - **The last three rounds' made files:** of 5,573, 141 change: 104 a thumbnail's count,
+    36 a thumbnail marker's length cut by the end of the file (now the end-of-file error
+    alone), and one `FF FF 00` before the EOI, which now reaches it.
+  - **Every thumbnail count** in all of these (873) is the one worked out from the file's
+    bytes, by a separate walk of the thumbnail.
+- **The affected groups pass:** 957 cases: all those that don't open the window
+  (decoding, export, batches, the command line, file facts, settings), with the `MR`,
+  `ML`, `LM` (Lookup MCU Offset, which open it), `OW`, `PN`, `RP`, `AV`, `H4`, `H5`, `WR`,
+  `RA_thumb`, `R13`, `NS` and `MP` cases; and the `MR` and `ML` ones (74) added after.
+- **With ASan/UBSan,** the `MR`, `ML`, `LM_rst`, `OW`, `PN`, `RP`, `RA`, `PE`, `PSD`,
+  `ok_`, `H`, `C1`–`C5`, `F`, `AV`, `WR_thumb`, `D`, `MP`, `R13`–`R18` and `NS` cases
+  pass (543, and the `MR` and `ML` ones again after).
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 235 things in the two
+  files as before, and catches a bug planted at each place changed.
+- **No new compiler warnings** (202 in the two files before and after).
+- **Six independent reviews** (agents given only the diff; the later ones of what was
+  reworked after the one before). Between them they found: junk after a stray RST taken
+  for a length; TEM's length; Detailed Decode's bytes across a run, and past 2^32; the
+  thumbnail's header taken from its length, its count past its end, a field read from
+  the file's start at 2^32, and Ns over 4; the warning's count and wording; and the four
+  slow cases above. The last found no bug; its suggested cases are added.
+- **Not checked:** a camera's or an editor's file with any of these.
+
+**Found, not fixed:**
+- **Two RSTs in a row** (an empty restart interval) make Detailed Decode report a code at
+  [0x00000000.0] showing the file's first bytes: after the first restart, the buffer
+  stops at the second RST, so the code's position is never set (inherited; the scan's
+  decode and the preview are right). (Fixed since, and the decode was wrong too: see the
+  next section.)
+
+### Two RSTs in a row
+
+The section before left one thing found, and it was worse than it said: the decode was
+wrong too, not only Detailed Decode. Inherited from Windows (by reading its code).
+
+**An RST right after another** in scan data (an empty restart interval, which T.81
+doesn't allow: each interval but the last holds Ri MCUs). After the first restart the
+decoder found the second before any data, and went on with no code read:
+- **The block took that for its first coefficient,** a 0, so its real DC was decoded as
+  AC coefficient 1: the block was grey (128; with the AC shown, a cosine), and the rest of
+  its interval, whose DCs are differences from it, was off by as much (MCU [3,0] of
+  `er_interval.jpg`: 165 for 151).
+- **Detailed Decode showed that code at [0x00000000.0],** with the file's first bytes, and
+  **Tools > Lookup MCU Offset** gave the MCU's offset as 0.
+- **Each RST more in a row made another such code:** 1 MB of them (2^19) filled that
+  block and each block after it with 64, so the scan's decode ended without reaching the
+  EOI, 449 RSTs in ("Next position in scan buffer: Offset 0x00000000.0").
+- A debug build stopped there, at a `Q_ASSERT` that two RSTs never come in a row (by its
+  code).
+
+Now each RST is passed over in turn until a code is read, in the decoder and in Detailed
+Decode, so the file decodes as the same file without the extra RSTs. That is how
+JPEGsnoop already takes an RST that comes early (a short interval): it decodes on from
+the RST, with no message. libjpeg-turbo's djpeg 3.2.1 instead keeps each interval's MCUs
+where Ri puts them: it warns ("Corrupt JPEG data: premature end of data segment"),
+decodes the empty interval's MCU as grey, and the rest one interval later. Which is
+right depends on whether an interval's data was lost or an RST was added.
+
+**An RST with the wrong index is now reported up to the scan's error limit**
+(`ErrMaxDecodeScan`, 20 by default), as its other errors are, on a count of its own (on
+theirs, 20 of these hid the scan's later messages: its EOI, and the error for a file cut
+short). It had no limit, and with the loop above a run of RSTs is read to its end: 1 MB
+of RST0s, each with the wrong index, logged 524,288 errors in 88 s. (The code before
+stopped after 449, when the codes it made had filled the image. A larger image already
+logged them all: 2^15 in 7.5 s.) It now takes 0.3 s, as before.
+
+**Tests:** 25 new `ER` cases (1,876 in all). On the code before, 19 fail; the other 6
+check what was right: the file without the extra RST, one RST at the start of the scan
+data, one inside an MCU, and three that its errors without a limit met (the 20th, a
+second file's after a first with 24, and a cut file's after 20). Their values are worked
+out from the generator's bytes:
+- the code's position after the RSTs and its DC, and the pixel's level, with and without
+  the AC shown;
+- three in a row; fill bytes before the second; two at the start of the scan data; a
+  stuffed 0xFF between the two (bits that never make a code); two between a block's DC
+  and its EOB;
+- two inside an MCU, before its Cb block, in an interval of 2, where the restart resets
+  Cb's predictor (levels far from 128; the RGB worked out as JFIF converts it);
+- an interval of 2, whose second MCU's DC follows the first's;
+- a Pillow 4:2:0 file with AC data and three in a row, whose image is the same as without
+  them; and Lookup MCU Offset;
+- 1 MB of RSTs in a row, in order and all RST0, each decoded in 5 s; of the latter's
+  errors, the 20th and not the 21st, and the EOI still reported; the error for a file cut
+  after 20 still reported; and the count started again for a second file.
+
+The test generator's `dc_only_jpeg()` can now put an RST inside an MCU; the files it made
+before are byte for byte the same. Each of 6 switches, put in a scratch copy, fails its
+own cases when on and passes when off: each decoder's loop run once (the `if` it was),
+and the error without a limit, on the scan's count, with `<=` for `<`, and with its count
+not started again at each decode. In each passing output, deleting the matched line or
+adding 1 to a number in what it checks fails the case.
+
+**Checks:**
+- **Made files:** 261, from 8: 5 from the test generator (grey and colour; 4:4:4, 4:2:0
+  and 2:1; intervals of 1 to 3 MCUs; one with fill bytes before its RSTs) and Pillow's 3
+  with RSTs, with AC data. Each has 1 to 3 RSTs more, each after 0, 1 or 3 fill bytes, at
+  the start of the scan data and after its first, middle and last RST, all renumbered in
+  order. Each decodes as its file without them: the preview's MD5 with and without the
+  AC, the errors, the RSTs counted (that many more) and Detailed Decode's every code
+  (32,634), at its position moved by the bytes put before it. On the code before, 237
+  didn't; the 24 that did have only one RST at the start of the scan, none in a row.
+- **Only these reports change.** Old against new, with and without the AC shown (and the
+  preview's MD5): of the 458 case files under 64 MB, none (two of 89 megapixels, which
+  take 20 to 30 s, timed out under the load, and are the same when given the time); of
+  the 6,551 made in the rounds before, none; of the 270 made here, the 237 with RSTs in a
+  row; and of the first 9 `ER` files, the 7 with RSTs in a row. Of the 7,291 files, only
+  4 have an RST with the wrong index: the 3 made before are the same, and
+  `er_run_index.jpg` reports 20. (`er_index24.jpg` too, of 24; `er_index_cut.jpg`'s 20
+  are followed by "Only reported first 20 instances of this message...".)
+- **Last round's checks still hold:** the 607 files with fill bytes before a stuffed
+  0xFF, and the 69 with fill bytes before their RSTs, decode as without them, Detailed
+  Decode included.
+- **Speed:** each RST in a row costs about 15 ns: 16 MB of them take 0.4 s of CPU, 0.12
+  s more than the code before (0.27 s more with Detailed Decode), which took 64 for each
+  block and never read the rest.
+- **The affected groups pass:** 941 cases: all those that don't open the window, with the
+  `LM`, `ML`, `MR` and `ER` cases.
+- **With ASan/UBSan,** the `ER`, `ML`, `MR`, `LM_rst`, `D`, `ok_`, `H`, `C1`–`C5`, `F`,
+  `R13`–`R18`, `NS`, `MP`, `RA` and `WR` cases pass with the loop (361), and the `ER`,
+  `LM_rst`, `D`, `H`, `C1`–`C5`, `R13`–`R18`, `ML_fill`, `MR_stuffed` and `MR_fill` ones
+  (153) with the final code.
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 73 things in
+  `ImgDecode.cpp` as before, and catches a bug planted in each loop and in the error's
+  limit and count.
+- **No new compiler warnings.**
+- **Two fresh reviews** (agents given only the diff; the second of what changed after the
+  first) found no bug in the loop. The first tried RSTs in a row inside an MCU and between
+  a DC and its EOB; followed by the end of the file, an EOI, fill bytes, a wrong index or
+  bits that never make a code; and at the end of a file of 4 GiB - 1 bytes. It found the
+  error without a limit, and cases missing (inside an MCU; bits between the RSTs). The
+  second found that on the scan's count the error hid its later messages, and cases
+  missing (a `<=` for `<`; between a DC and its EOB; a restart in an MCU that resets a
+  predictor). All fixed above.
+- **Not checked:** a camera's or an editor's file with RSTs in a row.
+
+**Found, not fixed (all inherited):**
+- **A code cut by its interval's RST stops the scan.** In an interval that ends inside a
+  code (a single byte FE: a DC code whose 10 value bits the RST cuts), the decoder takes
+  more bits than its buffer holds, so the restart is never seen: each MCU after it is
+  grey, 2 of the 7 RSTs are decoded, and the errors are at 0x00000000.2. libjpeg-turbo's
+  djpeg loses only that MCU. (Fixed since: see the next section.)
+- **A short or empty restart interval isn't reported:** JPEGsnoop decodes on from an RST
+  that comes before Ri MCUs, with no message, where libjpeg warns. (Fixed since: see
+  "Restart intervals where the DRI puts them".)
+- **A restart inside an MCU zeroes the DC the status bar shows for its luminance:** over
+  MCU [1,0] of `er_mid_one.jpg` it shows "YCC DC=[00000,00416,-0384]", where Y is -144.
+  The restart clears the MCU's DCs kept for it after its Y block was decoded. Its pixels
+  are right. (Fixed since for files with a DRI: see "Restart intervals where the DRI puts
+  them".)
+- **A negative "Max # errors" in Options is no limit:** -1 is taken, and read as
+  4,294,967,295 (by reading the code).
+
+### A code cut short by an RST
+
+The first of the section before's four, inherited from Windows (by reading its code).
+
+**A restart interval whose data ends inside a code's value bits** (its data was lost or
+damaged: an encoder ends each interval with whole codes, then 1 bits to the byte). The
+decoder took the code whole, with zeros for the bits past the RST, so it took more bits
+than its buffer held and never handled the restart:
+- **The scan ended there,** with "Overread scan segment (after bitstring)": each MCU after
+  it was grey (128), and only the RSTs before it were counted (2 of 7 in a file whose
+  second interval was cut to one byte, FE: a DC code whose 10 value bits the RST cuts).
+- **Its errors were at 0x00000000.2,** and so was "Next position in scan buffer".
+  Detailed Decode stopped there too, and **Tools > Lookup MCU Offset** gave the cut code's
+  offset for its MCU.
+
+Now the code is dropped, as the bits before an RST that make no code already were, and
+read again after the RST, in the decoder and in Detailed Decode. An error says where it
+was: "\*\*\* ERROR: Huffman code @ 0x000000a0.0 in MCU(1,0) cut short by RST1 @
+0x000000a1.0", reported up to the scan's error limit, as its other errors are, but on a
+count of its own, as the RST index error's is (on theirs, 20 of these hid the error for a
+file cut short after them; found by the review). Nor is the code counted in the code-length
+histogram. So an interval that holds only a cut code is passed over: the file decodes as
+without it, as with an empty interval (the section before). A cut after an MCU's first code
+goes on as any restart there does: inside a block (an AC code), the block goes on after the
+RST, and in a later block (Cb, say), that block is read from there.
+
+This is how JPEGsnoop takes any short interval: it decodes on from the RST. libjpeg-turbo's
+djpeg 3.2.1 instead decodes the cut code with zeros for its missing bits, warns ("Corrupt
+JPEG data: premature end of data segment") and keeps each interval's MCUs where Ri puts
+them. So for the file above, whose second interval was cut short, djpeg loses only that
+MCU (it is 0), where JPEGsnoop now shows each MCU after it one MCU early, and the last MCU,
+left without data, with errors. For an interval put in (the tests' files), JPEGsnoop's
+image is the file's without it, and djpeg's is one MCU late from there.
+
+**Tests:** 31 new `RC` cases (1,907 in all). On the code before, 30 fail; the other checks
+that a code whose value bits end right at the RST is decoded, not dropped. Their values are
+worked out from the generator's bytes, and from Pillow's tables read from its file:
+- the error and its position, in the decoder and in Detailed Decode; the code's position
+  after the RST and its level; the pixel, with and without the AC shown; the image's last
+  MCU, and the RSTs counted (all 8; 2 were); the code histogram; and Lookup MCU Offset;
+- the scan's first code cut at a byte, with none of its value bits; three in a row, each
+  error where its code starts; with an empty interval before it and after it; Cb's DC cut
+  inside an MCU; an AC code cut, in Pillow's `d_restart.jpg`; and one whose RST is read
+  only after its code is (a 16-bit code at bit 7 of 4 bytes, the buffer's fill, with a
+  stuffed 0xFF in it), when the buffer is filled again for its value bits;
+- 768 KB of them (2^18), passed over in 5 s: the error's 20th and not its 21st; the error
+  for a file cut short after 20 of them; theirs after the scan's other errors reach their
+  limit, and after an RST index error each; and their count started again for a second
+  file.
+
+Each of 15 switches, put in a scratch copy, fails its own cases when on and passes when
+off: the check off, with `>=` for `>`, and made before the buffer is filled again; the
+histogram not put back; each decoder's loop without the cut, and without its report; the
+report at the code's end; and its limit with `<=` for `<`, with no count, on the scan's
+count or the RST index error's, also held by the scan's, and not started again at each
+decode. In each passing output, deleting the matched line or adding 1 to a number in what
+it checks fails the case.
+
+**Checks:**
+- **Made files:** 696, from the section before's 8 (5 from the test generator and Pillow's
+  3 with RSTs), each with 1 to 3 intervals put in, each of a DC code cut short (for 9, 10,
+  7 and 11, with 1, 0, 3 and 7 of their value bits: the last with a stuffed 0xFF) and 0 or
+  2 fill bytes before its RST, at the start of the scan data and after its first, middle
+  and last RST. Each decodes as its file without them: the preview's MD5 with and without
+  the AC, the errors (and one more for each cut code, at its start, in the decoder and in
+  Detailed Decode), the RSTs counted, the code histogram and Detailed Decode's every code
+  (87,024), at its position moved by the bytes put before it. On the code before, none did.
+- **Only these reports change.** Old against new, with and without the AC shown (and the
+  preview's MD5): of the 483 case files under 64 MB, the 7 with a cut code (one of 89
+  megapixels timed out under the load, and is the same when given the time); of the 6,821
+  made in the rounds before, none; and of the 696 made here, all. The first fix, on the
+  scan's count, against the last: only the 6 files where that count hid a line differ, each
+  by that line (the EOI's, the error for a file cut short, or a cut after other errors).
+- **Speed:** the 768 KB of cut intervals take 0.24 s of CPU (0.27 s with Detailed Decode).
+  A 5 MB file without any takes as long as before (1.45 s against 1.43 s, within its
+  spread), and so do 1 MB of RSTs in a row with Detailed Decode. (The review's 65,536 cut
+  intervals of 64 fill bytes each, 4.3 MB, take 0.3 s.)
+- **The affected groups pass:** 972 cases: the section before's 941 and the `RC` ones.
+- **With ASan/UBSan,** the section before's 153 cases and the `RC` ones pass (184).
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 73 things in
+  `ImgDecode.cpp` as before, and catches a bug planted in the check, in the loop's report
+  and in the report.
+- **No new compiler warnings** (143 in `ImgDecode.cpp`, as before).
+- **Two fresh reviews** (agents given only the diff; the second of what changed after the
+  first) found no bug in the change. The first tried stuffed 0xFF in the cut code and its
+  value bits, fill bytes before the RST, 12-bit data, a cut before the end of the file or
+  an EOI, a code whose RST is read at the second fill, valid files (each decodes as
+  before), and long runs; it found the scan's count shared (20 cuts hid the error for a
+  file cut short), cases missing (the second fill; a stuffed 0xFF; Cb; each of three
+  errors), and the two inherited items below. The second found cases missing (the scan's
+  other errors first; RST index errors with the cuts) and a comment naming the wrong
+  coefficient. All fixed above.
+
+**Found, not fixed (all inherited):**
+- **After a cut past an MCU's first code, a colour image is read out of place:** the next
+  interval starts with an MCU's first block, but is read as the cut block's next
+  coefficients, or as the MCU's next component, and so on to the end (each restart after
+  it takes the same rule). By the review: with Cb's DC cut in a 3-component file, the last
+  pixel is 193,0,106, where djpeg gives 51,181,255. Before, the rest was grey. JPEGsnoop
+  does the same after any restart inside an MCU: restarting at the next MCU (or where Ri
+  puts it, as libjpeg does) would change that rule for all of them. (Fixed since: see the
+  next section.)
+- **Bits before an RST that make no code are dropped with no message:** a code the RST
+  cuts within its Huffman bits, and bits that no code of the table starts. With a table of
+  few codes, each interval whose data starts with none is dropped, one after another: after
+  a block's DC, with the test generator's AC table (its EOB alone), every interval to the
+  last (`rc_fit.jpg`). Before the section before's loop, each made a code of 0 instead.
+  (Fixed since for files with a DRI: see the next section.)
+- **A marker other than an RST in the scan data ends it for Lookup MCU Offset:** decoding
+  goes on past it, but Lookup gives "Not decoded" for the MCUs after it (by the review: an
+  FF C8 after an RST).
+- The section before's other three still stand: a short or empty interval isn't reported,
+  the status bar's luminance DC after a restart inside an MCU, and a negative "Max #
+  errors".
+
+### Restart intervals where the DRI puts them
+
+The first of the section before's items, done as libjpeg does it.
+
+A restart interval (T.81 B.2.4.4) holds the DRI's number of MCUs, and an RST ends each but
+the last. **JPEGsnoop decoded on from wherever it found an RST,** going on with the block or
+MCU it was in. So when an interval's data was damaged:
+- **Data lost from an interval** (a short interval): the rest of the image was decoded one
+  or more MCUs early, and its last MCUs had no data.
+- **An RST inside an MCU:** the next interval's data, which starts with an MCU's first
+  block, was read as the cut block's next coefficients, or as the MCU's next component, to
+  the end of the image (in a colour file whose Cb DC was cut, the last pixel was 193,0,106,
+  where djpeg gives 51,181,255).
+- **Data left after an interval's last MCU** (a long interval, or an RST lost): it was
+  decoded as the next MCUs, so the rest of the image was late, and an interval after a lost
+  RST kept its DC predictor. "Restart marker not detected" was printed for each such
+  interval, with no limit.
+- **An empty interval, or one of a cut code,** was passed over (the two sections before),
+  and bits before an RST that made no code were dropped with no message.
+
+Now each interval's data is decoded at the MCUs the DRI sets, as libjpeg-turbo 3.2.1 does
+(jdhuff.c `process_restart()`, jdmarker.c `read_restart_marker()` and
+`jpeg_resync_to_restart()`):
+- **An RST before the interval's last MCU** ends its data: the rest of the interval isn't
+  decoded (it is left grey, DC 0 and no AC, as libjpeg leaves it), and the data after the
+  RST is the next interval's. A block whose DC wasn't read is grey too, and a block cut in
+  its AC keeps what was read. "\*\*\* ERROR: Restart interval ends early, at RST1 @
+  0x000000a0.0 in MCU(1,0): the rest of it, to MCU(1,0), not decoded"; a code the RST cuts
+  short is still reported where it starts.
+- **Data after an interval's last MCU** (a byte or more before its RST, or no RST within
+  the scan buffer's reach) is skipped to the next marker, searched from where the MCU's data
+  ends, as libjpeg's `next_marker()` skips it: stuffed 0xFF and fill bytes are data, and
+  markers below SOF0 (TEM, 0xFF01, ...) are passed over. "Expect Restart interval elapsed @
+  0x000000a2.1" then "ERROR: Restart marker not detected: data skipped to RST1 @
+  0x000000a5.0".
+- **The RST found is taken by its number,** counted from RST0 for the scan's first
+  interval, as `jpeg_resync_to_restart()` takes it: the one wanted is passed over; one of
+  the next two is left for a later interval, the RSTs before it taken as lost with their
+  intervals' data, so this interval isn't decoded; one of the two before is skipped, with
+  the data after it, to the next marker, which is taken likewise; any other is taken for
+  the one wanted. Each is reported: "\*\*\* ERROR: Expected RST1 before MCU(2,0), found
+  RST2 @ 0x000000a5.0: taken as a later one, so MCU(2,0) not decoded", "..., an earlier
+  one: skipped to RST2 @ ...", ": taken for it".
+- **A marker that isn't an RST (from SOF0 on), or the end of the file,** where an RST
+  should be: no MCU from there on is decoded, as libjpeg decodes none ("\*\*\* ERROR: No
+  RST found before MCU(1,0), but marker 0xFFd9 @ 0x000000af.0: no MCU from there on
+  decoded"). So a file with a DRI but no RSTs now shows its first interval only, as djpeg
+  does (it was decoded whole).
+- **Each message is reported up to the scan's error limit,** on a count of its own (one
+  for intervals that end early, one for the others), as the RST index error's and the cut
+  code's are, so as not to hide the scan's other errors; the counts start again at each
+  decode.
+- **Detailed Decode** shows where an interval's data ends ("RST1 @ 0x000000a0.0: the data
+  of its restart interval ends here") and each block not decoded ("Not decoded: the data
+  of its restart interval ended before it"). **Tools > Lookup MCU Offset** gives "Not
+  decoded" for an MCU not decoded (it gave the position of the data that followed, or 0).
+- **The image window's status bar** over an MCU whose interval ended inside it shows its
+  decoded blocks' DCs (a restart inside the MCU cleared them: the "Two RSTs in a row"
+  section's item).
+- **"Expected RST marker index"** (each RST checked against the one read before it) is
+  reported only without a DRI. With one, an RST out of order is reported where the
+  restart rule takes it, by the interval count; reported where it was read too, each RST
+  skipped was reported twice, and the right RST after a wrong one was called out of order.
+- **A marker below SOF0 the scan buffer reads** no longer ends the scan's data for Lookup
+  MCU Offset when there is a DRI, as the restart rule passes over it.
+- **Data that runs out at the end of the file in a row** ends the decode there, as a
+  missing RST does: the rest of the row was skipped without counting its MCUs, so the
+  restart interval's count was off after it, and the first MCU of each row after it was
+  decoded from zeros.
+- **"Next position in scan buffer"** after a scan that ends right after an RST is that
+  RST's next byte; it was 0x00000000.0 (the buffer's position before any byte was read).
+- **Without a DRI,** an RST is passed over where it is found, as before.
+
+This replaces the two sections before's rule for an empty interval and for one holding a cut
+code (each was passed over, so the file decoded as without it): their MCUs are now not
+decoded, and the data after them is one interval later, as djpeg shows it.
+
+What still differs from djpeg 3.2.1:
+- **The MCU where an interval's data ends:** djpeg decodes the rest of it, the cut code
+  included, from zero bits (with "Corrupt JPEG data: premature end of data segment"), so
+  its blocks are whatever those bits make (0 and 64 in the tests' files); JPEGsnoop leaves
+  them grey. So does the first MCU of an interval taken as lost at its start.
+- **A marker that isn't an RST inside an interval's data** is still decoded through
+  (inherited, below): djpeg stops there, and leaves the rest grey.
+
+**Tests:** 83 new `RI` cases, and the `ER` and `RC` sections reworked (45 of their cases
+changed, 35 added, 1 left out): 173 in these three sections, 2,024 in all. On the code
+before, 136 of the 173 fail; the 37 that pass check what didn't change (the cut code's
+error and its limits, the RST index error without a DRI, valid files, files without a DRI
+or with one of 0, three reference files, and Detailed Decode adding only its own lines).
+Their values are worked out from the generator's bytes:
+- an empty interval (one, two, with fill bytes before its RST, two at the scan's start,
+  bits that make no code, in an interval of 2 MCUs, and 2^19 in a row); an RST inside an
+  MCU (the status bar too); the MCU's offset; and 2^19 earlier RSTs skipped in time;
+- a cut code (at the scan's start, three in a row, with empty intervals around it, Cb's
+  DC, Pillow's AC codes, the code-length histogram); for Pillow's 4:2:0 `d_restart.jpg`
+  with an empty interval or an AC code cut, the image's MD5 against a reference file made
+  from its bytes with that MCU coded as decoded (grey blocks; the kept coefficients) and the
+  intervals moved;
+- data after an interval's last MCU (2 bytes, 2 MB, stuffed 0xFF, fill bytes and a TEM in
+  it, and 1 MB runs of 0xFF ending in 0x00, 0x01, the RST, 0xC4 and the EOI, in time); an
+  RST left out; numbered one or two after, or before, or three to five after, and RST
+  numbers counted round past RST7; no RSTs, with an EOI or without; a non-RST marker or a
+  TEM where the RST should be (and the MCU offsets after a TEM); an interval of 4 MCUs cut
+  after its second; a colour interval cut after its Y; an interval larger than the image;
+  an RST after the last MCU; an EOI whose 0xFF the last MCU took bits of; a scan ending at
+  the end of a file of 4 GiB - 1 bytes; data running out in a row; the next position after
+  a scan ending in an empty interval; and files without a DRI or with one of 0 (as before);
+- each message's 20th and not its 21st; the error for a file cut short after 24 of each;
+  theirs after the scan's own count is used up; the counts started again for a second file.
+
+Each of 30 switches, put in a scratch copy, fails its own cases when on and passes when off
+(each decoder's early end, its grey blocks and its grey DC; the interval's start; the
+skip, searched from the buffer's position or the byte after the next bit's, with stuffed
+0xFF, TEM or runs of 0xFF taken for markers; the number rule, and each of its three
+outcomes; the end at a non-RST marker, and its not being remembered; the position before a
+byte is read; each count on the scan's, and not started again; the RST the buffer stopped
+at read again; Detailed Decode's line; and each fix after the review), but one: a non-RST
+marker the buffer had read past, read again, is only reported twice, which no single-line
+check sees (checked by hand). In each passing output, deleting the matched line or adding 1
+to a number in what it checks fails the case, but in what it leaves unchecked (a pixel's
+tolerance of 1; Detailed Decode's data bytes).
+
+**Checks:**
+- **The same image as djpeg 3.2.1** (`-dct float -nosmooth`, each block's centre within 4):
+  the 696 made files of the section before and their 8 bases (10,512 blocks), every file
+  with a DRI among the tests' (1,540 blocks) and every one whose report changed below
+  (15,801 more). The only blocks that differ are in the MCUs djpeg decodes from zero bits
+  (where an interval's data ends, or the first of one taken as lost at its start), in the
+  MCU where a file cut short ends (as before), in an MCU with a bad Huffman code, and inside
+  an interval holding a TEM, which JPEGsnoop decodes through.
+- **Only these reports change,** old against new (before the review's fixes, which act only
+  with a DRI), with and without the AC shown: of the tests' 518 files under 64 MB (before
+  the review's cases), the 54 with broken restarts, and `d_restart_bad.jpg`, an interval
+  of which starts with two stuffed 0xFF (now as djpeg's, but for the MCU with the bad
+  code); of the 6,821 made in the rounds
+  before, the 508 cut short where an RST should be (now as djpeg: no MCU after the cut), 2
+  with a DRI but no RSTs (first interval only, as djpeg), and the 261 with RSTs in a row;
+  and the 696 cut-code files. (One of 108 megapixels timed out under the load, and is the
+  same when given the time.)
+- **Speed:** the same as before, within its spread: 0.24 to 0.32 s of CPU for 1 MB of RSTs,
+  2 MB of data skipped and 1 MB runs of 0xFF, and 1.24 s for a 3 MB file with an RST after
+  each of its 23,500 MCUs. The review's 16 MB runs, 8 million earlier RSTs, and an 8192 x
+  8192 file with a DRI but no RSTs (4.2 s, from 8.8 s) were in time too.
+- **The affected groups pass:** the 203 cases of every file with a DRI (`ER`, `RC`, `RI`,
+  and 30 of `D`, `LM`, `ML` and `MR`, unchanged).
+- **With ASan/UBSan,** all but the last added pass (202), with no sanitizer reports.
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 73 things in
+  `ImgDecode.cpp` as before (a redundant condition it found in the new search was taken
+  out), and catches a bug planted in each new function. It missed one planted in a lambda
+  (a known blind spot), so the lambda was made a plain string.
+- **No new compiler warnings** (the same 143 in `ImgDecode.cpp`).
+- **Two fresh reviews** (agents given only the diff; the second of the fixes after the
+  first). The first crafted 30 files, and 300 damaged at random, and found no MCU out of
+  place against djpeg, but four bugs, each fixed above with a case: the MCU map ended at a
+  TEM the restart rule passes over ("Not decoded" for every MCU after it); the search for
+  data after an interval started a byte late (an EOI whose 0xFF the last MCU took bits of
+  was missed, and at the end of a file of 4 GiB - 1 bytes the position wrapped round to 0:
+  20 s to search the file from its start); data running out in a row left the restart
+  count off; and each RST out of order was reported twice. The second found no regression,
+  and that the test driver took Detailed Decode's two new lines for a change in the report
+  (fixed, with a case); its other findings are below.
+
+**Found, not fixed (all inherited):**
+- **A marker from SOF0 on inside an interval's data** is decoded through, and Lookup MCU
+  Offset gives "Not decoded" for the MCUs after it; djpeg stops there. So is one whose
+  0xFF the interval's last MCU takes whole as data (by the second review): even an EOI
+  there isn't found then, and the decode goes on past it.
+- **Without a DRI, after the scan data runs out in a row,** the first MCU of each row after
+  it is decoded from zeros (by the second review; with a DRI, they are now grey).
+- **An MCU whose data lies past the end of the file** is decoded from zeros with no error
+  while it takes less than a byte of it (the end is noticed once a whole byte is used):
+  in a scan that ends with an RST, the two MCUs after it (by the review).
+- **The file parser logs each TEM after the scan:** 16 MB of FF 01 after an interval took
+  over 120 s (262,000 lines from 65,536 TEMs, in 25 s), before and after (by the review).
+- **Without a DRI, a restart inside an MCU** still zeroes the luminance DC the status bar
+  shows for it (the section before's item, now only there).
+- **A negative "Max # errors" in Options is no limit** (the sections before).
 
 ## How this was reviewed
 
