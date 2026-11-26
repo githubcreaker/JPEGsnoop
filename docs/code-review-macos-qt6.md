@@ -5003,12 +5003,138 @@ tolerance of 1; Detailed Decode's data bytes).
   it is decoded from zeros (by the second review; with a DRI, they are now grey).
 - **An MCU whose data lies past the end of the file** is decoded from zeros with no error
   while it takes less than a byte of it (the end is noticed once a whole byte is used):
-  in a scan that ends with an RST, the two MCUs after it (by the review).
+  in a scan that ends with an RST, the two MCUs after it (by the review). (Fixed since,
+  with its real cause: see the next section.)
 - **The file parser logs each TEM after the scan:** 16 MB of FF 01 after an interval took
   over 120 s (262,000 lines from 65,536 TEMs, in 25 s), before and after (by the review).
+  (Fixed since: see the next section.)
 - **Without a DRI, a restart inside an MCU** still zeroes the luminance DC the status bar
   shows for it (the section before's item, now only there).
-- **A negative "Max # errors" in Options is no limit** (the sections before).
+- **A negative "Max # errors" in Options is no limit** (the sections before). (Fixed since:
+  see the next section.)
+
+### Zeros past the end of the file, runs of markers with no length, and the error limit
+
+Three of the section before's items, all inherited from Windows (by reading its code).
+
+**A byte past the end of the file, read into an empty scan buffer.** The scan buffer marks
+each byte past the end of the file, and the 0xFF of a marker in the scan data, with an
+error, which is taken when the bits read move into that byte. A byte added to an empty
+buffer, after a restart or at the start of the scan, already holds the next bit, so its
+error was never taken, and its 8 bits were decoded as data:
+- **An RST that ends the file:** the MCUs after it were decoded from the zeros past the
+  end, with no error, as many as 8 zero bits make (2 in the tests' files, where an MCU of
+  zeros takes 3 bits). With a DRI, the search for the next RST then reported it missing
+  ("No RST found before MCU(0,1), but the end of the file"). Without one, the error came a
+  byte late, in a later MCU. (The section before put this down to the end being noticed
+  only once a whole byte is used. This is the cause.)
+- **A scan with no data** (its header ends the file): the same, from MCU [0,0]. Its
+  compression ratio was also "inf:1", a division by zero that UBSan reported once these
+  cases ran with ASan/UBSan (inherited, before and after the fix). It is now "Compression
+  Ratio: - (no scan data)".
+- **A marker as the first byte of a restart interval's data,** or of the scan's, wasn't
+  reported as a bad marker, as one is anywhere else in the data. So `ri_eoi_mid.jpg`, an
+  EOI right after RST5, now also gives "\*\*\* ERROR: Bad marker @ 0x000000c3.0".
+
+Now the byte's error is taken as it is added: "\*\*\* ERROR: Scan data ends at the end of
+the file in MCU(2,0) @ 0x000000a2.0 (file truncated?)", in the MCU that has no data, at
+the end of the file, and no MCU after it is decoded. Without a DRI:
+- **The loop that passes over an RST** (in the scan's decode and in Detailed Decode) read
+  the code again after the RST, but kept the error taken before it, so the end of the
+  file was reported a code late (at .2). It now takes the error of the byte the code
+  starts in after the RST.
+- **A bad marker in the bits before an RST that make no code** is reported where it is,
+  before the restart. It was reported after it, at the position of the code read there
+  (by the review: a marker at 0x9a was reported at 0x9f), or, once its error was taken in
+  an empty buffer, not at all when the end of the file came next.
+
+**Runs of markers with no length.** TEM (0xFF01), SOI and, with Relaxed Parsing, an RSTn
+the parsing passes over have no length, so each takes 2 bytes. Each was listed with its
+header, offset and warning (4 lines), and the report takes about 40 µs a line: 65,536 TEMs
+took 11 s before the scan and 18 s after it, and 16 MB of them over 120 s. Now the first
+20 in a row are listed as before, and the rest of the run in one line, with how many of
+each kind and how many fill bytes: "Only the first 20 markers with no length in a row are
+listed: 524268 more skipped (524268 TEM), to 0x00100098".
+- **Any other marker ends the run.** An RSTn followed by anything but a marker or the end
+  of the file isn't in it (it may have a length, which it is skipped with, as before), nor
+  is one without Relaxed Parsing (it stops the decode, as before).
+- **An SOI in the run is the file's SOI,** as one listed is. (By the review: with the SOI
+  in the run, Export JPEG refused the file, saying it had no SOI.)
+- **Speed:** 65,536 TEMs now take 0.17 s, and 16 MB of them 0.23 s.
+
+The first version listed only the run's first marker. The old/new comparison below showed
+that an SOI followed by a single TEM then lost the TEM's entry, hence the first 20.
+
+Markers with a length still each get their entry. An empty COM or APPn takes 4 bytes for 5
+lines, so 32,768 empty COMs (128 KB) take 6 s, before and after. By the review, a COM every
+19 TEMs (so no run reaches 20) took 4.7 s for 64 KB, in both. That is the report growing
+with the file, as with the empty DHT tables in "Six runaway reports".
+
+**A negative or non-number "Max # errors"** (`Report\ErrMaxDecodeScan`) from the settings
+file. Options takes 0 to 99999, and Windows stored it unsigned, but here -1 was no limit
+(4,294,967,295 to the decoder), and text was 0, so no scan error was reported. Each now
+keeps the default, 20; a number from 0 on is taken as before. (The sections before said
+Options took -1. Its field doesn't; only the settings file can hold it. The review also
+tried empty, `4294967295`, `2147483648`, `" 7"`, `7.5`, `+3`, `0x10` and `99999999`.)
+
+**Tests:** 45 new cases (12 `EZ`, 28 `NL`, 5 `EM`), 2 new `RI` cases, and `RI_huge_end`
+changed: 2,071 in all. `RI_huge_end`'s file ends in RST5 at the end of a file of 4 GiB - 1
+bytes. Its next MCU now has the end-of-file error at 0xffffffff.0, and no search follows
+it, so `RI_huge_end_search` cuts the file before RST5 to keep the search at the end of the
+file in the tests. On the code before, 30 of the 48 fail. The 18 that pass check what
+didn't change (a whole file; the image after a run; 20 TEMs, all listed; runs ended by
+other markers; RSTs without Relaxed Parsing, or with a length; fill bytes before an EOI;
+Early EOF; the search at the end of a 4 GiB file; the 20th index error, and limits of 5
+and 0), or a bug made and fixed during this change (an SOI in a run; Detailed Decode's
+report the same as without it). Their values are worked out from the generator's bytes:
+- the end of the file after an RST, with and without a DRI, in the decoder and in Detailed
+  Decode; a scan with no data, with and without a DRI, and its compression ratio; a bad
+  marker at an interval's start, and before an RST without a DRI, in both decoders;
+- 1 MB of TEMs after the scan and before it, in time, in few lines, with the 20th listed and
+  not the 21st, and the EOI and the image after them; 20 and 21; TEMs and an SOI with fill
+  bytes; 22 SOIs at the start; 22 RSTs; runs ended by a COM, by the scan and by an RSTn
+  with a length; RSTs with and without Relaxed Parsing; to the end of the file, also of a
+  file of 4 GiB - 1 bytes; 2 MB of fill bytes in the run and before the EOI that ends it, in
+  time; and an SOI in the run, for Export JPEG;
+- the limit at -1 and `abc` (20), and at 5 and 0, as before.
+
+Each of 20 switches, put in a scratch copy, fails its own cases when on and passes when off:
+the error taken in an empty buffer; each decoder's error after the RST, and its bad marker
+reported before it; the run, its 20 (`>` for `>=`), its end at another marker, the SOI kept,
+each kind taken into a run or counted in it, the RSTn's Relaxed Parsing and next marker, the
+fill bytes skipped and counted; and the limit's two checks. A reset of the count at the top
+of `DecodeMarker()` was taken out, as no switch could fail a case: every marker that
+returns from its case ends the parsing. (A DQT with a table ID over 3 looked like one that
+goes on, but `ValidateValue()` makes the ID 0 first.)
+
+**Checks:**
+- **Only these reports change.** Old against new, on the tests' 522 files under 64 MB, and
+  with Detailed Decode over the whole image on the 391 under 1 MB: the new files and
+  `ri_eoi_mid.jpg` (its bad marker). With Relaxed Parsing, on the 43 `ML` and `MR` files,
+  before the review's fixes: none.
+- **The affected groups pass:** 415 cases: the `EZ`, `NL`, `EM`, `ER`, `RC`, `RI`, `D`,
+  `LM`, `ML`, `MR`, `S` and `SM` cases; and after the ratio's fix, the `EZ` and `CS` ones.
+- **With ASan/UBSan,** the `EZ`, `NL`, `EM`, `ER`, `RC`, `RI`, `ML`, `MR` and `D` cases pass
+  (344), with no sanitizer reports.
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 248 things in the three
+  files as before, and catches a bug planted in each function changed.
+- **No new compiler warnings** in the three files.
+- **A fresh review** (an agent given the diff, then the reworked one) checked each case's
+  values from the bytes, cut 6 files at 194 places, put markers at the start of intervals
+  and scans, and tried runs and limit values. It found the SOI in the run, `RI_huge_end`'s
+  expectation, the bad marker lost before an RST at the end of the file, and cases missing
+  (Detailed Decode's half of the loop; the count after an RSTn with a length;
+  `ri_eoi_mid.jpg`'s new line), all fixed above, and the first item below.
+
+**Found, not fixed (inherited):**
+- **A 0xFF as the last byte of the file, in the scan data,** is read as a stuffed 0xFF00, as
+  the byte past the end reads as 0: four "Can't find huffman bitstring" errors, then "Scan
+  data ends ... @ 0x0000009d.4", past the end of the file (by the review).
+- **Markers with a length are each listed,** however many in a row (above).
+- The section before's other three: a marker from SOF0 on inside an interval's data is
+  decoded through; without a DRI, the first MCU of each row after the data runs out is
+  decoded from zeros; and without a DRI, a restart inside an MCU zeroes the luminance DC the
+  status bar shows.
 
 ## How this was reviewed
 

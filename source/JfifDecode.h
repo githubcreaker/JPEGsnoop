@@ -46,6 +46,7 @@ class QSaveFile;
 //#define SUPPORT_DICOM
 
 static const int32_t MAX_IFD_COMPS = 150;        // Maximum number of IFD entry components to display
+static const uint32_t NO_LENGTH_RUN_LISTED = 20;  // Markers with no length in a row listed one by one
 
 static const uint32_t JFIF_SOF0 = 0xC0;
 static const uint32_t JFIF_SOF1 = 0xC1;
@@ -221,6 +222,7 @@ private:
   QByteArray ExportMissingDht(uint32_t nStart, uint32_t nEnd, bool bClean, QString &strInserted, bool &bChecked);
 
   uint32_t DecodeMarker();
+  void SkipNoLengthRun();
   bool WrappedSince(uint32_t nPosFrom) const;
   bool ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen);
   quint64 SegEnd(uint32_t nPosLength, uint32_t nLength) const;
@@ -403,6 +405,7 @@ private:
   bool m_bStateAbort;           // Do we abort decoding? (eg. user hits cancel after errs)
 
   bool m_bStateSoi;
+  uint32_t m_nNoLengthRun;      // Markers with no length in a row, each listed (see SkipNoLengthRun())
   bool m_bStateDht;
   bool m_bStateDhtOk;
   bool m_bStateDhtFake;         // Fake DHT required for AVI

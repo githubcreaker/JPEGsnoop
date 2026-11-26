@@ -231,6 +231,7 @@ void CjfifDecode::Reset()
   // just because we saw FFD8FF first then JFIF_SOS
   m_bStateAbort = false;
   m_bStateSoi = false;
+  m_nNoLengthRun = 0;
   m_bStateDht = false;
   m_bStateDhtOk = false;
   m_bStateDhtFake = false;
@@ -6256,10 +6257,17 @@ uint32_t CjfifDecode::DecodeMarker()
     return DECMARK_OK;
   }
 
+  // A marker with no length that the parsing goes on after (TEM, SOI, or an
+  // RSTn passed over): after NO_LENGTH_RUN_LISTED of them in a row, the rest
+  // of the run is reported together (see SkipNoLengthRun()). Any other marker
+  // ends the run (each that returns from the switch ends the parsing too).
+  bool bNoLength = false;
+
   switch (nCode)
   {
     case JFIF_SOI:             // SOI
       m_bStateSoi = true;
+      bNoLength = true;
       break;
 
     case JFIF_APP12:
@@ -8338,6 +8346,7 @@ uint32_t CjfifDecode::DecodeMarker()
       // EOI): the next 2 bytes were taken for one, so the marker after it was
       // skipped with them (a length of 65534 before a COM)
       m_pLog->AddLineWarn("  Skipping unsupported marker");
+      bNoLength = true;
       break;
 
     case JFIF_RST0:
@@ -8389,6 +8398,7 @@ uint32_t CjfifDecode::DecodeMarker()
         {
           // Looks like standalone
           m_pLog->AddLineWarn("  Ignoring standalone marker. Proceeding with decode.");
+          bNoLength = true;
         }
         else
         {
@@ -8423,6 +8433,16 @@ uint32_t CjfifDecode::DecodeMarker()
       }
   }
 
+  if(!bNoLength)
+  {
+    m_nNoLengthRun = 0;
+  }
+  else if(++m_nNoLengthRun >= NO_LENGTH_RUN_LISTED)
+  {
+    SkipNoLengthRun();
+    m_nNoLengthRun = 0;
+  }
+
   // Add white-space between each marker
   m_pLog->AddLine(" ");
 
@@ -8435,6 +8455,115 @@ uint32_t CjfifDecode::DecodeMarker()
   }
 
   return DECMARK_OK;
+}
+
+//-----------------------------------------------------------------------------
+// After NO_LENGTH_RUN_LISTED markers in a row with no length that the parsing
+// went on from (TEM, SOI, or an RSTn passed over with Relaxed Parsing), each
+// listed as before, any more of them in a row, each after any fill bytes, are
+// reported in one line and passed over. Each was listed with its own header,
+// offset and warning: 2 bytes made 4 lines, so 65,536 TEMs took 25 s, and 16 MB
+// of them over 120 s. An RSTn is passed over only if the next marker or the
+// end of the file follows it, as DecodeMarker() passes it over; anything else
+// ends the run, and DecodeMarker() reads it.
+//
+// PRE:
+// - m_nPos: just after the marker
+// POST:
+// - m_nPos: after the run
+void CjfifDecode::SkipNoLengthRun()
+{
+  const uint32_t nPosEof = m_pWBuf->GetPosEof();
+  const bool bRelaxed = m_pAppConfig->relaxedParsing();
+
+  uint32_t nPos = m_nPos;
+  uint32_t nNumTem = 0;
+  uint32_t nNumSoi = 0;
+  uint32_t nNumRst = 0;
+  uint32_t nNumFill = 0;
+
+  while((nPos < nPosEof) && (Buf(nPos) == 0xFF))
+  {
+    // The marker's code, after any fill bytes (to the end of the file, they
+    // are left to DecodeMarker())
+    uint32_t nPosCode = nPos + 1;
+
+    while((nPosCode < nPosEof) && (Buf(nPosCode) == 0xFF))
+    {
+      nPosCode++;
+    }
+
+    if(nPosCode >= nPosEof)
+    {
+      break;
+    }
+
+    const uint32_t nCode = Buf(nPosCode);
+    const uint32_t nPosNext = nPosCode + 1;   // At most the end of the file
+
+    if(nCode == JFIF_TEM)
+    {
+      nNumTem++;
+    }
+    else if(nCode == JFIF_SOI)
+    {
+      // As DecodeMarker() takes it: the file has its SOI (Export JPEG and the
+      // reason no image is shown go by it)
+      m_bStateSoi = true;
+      nNumSoi++;
+    }
+    else if(bRelaxed && (nCode >= JFIF_RST0) && (nCode <= JFIF_RST7) &&
+            ((nPosNext >= nPosEof) || (Buf(nPosNext) == 0xFF)))
+    {
+      nNumRst++;
+    }
+    else
+    {
+      break;
+    }
+
+    nNumFill += nPosCode - nPos - 1;
+    nPos = nPosNext;
+  }
+
+  if(nPos == m_nPos)
+  {
+    return;
+  }
+
+  QStringList astrKinds;
+
+  if(nNumTem > 0)
+  {
+    astrKinds << QString("%1 TEM").arg(nNumTem);
+  }
+
+  if(nNumSoi > 0)
+  {
+    astrKinds << QString("%1 SOI").arg(nNumSoi);
+  }
+
+  if(nNumRst > 0)
+  {
+    astrKinds << QString("%1 RSTn").arg(nNumRst);
+  }
+
+  QString strFill;
+
+  if(nNumFill > 0)
+  {
+    strFill = QString("; %1 fill bytes").arg(nNumFill);
+  }
+
+  m_pLog->AddLineWarn(QString("  Only the first %1 markers with no length in a row are listed: %2 more skipped "
+                              "(%3%4), to 0x%5")
+                        .arg(NO_LENGTH_RUN_LISTED)
+                        .arg(nNumTem + nNumSoi + nNumRst)
+                        .arg(astrKinds.join(", "))
+                        .arg(strFill)
+                        .arg(nPos, 8, 16, QChar('0')));
+
+  m_nPos = nPos;
 }
 
 //-----------------------------------------------------------------------------

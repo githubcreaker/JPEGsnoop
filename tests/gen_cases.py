@@ -7437,19 +7437,35 @@ ri_case("RI_rst_eoi", "ri_rst_eoi.jpg", er_grey(28, 12, lm_level(0, 24, 8)), fla
 RI_EOI_MID = ri_w[:ri_at(ri_w, ri_w_at, 6)] + b"\xff\xd9"
 write("ri_eoi_mid.jpg", RI_EOI_MID)
 ri_case("RI_eoi_mid", "ri_eoi_mid.jpg", ri_skipped(ri_marker(0xD9, len(RI_EOI_MID) - 2)))
+# The EOI, the first byte of the interval's data, is a bad marker there, as one
+# is anywhere else in it (see EZ below: it wasn't reported)
+ri_case("RI_eoi_mid_bad", "ri_eoi_mid.jpg", f"^\\*\\*\\* ERROR: Bad marker @ 0x{len(RI_EOI_MID) - 2:08x}\\.0$")
 # At the end of a file of 4 GiB - 1 bytes (sparse), a scan whose last bytes are
-# RST5: the search for the next marker starts in the bytes past the end, and
-# stops at once. (Its position, one past 0xFFFFFFFF, wrapped round to 0: the
-# search went through the 4 GiB from the start of the file, to the JPEG's own
-# SOI, in 20 s.)
-RI_HUGE_JPEG = ri_w[:ri_at(ri_w, ri_w_at, 6)]
-RI_HUGE_AT = 0xFFFFFFFF - len(RI_HUGE_JPEG)
-with open(files_dir / "ri_huge_end.bin", "wb") as f:
-    f.write(bytes(random.Random(7).randrange(256) for _ in range(4096)))
-    f.seek(RI_HUGE_AT)
-    f.write(RI_HUGE_JPEG)
-ri_case("RI_huge_end", "ri_huge_end.bin", ri_skipped("the end of the file @ 0xffffffff\\.0"),
+# RST5: the next interval's first MCU, [4,1], has no data, which is reported at
+# the end of the file (see EZ below), and nothing is searched for after it. (Its
+# position, one past 0xFFFFFFFF, wrapped round to 0, and the search for the next
+# marker went through the 4 GiB from the start of the file, to the JPEG's own
+# SOI, in 20 s. Then MCU [4,1] was decoded from zeros, and the search started
+# past the end, and stopped at once.)
+def ri_huge(name, jpeg):
+    """A file of 4 GiB - 1 bytes (sparse) that ends with jpeg; returns its offset"""
+    at = 0xFFFFFFFF - len(jpeg)
+    with open(files_dir / name, "wb") as f:
+        f.write(bytes(random.Random(7).randrange(256) for _ in range(4096)))
+        f.seek(at)
+        f.write(jpeg)
+    return at
+
+
+RI_HUGE_AT = ri_huge("ri_huge_end.bin", ri_w[:ri_at(ri_w, ri_w_at, 6)])
+ri_case("RI_huge_end", "ri_huge_end.bin",
+        "^\\*\\*\\* ERROR: Scan data ends at the end of the file in MCU\\(4,1\\) @ 0xffffffff\\.0 ",
         flags=f"--start {RI_HUGE_AT}", forbid="0xFFd8", timeout=5)
+# Cut before RST5: after interval 5's MCUs the search for its RST stops at the
+# end of the file, in time
+RI_HUGE_AT2 = ri_huge("ri_huge_end2.bin", ri_w[:ri_at(ri_w, ri_w_at, 6) - 2])
+ri_case("RI_huge_end_search", "ri_huge_end2.bin", ri_skipped("the end of the file @ 0xffffffff\\.0"),
+        flags=f"--start {RI_HUGE_AT2}", forbid="0xFFd8", timeout=5)
 # Data that ends in a row (cut 1 byte into MCU [4,0], in intervals of 3): no
 # MCU after it is decoded, so MCU [0,1] is grey and no RST is reported missing.
 # (The rest of the row was skipped without counting its MCUs, so the restart
@@ -7492,6 +7508,201 @@ RI_LATE24B = ri_join(rc_wide, rc_wide_at, ri_late24b_parts)
 write("ri_late24b.jpg", RI_LATE24B)
 case("RI_twice_sync", "RI", "gui", ["ri_late24.jpg", "ri_late24b.jpg"], "--log", timeout=30,
      expect=ri_skipped(ri_rst(21 % 8, ri_at(RI_LATE24B, rc_wide_at, 22) - 2)))
+
+
+# --- EZ: a byte past the end of the file, read into an empty scan buffer -------------
+# The scan buffer marks a byte past the end of the file, and a marker in the scan
+# data, with an error, taken when the bits read move into the byte. One added to
+# an empty buffer (after a restart, or at the scan's start) already holds the
+# next bit, so its error was never taken: its 8 bits were decoded as data. Here,
+# a DC-only file with intervals of 2 MCUs: zero bits make a DC code of 0 (00) and
+# an EOB (0), 3 bits an MCU, so 2 MCUs were decoded from the first byte past the
+# end of the file, with no error.
+def ez_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "EZ", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def ez_eof(mcu, pos):
+    return (f"^\\*\\*\\* ERROR: Scan data ends at the end of the file in MCU\\({mcu[0]},{mcu[1]}\\) @ "
+            f"0x{pos:08x}\\.0 \\(file truncated\\?\\)$")
+
+
+ez, ez_at, ez_pos = dc_only_jpeg(32, 16, [(1, 1, 1)], lm_level, restart=2)
+# Cut just after RST0, where MCU [2,0]'s data starts: the error is in that MCU,
+# at the end of the file, and no MCU after it is decoded. (MCUs [2,0] and [3,0]
+# were decoded from zeros, and then the RST after them was "not found".)
+EZ_RST_END = ez_at + ez_pos[2][0]
+assert ez[EZ_RST_END - 2:EZ_RST_END] == b"\xff\xd0" and ez_pos[2][1] == 0
+write("ez_rst_end.jpg", ez[:EZ_RST_END])
+ez_case("EZ_rst_end", "ez_rst_end.jpg", ez_eof((2, 0), EZ_RST_END), forbid="No RST found")
+# Detailed Decode: MCU [3,0] isn't decoded (it was, from zeros)
+ez_case("EZ_rst_end_detail", "ez_rst_end.jpg", "^harness: detail blocks=0 first=- ", flags="--detail 3,0,1")
+# Without a DRI, the RST is passed over where it is found: the same (the error
+# was in MCU [0,1], a byte past the end, after 2 MCUs from zeros)
+EZ_NODRI = er_nodri(ez)
+write("ez_rst_end_nodri.jpg", EZ_NODRI[:EZ_RST_END - 6])
+ez_case("EZ_rst_end_nodri", "ez_rst_end_nodri.jpg", ez_eof((2, 0), EZ_RST_END - 6))
+ez_case("EZ_rst_end_nodri_detail", "ez_rst_end_nodri.jpg", ez_eof((2, 0), EZ_RST_END - 6), flags="--detail 2,0,1")
+ez_case("EZ_rst_end_nodri_same", "ez_rst_end_nodri.jpg", SAME, flags="--detail 2,0,1")
+# Without a DRI, a bad marker (FF C8) as the only data before an RST makes no
+# code, so the code is read again after the RST: the marker is reported where it
+# is (it wasn't, as the first byte after RST0; and once it was taken, it was
+# reported after RST1, where the code is read). Detailed Decode likewise.
+EZ_BAD_NODRI = ri_replace(EZ_NODRI, ez_at - 6, 1, 1, b"\xff\xc8")
+EZ_BAD_NODRI_AT = ri_at(EZ_BAD_NODRI, ez_at - 6, 1)
+write("ez_bad_nodri.jpg", EZ_BAD_NODRI)
+ez_case("EZ_bad_nodri", "ez_bad_nodri.jpg", f"^\\*\\*\\* ERROR: Bad marker @ 0x{EZ_BAD_NODRI_AT:08x}\\.0$",
+        forbid=f"Bad marker @ 0x{EZ_BAD_NODRI_AT + 4:08x}")
+ez_case("EZ_bad_nodri_detail", "ez_bad_nodri.jpg", f"^\\*\\*\\* ERROR: Bad marker @ 0x{EZ_BAD_NODRI_AT:08x}\\.0$",
+        forbid=f"Bad marker @ 0x{EZ_BAD_NODRI_AT + 4:08x}", flags="--detail 2,0,1")
+# A scan with no data: the error is in MCU [0,0], at the end of the file
+write("ez_no_data.jpg", ez[:ez_at])
+ez_case("EZ_no_data", "ez_no_data.jpg", ez_eof((0, 0), ez_at), forbid="No RST found")
+write("ez_no_data_nodri.jpg", EZ_NODRI[:ez_at - 6])
+ez_case("EZ_no_data_nodri", "ez_no_data_nodri.jpg", ez_eof((0, 0), ez_at - 6))
+# With no scan data, there is no compression ratio (it was "inf", a division by
+# zero that UBSan reports)
+ez_case("EZ_no_data_ratio", "ez_no_data.jpg", "^    Compression Ratio: - \\(no scan data\\)$", forbid="inf")
+# A marker that isn't an RST (from SOF0 on) at the start of an interval's data:
+# reported as a bad marker, as it is anywhere else in the data (it wasn't)
+write("ez_bad_marker.jpg", ri_put(ez, EZ_RST_END, b"\xff\xc8"))
+ez_case("EZ_bad_marker", "ez_bad_marker.jpg", f"^\\*\\*\\* ERROR: Bad marker @ 0x{EZ_RST_END:08x}\\.0$")
+# The first MCUs of a whole file: as before
+ez_case("EZ_whole", write("ez_whole.jpg", ez), er_grey(20, 4, lm_level(0, 16, 0)), flags="--ac --pixels 20,4",
+        forbid="ERROR")
+
+
+# --- NL: markers with no length in a row --------------------------------------------
+# Markers with no length that the parsing goes on after (TEM; SOI; RSTn with
+# Relaxed Parsing, before the next marker or the end of the file) were each
+# listed with a header, an offset and a warning, 4 lines for 2 bytes: 1 MB of
+# TEMs took minutes. The first 20 in a row are listed as before, and the rest
+# of the run in one line.
+def nl_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "NL", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def nl_run(count, kinds, pos):
+    return (f"^  Only the first 20 markers with no length in a row are listed: {count} more skipped "
+            f"\\({kinds}\\), to 0x{pos:08x}$")
+
+
+NL_MORE = "Only the first 20 markers"
+NL_TEM20 = b"\xff\x01" * 20
+nl, _, _ = dc_only_jpeg(16, 8, [(1, 1, 1)], lambda c, x, y: 100)
+NL_SOS = nl.index(b"\xff\xda")
+NL_TEMS = 1 << 19                      # 1 MB of them
+# After the scan, before the EOI (as the review found them): in time, the EOI
+# read after them, and few lines
+NL_AFTER = len(nl) - 2
+write("nl_tem_after.jpg", ri_put(nl, NL_AFTER, b"\xff\x01" * NL_TEMS))
+nl_case("NL_tem_after", "nl_tem_after.jpg", nl_run(NL_TEMS - 20, f"{NL_TEMS - 20} TEM", NL_AFTER + 2 * NL_TEMS),
+        timeout=5)
+nl_case("NL_tem_after_eoi", "nl_tem_after.jpg", f"^  OFFSET: 0x{NL_AFTER + 2 * NL_TEMS:08x}$", timeout=5)
+nl_case("NL_tem_after_lines", "nl_tem_after.jpg", RA_SMALL, flags="--count-lines", timeout=5)
+# The 20th is listed, and not the 21st
+nl_case("NL_tem_after_20th", "nl_tem_after.jpg", f"^  OFFSET: 0x{NL_AFTER + 2 * 19:08x}$",
+        forbid=f"^  OFFSET: 0x{NL_AFTER + 2 * 20:08x}$", timeout=5)
+# Before the scan: the image is decoded after them
+write("nl_tem_before.jpg", ri_put(nl, NL_SOS, b"\xff\x01" * NL_TEMS))
+nl_case("NL_tem_before", "nl_tem_before.jpg", nl_run(NL_TEMS - 20, f"{NL_TEMS - 20} TEM", NL_SOS + 2 * NL_TEMS),
+        timeout=5)
+nl_case("NL_tem_before_pixel", "nl_tem_before.jpg", er_grey(4, 4, 100), flags="--pixels 4,4", timeout=5)
+# 20 in a row are all listed, as before; 21, the last in one line
+write("nl_tem20.jpg", ri_put(nl, NL_SOS, NL_TEM20))
+nl_case("NL_tem20", "nl_tem20.jpg", f"^  OFFSET: 0x{NL_SOS + 2 * 19:08x}$", forbid=NL_MORE)
+write("nl_tem21.jpg", ri_put(nl, NL_SOS, NL_TEM20 + b"\xff\x01"))
+nl_case("NL_tem21", "nl_tem21.jpg", nl_run(1, "1 TEM", NL_SOS + 42))
+# TEMs and an SOI, with fill bytes before some: counted apart
+write("nl_mixed.jpg", ri_put(nl, NL_SOS, NL_TEM20 + b"\xff\x01" + b"\xff\xff\xd8" + b"\xff\x01" + b"\xff\xff\xff\x01"))
+nl_case("NL_mixed", "nl_mixed.jpg", nl_run(4, "3 TEM, 1 SOI; 3 fill bytes", NL_SOS + 40 + 11))
+nl_case("NL_mixed_pixel", "nl_mixed.jpg", er_grey(4, 4, 100), flags="--pixels 4,4")
+# SOIs at the start of the file: the first, the file's, is in the run
+write("nl_soi.jpg", b"\xff\xd8" * 21 + nl)
+nl_case("NL_soi", "nl_soi.jpg", nl_run(2, "2 SOI", 44))
+# Any other marker ends the run: 10 TEMs, a COM and 15 TEMs are all listed, and
+# 10 before the scan and 15 after it
+write("nl_two_runs.jpg", ri_put(nl, NL_SOS, NL_TEM20[:20] + b"\xff\xfe\x00\x03a" + NL_TEM20[:30]))
+nl_case("NL_two_runs", "nl_two_runs.jpg", f"^  OFFSET: 0x{NL_SOS + 20 + 5 + 2 * 14:08x}$", forbid=NL_MORE)
+write("nl_sos_ends.jpg", ri_put(ri_put(nl, NL_AFTER, NL_TEM20[:30]), NL_SOS, NL_TEM20[:20]))
+nl_case("NL_sos_ends", "nl_sos_ends.jpg", f"^  OFFSET: 0x{NL_AFTER + 20 + 2 * 14:08x}$", forbid=NL_MORE)
+# An RST skipped with its length (Relaxed Parsing) ends it too
+write("nl_rst_length_ends.jpg", ri_put(nl, NL_SOS, NL_TEM20[:20] + b"\xff\xd0\x00\x04ab" + NL_TEM20[:30]))
+nl_case("NL_rst_length_ends", "nl_rst_length_ends.jpg", f"^  OFFSET: 0x{NL_SOS + 20 + 6 + 2 * 14:08x}$",
+        forbid=NL_MORE, flags="--relaxed")
+# An SOI in the run is the file's SOI, as one listed is: Export JPEG exports the
+# file (from its start, as before), where it found no SOI
+case("NL_soi_in_run", "NL", "export-jpeg", write("nl_tem20_soi.jpg", NL_TEM20 + nl), expect=exported(NL_TEM20 + nl))
+# RSTs: with Relaxed Parsing, in the run; without it, the first stops the decode,
+# as before
+write("nl_rst.jpg", ri_put(nl, NL_SOS, NL_TEM20 + b"\xff\x01" + b"\xff\xd0\xff\xd1"))
+nl_case("NL_rst_relaxed", "nl_rst.jpg", nl_run(3, "1 TEM, 2 RSTn", NL_SOS + 46), flags="--relaxed")
+nl_case("NL_rst_relaxed_pixel", "nl_rst.jpg", er_grey(4, 4, 100), flags="--relaxed --pixels 4,4")
+nl_case("NL_rst_strict", "nl_rst.jpg", nl_run(1, "1 TEM", NL_SOS + 42))
+nl_case("NL_rst_strict_stop", "nl_rst.jpg", "^  WARNING: Restart marker \\[0xFFd0\\] detected outside scan$",
+        forbid="RSTn")
+# 22 RSTs alone (RST0 to RST7 in turn), with Relaxed Parsing
+write("nl_rst22.jpg", ri_put(nl, NL_SOS, b"".join(bytes([0xFF, 0xD0 + k % 8]) for k in range(22))))
+nl_case("NL_rst_run", "nl_rst22.jpg", nl_run(2, "2 RSTn", NL_SOS + 44), flags="--relaxed")
+# An RST followed by a length that ends at a marker isn't in the run: it is
+# skipped with its length, as before
+write("nl_rst_length.jpg", ri_put(nl, NL_SOS, NL_TEM20 + b"\xff\x01\xff\xd0\x00\x04ab"))
+nl_case("NL_rst_length", "nl_rst_length.jpg", nl_run(1, "1 TEM", NL_SOS + 42), flags="--relaxed")
+nl_case("NL_rst_length_skip", "nl_rst_length.jpg", "^  Header length = 4$", flags="--relaxed")
+nl_case("NL_rst_length_pixel", "nl_rst_length.jpg", er_grey(4, 4, 100), flags="--relaxed --pixels 4,4")
+# To the end of the file (no EOI): Early EOF, as before
+NL_EOF = nl[:-2] + b"\xff\x01" * 24
+write("nl_eof.jpg", NL_EOF)
+nl_case("NL_eof", "nl_eof.jpg", nl_run(4, "4 TEM", len(NL_EOF)))
+nl_case("NL_eof_early", "nl_eof.jpg", "^ERROR: Early EOF - file may be missing EOI$")
+# And at the end of a file of 4 GiB - 1 bytes (sparse)
+NL_HUGE_AT = 0xFFFFFFFF - len(NL_EOF)
+with open(files_dir / "nl_huge_end.bin", "wb") as f:
+    f.write(bytes(random.Random(8).randrange(256) for _ in range(4096)))
+    f.seek(NL_HUGE_AT)
+    f.write(NL_EOF)
+nl_case("NL_huge_end", "nl_huge_end.bin", nl_run(4, "4 TEM", 0xFFFFFFFF), flags=f"--start {NL_HUGE_AT}",
+        timeout=5)
+# 2 MB of fill bytes in the run, searched once, in time: before a TEM (in the
+# run), and before the EOI (which ends it, and is read after them)
+NL_FILL = b"\xff" * (2 << 20)
+write("nl_fill_tem.jpg", ri_put(nl, NL_AFTER, NL_TEM20 + NL_FILL + b"\x01"))
+nl_case("NL_fill_tem", "nl_fill_tem.jpg", nl_run(1, f"1 TEM; {len(NL_FILL) - 1} fill bytes",
+                                                  NL_AFTER + 40 + len(NL_FILL) + 1), timeout=5)
+write("nl_fill_eoi.jpg", ri_put(nl, NL_AFTER, NL_TEM20 + NL_FILL[:-1]))
+nl_case("NL_fill_eoi", "nl_fill_eoi.jpg", f"^\\*\\*\\* Skipped {len(NL_FILL) - 1} marker pad bytes \\*\\*\\*$",
+        forbid=NL_MORE, timeout=5)
+
+
+# --- EM: the scan's error limit from the settings file --------------------------------
+# Options takes 0 to 99999. From the settings file, a negative limit was no limit
+# (-1 was 4,294,967,295 to the decoder), and one that isn't a number was 0, so
+# no error was reported: now each keeps the default, 20. er_index24.jpg has 24
+# RST index errors (no DRI): 24 RST0s after its RST0, each where RST1 is
+# expected, the kth 2 (k - 1) bytes after the first, at MCU [1,0]'s offset in the
+# file without them.
+def em_case(cid, value, expect, forbid="-"):
+    case(cid, "EM", "cmdline", ["er_index24.jpg"],
+         f"--setting Report\\ErrMaxDecodeScan={value} -- -i er_index24.jpg -o log.txt", timeout=60,
+         expect=expect, forbid=forbid)
+
+
+def em_err(k):
+    return cl_log("log.txt", er_index_err(1, 0, er_at - 6 + er_pos[1][0] + 2 * (k - 1))[1:-1])
+
+
+def em_only(n):
+    return cl_log("log.txt", f"    Only reported first {n} instances of this message\\.\\.\\.")
+
+
+em_case("EM_negative", "-1", em_only(20), forbid=em_err(21))
+em_case("EM_negative_20th", "-1", em_err(20))
+em_case("EM_text", "abc", em_err(20), forbid=em_err(21))
+# A number from 0 on is taken, as before
+em_case("EM_five", "5", em_only(5), forbid=em_err(6))
+# (and with no error reported, the scan is still decoded: its 7 RSTs and the 24)
+em_case("EM_zero", "0", cl_log("log.txt", "    Number of RESTART markers decoded: 31"),
+        forbid="Expected RST marker index")
 
 
 with open(out_dir / "cases.tsv", "w") as f:

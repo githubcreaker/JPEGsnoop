@@ -462,6 +462,7 @@ private:
   QString GetMcuFilePos(uint32_t nMcuX, uint32_t nMcuY);
   void RecordMcuPos(uint32_t nPos, uint32_t nAlign);
   void ReportRestartCut(uint32_t nPos, uint32_t nAlign, uint32_t nMcuX, uint32_t nMcuY);
+  void ReportScanBadMarker(uint32_t nPos, uint32_t nAlign);
   void DecodeRestartNext(uint32_t nMcuX, uint32_t nMcuY);
   void DecodeRestartShort(uint32_t nMcuX, uint32_t nMcuY);
   void DecodeRestartLostBlock();

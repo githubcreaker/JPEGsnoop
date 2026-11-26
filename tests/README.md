@@ -502,9 +502,10 @@ past their own field" section, `OW` and `PN` in its "Offsets that wrapped,
 and Photoshop resource names" section, `ML` in its "Where the marker list
 ends" section, `MR` in its "A stray RST, fill bytes before a stuffed 0xFF,
 and the thumbnail's count" section, `ER` in its "Two RSTs in a row"
-section, `RC` in its "A code cut short by an RST" section, and `RI` in its
+section, `RC` in its "A code cut short by an RST" section, `RI` in its
 "Restart intervals where the DRI puts them" section, which changed the `ER`
-and `RC` cases);
+and `RC` cases, and `EZ`, `NL` and `EM` in its "Zeros past the end of the
+file, runs of markers with no length, and the error limit" section);
 `ok_*` cases are valid files that must keep decoding. The plain JPEGs must
 decode at their size, with no error or warning and the subsampling their SOF
 gives, and their pixels must be within 6 of libjpeg's decode of the same file

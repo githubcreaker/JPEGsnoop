@@ -1399,6 +1399,43 @@ inline void CimgDecode::ScanBuffAddErr(uint32_t nNewByte, uint32_t nPtr, uint32_
 {
   ScanBuffAdd(nNewByte, nPtr);
   m_anScanBuffPtr_err[m_nScanBuffPtr_num - 1] = nErr;
+
+  // Added to an empty buffer (after a restart, or at the scan's start), the
+  // byte holds the next bit to read, so its error is latched now.
+  // ScanBuffConsume() latches a byte's error only when the bits read move into
+  // it, which they never do into this one: its 8 bits were decoded as data with
+  // no error. Past the end of the file (an RST that ends it), the MCUs they made
+  // were decoded from zeros, and a bad marker there wasn't reported.
+  if(m_nScanBuffPtr_num == 1)
+  {
+    m_nScanBuffLatchErr = nErr;
+  }
+}
+
+// A bad marker (not an RST) in the scan data where a code starts: the MCU and
+// the scan are marked bad, and it is reported, up to the scan's error limit
+//
+// INPUT:
+// - nPos, nAlign                       = Where the code starts
+//
+void CimgDecode::ReportScanBadMarker(uint32_t nPos, uint32_t nAlign)
+{
+  // Mark as scan error
+  m_nScanCurErr = true;
+
+  m_bScanBad = true;
+
+  if(m_nWarnBadScanNum < m_nScanErrMax)
+  {
+    m_pLog->AddLineErr(QString("*** ERROR: Bad marker @ %1").arg(GetScanBufPos(nPos, nAlign)));
+
+    m_nWarnBadScanNum++;
+
+    if(m_nWarnBadScanNum >= m_nScanErrMax)
+    {
+      m_pLog->AddLineErr(QString("    Only reported first %1 instances of this message...").arg(m_nScanErrMax));
+    }
+  }
 }
 
 // Disable any further reporting of scan errors
@@ -2328,6 +2365,15 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
       //   5) Refill Scan Buffer with BuffTopUp()
       //   6) Re-invoke ReadScanVal()
 
+      // A bad marker where the bits before the RST start (they made no
+      // code, or one cut short): reported there, as the code is read again
+      // after the RST, and its position taken from there. (Reported after
+      // the restart, it was given that position.)
+      if(nSavedBufErr == SCANBUF_BADMARK)
+      {
+        ReportScanBadMarker(nSavedBufPos, nSavedBufAlign);
+      }
+
       // Step 1:
       DecodeRestartDcState();
 
@@ -2344,9 +2390,12 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
       BuffTopup();
 
       // The code is read after the marker: report its position from there
-      // (it was the position before the marker, of the padding bits)
+      // (it was the position before the marker, of the padding bits), and
+      // the error of the byte it starts in (one past the end of the file, as
+      // after an RST that ends it, was reported a code late)
       nSavedBufPos = m_anScanBuffPtr_pos[0];
       nSavedBufAlign = m_nScanBuffPtr_align;
+      nSavedBufErr = m_nScanBuffLatchErr;
 
       // Step 6 (each pass moves 2 bytes on, and no marker is read past the
       // end of the file, so this ends)
@@ -2362,28 +2411,7 @@ bool CimgDecode::DecodeScanComp(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uint32_t
     // In case we encountered a restart marker or bad scan marker
     if(nSavedBufErr == SCANBUF_BADMARK)
     {
-      // Mark as scan error
-      m_nScanCurErr = true;
-
-      m_bScanBad = true;
-
-      if(m_nWarnBadScanNum < m_nScanErrMax)
-      {
-        QString strPos = GetScanBufPos(nSavedBufPos, nSavedBufAlign);
-
-        QString strTmp;
-
-        strTmp = QString("*** ERROR: Bad marker @ %1").arg(strPos);
-        m_pLog->AddLineErr(strTmp);
-
-        m_nWarnBadScanNum++;
-
-        if(m_nWarnBadScanNum >= m_nScanErrMax)
-        {
-          strTmp = QString("    Only reported first %1 instances of this message...").arg(m_nScanErrMax);
-          m_pLog->AddLineErr(strTmp);
-        }
-      }
+      ReportScanBadMarker(nSavedBufPos, nSavedBufAlign);
 
       // Reset the latched error now that we've dealt with it
       m_nScanBuffLatchErr = SCANBUF_OK;
@@ -2728,6 +2756,15 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
       //   5) Refill Scan Buffer with BuffTopUp()
       //   6) Re-invoke ReadScanVal()
 
+      // A bad marker where the bits before the RST start (they made no
+      // code, or one cut short): reported there, as the code is read again
+      // after the RST, and its position taken from there. (Reported after
+      // the restart, it was given that position.)
+      if(nSavedBufErr == SCANBUF_BADMARK)
+      {
+        ReportScanBadMarker(nSavedBufPos, nSavedBufAlign);
+      }
+
       // Step 1:
       DecodeRestartDcState();
 
@@ -2744,9 +2781,11 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
       BuffTopup();
 
       // The code is read after the marker: report its position from there
-      // (it was the position before the marker, of the padding bits)
+      // (it was the position before the marker, of the padding bits), and
+      // the error of the byte it starts in (see DecodeScanComp())
       nSavedBufPos = m_anScanBuffPtr_pos[0];
       nSavedBufAlign = m_nScanBuffPtr_align;
+      nSavedBufErr = m_nScanBuffLatchErr;
 
       // Step 6 (this ends, as in DecodeScanComp())
       eRsvRet = ReadScanVal(bDC ? 0 : 1, bDC ? nTblDhtDc : nTblDhtAc, nZrl, nVal);
@@ -2761,25 +2800,7 @@ bool CimgDecode::DecodeScanCompPrint(uint32_t nTblDhtDc, uint32_t nTblDhtAc, uin
     // In case we encountered a restart marker or bad scan marker
     if(nSavedBufErr == SCANBUF_BADMARK)
     {
-      // Mark as scan error
-      m_nScanCurErr = true;
-
-      m_bScanBad = true;
-
-      if(m_nWarnBadScanNum < m_nScanErrMax)
-      {
-        strPos = GetScanBufPos(nSavedBufPos, nSavedBufAlign);
-        strTmp = QString("*** ERROR: Bad marker @ %1").arg(strPos);
-        m_pLog->AddLineErr(strTmp);
-
-        m_nWarnBadScanNum++;
-
-        if(m_nWarnBadScanNum >= m_nScanErrMax)
-        {
-          strTmp = QString("    Only reported first %1 instances of this message...").arg(m_nScanErrMax);
-          m_pLog->AddLineErr(strTmp);
-        }
-      }
+      ReportScanBadMarker(nSavedBufPos, nSavedBufAlign);
 
       // Reset the latched error now that we've dealt with it
       m_nScanBuffLatchErr = SCANBUF_OK;
@@ -5337,8 +5358,19 @@ void CimgDecode::DecodeScanImg(uint32_t nStart, bool bDisplay, bool bQuiet)
     // Doubles hold both exactly.
     const double dPixels = static_cast<double>(m_nDimX) * m_nDimY;
     const double dScanBits = static_cast<double>(m_anScanBuffPtr_pos[0] - m_nScanBuffPtr_first) * 8;
-    double nCompressionRatio = (dPixels * m_nNumSosComps * 8) / dScanBits;
-    strTmp = QString("    Compression Ratio: %1:1").arg(nCompressionRatio, 5, 'f', 2);
+
+    // A scan with no data (its header ends the file) has no bits: the ratio
+    // was "inf" (a division by zero)
+    if(dScanBits > 0)
+    {
+      double nCompressionRatio = (dPixels * m_nNumSosComps * 8) / dScanBits;
+      strTmp = QString("    Compression Ratio: %1:1").arg(nCompressionRatio, 5, 'f', 2);
+    }
+    else
+    {
+      strTmp = QString("    Compression Ratio: - (no scan data)");
+    }
+
     m_pLog->AddLine(strTmp);
 
     double nBitsPerPixel = dScanBits / dPixels;

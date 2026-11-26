@@ -162,8 +162,17 @@ void CSnoopConfig::RegistryLoad(bool bForWindow)
   bRelaxedParsing = settings.value("General\\RelaxedParsing", bRelaxedParsing).toBool();
   bSkipLargeHashes = settings.value("General\\SkipLargeHashes", bSkipLargeHashes).toBool();
 
-  // Stored under Report\ (as in master and RegistryStore)
-  nErrMaxDecodeScan = settings.value("Report\\ErrMaxDecodeScan", nErrMaxDecodeScan).toInt();
+  // Stored under Report\ (as in master and RegistryStore). Only a number from 0
+  // on is taken, as Options takes (0 to 99999), and Windows kept it unsigned:
+  // a negative one was no limit (-1 was 4,294,967,295 to the decoder), and one
+  // that isn't a number was 0, so no scan error was reported.
+  bool bErrMaxOk = false;
+  const int nErrMax = settings.value("Report\\ErrMaxDecodeScan", nErrMaxDecodeScan).toInt(&bErrMaxOk);
+
+  if(bErrMaxOk && (nErrMax >= 0))
+  {
+    nErrMaxDecodeScan = nErrMax;
+  }
 
   strBatchLastInput = settings.value("General\\BatchLastInput", strBatchLastInput).toString();
   strBatchLastOutput = settings.value("General\\BatchLastOutput", strBatchLastOutput).toString();
