@@ -25,7 +25,10 @@
 #ifndef DOCLOG_H
 #define DOCLOG_H
 
+#include <cstdint>
+#include <QPair>
 #include <QString>
+#include <QVector>
 #include <QPlainTextEdit>
 
 class CDocLog
@@ -48,6 +51,15 @@ public:
 
   void Enable() { m_bEn = true; }
   void Disable() { m_bEn = false; }
+
+  // Hold back the lines added from now on instead of showing them, until
+  // HoldStop(); then show them, or drop them, counting the errors and warnings
+  // among them. (Apart from Enable() and Disable(): while the log is
+  // disabled, no line is held. See CjfifDecode::LengthRunBefore().)
+  void HoldStart();
+  void HoldStop() { m_bHold = false; }
+  void HeldShow();
+  void HeldDrop(uint32_t &nErr, uint32_t &nWarn);
 
   // Re-colour the report after a light/dark appearance change
   void RecolorForPalette();
@@ -78,6 +90,9 @@ private:
 
   QPlainTextEdit *m_pDoc;
   bool m_bEn;
+
+  bool m_bHold;
+  QVector<QPair<QString, teLineKind>> m_aHeld;
 };
 
 #endif

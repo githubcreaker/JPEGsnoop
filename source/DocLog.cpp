@@ -31,12 +31,14 @@ CDocLog::CDocLog(void)
 {
   m_pDoc = nullptr;
   m_bEn = true;     // master enabled the log by default; was left uninitialised
+  m_bHold = false;
 }
 
 CDocLog::CDocLog(QPlainTextEdit *pDoc)
 {
   m_pDoc = pDoc;
   m_bEn = true;
+  m_bHold = false;
 }
 
 CDocLog::~CDocLog(void)
@@ -86,7 +88,11 @@ bool CDocLog::isDark() const
 
 void CDocLog::appendToLog(QString strTxt, teLineKind eKind)
 {
-  if(m_bEn)
+  if(m_bEn && m_bHold)
+  {
+    m_aHeld.append(qMakePair(strTxt, eKind));
+  }
+  else if(m_bEn)
   {
     QTextCharFormat format;
 
@@ -101,6 +107,47 @@ void CDocLog::appendToLog(QString strTxt, teLineKind eKind)
     m_pDoc->appendPlainText(strTxt);
 //    qDebug() << strTxt;
   }
+}
+
+void CDocLog::HoldStart()
+{
+  m_aHeld.clear();
+  m_bHold = true;
+}
+
+// After HoldStop(): show the lines held back, as they would have been shown
+void CDocLog::HeldShow()
+{
+  const QVector<QPair<QString, teLineKind>> aHeld = m_aHeld;
+
+  m_aHeld.clear();
+
+  for(const QPair<QString, teLineKind> &line : aHeld)
+  {
+    appendToLog(line.first, line.second);
+  }
+}
+
+// After HoldStop(): drop the lines held back, giving how many were errors and
+// how many warnings
+void CDocLog::HeldDrop(uint32_t &nErr, uint32_t &nWarn)
+{
+  nErr = 0;
+  nWarn = 0;
+
+  for(const QPair<QString, teLineKind> &line : std::as_const(m_aHeld))
+  {
+    if(line.second == LINE_ERR)
+    {
+      nErr++;
+    }
+    else if(line.second == LINE_WARN)
+    {
+      nWarn++;
+    }
+  }
+
+  m_aHeld.clear();
 }
 
 // After a light/dark change, swap each coloured line to the colour for the

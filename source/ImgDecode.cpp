@@ -1954,6 +1954,24 @@ bool CimgDecode::ScanFillRun(uint32_t nPos, uint32_t &nPosEnd)
   return bSkipped;
 }
 
+// Whether the 0xFF at nPos (before the end of the file) is the start of a
+// marker that the end of the file cuts off: it is the file's last byte, or
+// only 0xFF bytes follow it to the end. In scan data a 0xFF of data has its
+// 0x00, and one before a marker is that marker's, or a fill byte before it.
+bool CimgDecode::ScanMarkerCut(uint32_t nPos)
+{
+  const uint32_t nPosEof = m_pWBuf->GetPosEof();
+  const uint32_t nPosNext = nPos + 1;   // At most the end of the file
+  uint32_t nPosEnd = nPosNext;
+
+  if((nPosNext < nPosEof) && (m_pWBuf->Buf(nPosNext) == 0xFF))
+  {
+    ScanFillRun(nPosNext, nPosEnd);
+  }
+
+  return nPosEnd >= nPosEof;
+}
+
 // Add a byte to the scan buffer from the file
 // - Handle stuff bytes
 // - Handle restart markers
@@ -1991,6 +2009,22 @@ uint32_t CimgDecode::BuffAddByte()
 
   nBuf0 = m_pWBuf->Buf(m_nScanBuffPtr);
   nBuf1 = m_pWBuf->Buf(m_nScanBuffPtr + 1);
+
+  // A 0xFF that the file ends in, or a run of them to its end, isn't data
+  // but a marker the end of the file cuts off, so the scan's data ends before
+  // it, as libjpeg reads it: at the end of the file its source supplies an
+  // EOI, and its decoder takes 0xFF bytes before a marker for fill bytes.
+  // (With the 0 that Buf() returns past the end, it was read as a stuffed
+  // 0xFF: 8 bits of 1 decoded as data, which could add codes or errors and
+  // change the image, and the end of the file was reported 1 or 2 bytes past
+  // it.) Each of its bytes is marked as one past the end of the file.
+  if((nBuf0 == 0xFF) && ScanMarkerCut(m_nScanBuffPtr))
+  {
+    m_nScanDataEnd = qMin(m_nScanDataEnd, m_nScanBuffPtr);
+    ScanBuffAddErr(0x00, m_nScanBuffPtr, SCANBUF_EOF);
+    ScanBuffPtrAdvance(1);
+    return 0;
+  }
 
   // Fill bytes before an RSTn (T.81 B.1.1.2) are skipped, to the marker's own
   // 0xFF. Added as data, they could fill the buffer before the RSTn was
@@ -3109,6 +3143,13 @@ void CimgDecode::ReportVlc(uint32_t nVlcPos, uint32_t nVlcAlign,
       nBufPosInd++;
     }
 
+    // A marker that the end of the file cuts off is 0, as the decoder reads
+    // it (see BuffAddByte()). (A 0xFF is read only before the end.)
+    if((nBufByte == 0xFF) && ScanMarkerCut(static_cast<uint32_t>(nBufPosInd - 1)))
+    {
+      nBufByte = 0x00;
+    }
+
     // Fill bytes, before an RSTn or a stuffed 0xFF's 0x00, are skipped as the
     // decoder skips them (see BuffAddByte()): each was shown, and the bytes
     // after them later than the decoder read them. On to the RSTn's code, or
@@ -3763,8 +3804,12 @@ uint32_t CimgDecode::RestartSkipToMarker(uint32_t nPos, uint32_t &nMarkerPos)
       nPosNext++;
     }
 
+    // A run to the end of the file is a marker the end cuts off, so the data
+    // ends at its first 0xFF (see BuffAddByte()). (The end of the file was
+    // given, past it, and the 0xFF bytes were counted as scan data.)
     if(nPosNext >= nPosEof)
     {
+      nMarkerPos = nPos;
       break;
     }
 

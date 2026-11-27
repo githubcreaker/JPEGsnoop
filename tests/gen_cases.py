@@ -7705,6 +7705,204 @@ em_case("EM_zero", "0", cl_log("log.txt", "    Number of RESTART markers decoded
         forbid="Expected RST marker index")
 
 
+# --- LF: a 0xFF as the last byte of the scan data ------------------------------------
+# A 0xFF that the file ends in, or a run of them to its end, is a marker that the
+# end of the file cuts off (in scan data a 0xFF of data has its 0x00), so the
+# scan's data ends before it, as djpeg reads it. With the 0 read past the end, it
+# was a stuffed 0xFF: 8 bits of 1 decoded as data, and the end of the file
+# reported 1 or 2 bytes past it. lm_444.jpg's MCU 8 ([3,1]) starts at a byte, so
+# cut there the error is in that MCU, at the end of the file, with or without
+# the 0xFF.
+def lf_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "LF", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+LF_M = next(m for m in range(1, len(LM444)) if LM444[m][1] == 0)
+LF_MCU = (LF_M % 5, LF_M // 5)
+LF_CUT = LM444[LF_M][0]
+assert 0xFF not in lm444[LF_CUT - 4:LF_CUT]
+LF_EOF = ez_eof(LF_MCU, LF_CUT)
+LF_PAST = f"Scan data ends .* @ 0x{LF_CUT + 1:08x}|@ 0x{LF_CUT + 2:08x}\\.|huffman bitstring"
+lf_case("LF_cut", write("lf_cut.jpg", lm444[:LF_CUT]), LF_EOF)
+lf_case("LF_ff", write("lf_ff.jpg", lm444[:LF_CUT] + b"\xff"), LF_EOF, forbid=LF_PAST)
+lf_case("LF_run", write("lf_run.jpg", lm444[:LF_CUT] + b"\xff" * 5), LF_EOF, forbid=LF_PAST)
+# 2 MB of them, in time, with Detailed Decode too
+lf_case("LF_long", write("lf_long.jpg", lm444[:LF_CUT] + b"\xff" * (2 << 20)), LF_EOF, forbid=LF_PAST,
+        flags=f"--detail {LF_MCU[0] - 1},{LF_MCU[1]},2", timeout=5)
+# Detailed Decode shows the 0xFF as the 0 decoded, in the bytes of the codes of
+# the MCU before (it showed ff, then the 0s past the end)
+LF_LAST = lm444[LF_CUT - 1]
+lf_case("LF_detail", "lf_ff.jpg", f"Data=\\[0x {LF_LAST:02x} 00 00 00 = 0b",
+        forbid=f"Data=\\[0x {LF_LAST:02x} ff ", flags=f"--detail {LF_MCU[0] - 1},{LF_MCU[1]},1")
+# Tools > Lookup MCU Offset: the MCU has no data (it was at the 0xFF)
+LF_XY = (LF_MCU[0] * 8 + 3, LF_MCU[1] * 8 + 5)
+case("LF_lookup", "LF", "gui", ["lf_ff.jpg"], f"--lookup x={LF_XY[0]},y={LF_XY[1]},recalc,close", timeout=30,
+     expect=lm_want(*LF_XY, LF_MCU, None), forbid=lm_want(*LF_XY, LF_MCU, (LF_CUT, 0)))
+# With a DRI: the 0xFF as an interval's first byte (after RST0)
+lf_case("LF_rst", write("lf_rst.jpg", ez[:EZ_RST_END] + b"\xff"), ez_eof((2, 0), EZ_RST_END),
+        forbid=f"No RST found|@ 0x{EZ_RST_END + 1:08x}|@ 0x{EZ_RST_END + 2:08x}\\.|huffman bitstring")
+lf_case("LF_run_detail", "lf_run.jpg", f"Data=\\[0x {LF_LAST:02x} 00 00 00 = 0b",
+        forbid=f"Data=\\[0x {LF_LAST:02x} ff ", flags=f"--detail {LF_MCU[0] - 1},{LF_MCU[1]},1")
+# The image: the MCU at the end of the file is decoded from the zero bits of the
+# end, so it has the levels of the MCU before (a DC change of 0 in each block),
+# as with the file cut there (from the 8 bits of 1 it had others)
+LF_RGB = er_rgb(*LF_XY, *(lm_level(c, (LF_MCU[0] - 1) * 8, LF_MCU[1] * 8) for c in range(3)))
+lf_case("LF_pixel", "lf_ff.jpg", LF_RGB, flags=f"--pixels {LF_XY[0]},{LF_XY[1]}")
+lf_case("LF_cut_pixel", "lf_cut.jpg", LF_RGB, flags=f"--pixels {LF_XY[0]},{LF_XY[1]}")
+# The marker list's pass over the scan data likewise: the data ends at the 0xFF
+# (it read it with the 0 past the end, "Ran out of buffer" one past that), and
+# then the marker is cut off by the end of the file, as with 2 or more of them
+lf_case("LF_scan_pass", "lf_ff.jpg", "^ERROR: Early EOF - file may be missing EOI$", forbid="Ran out of buffer")
+# At the end of a file of 4 GiB - 1 bytes: the 0xFF at 0xfffffffe
+LF_HUGE_AT = 0xFFFFFFFF - (LF_CUT + 1)
+with open(files_dir / "lf_huge.bin", "wb") as f:
+    f.write(bytes(random.Random(11).randrange(256) for _ in range(4096)))
+    f.seek(LF_HUGE_AT)
+    f.write(lm444[:LF_CUT] + b"\xff")
+lf_case("LF_huge", "lf_huge.bin", ez_eof(LF_MCU, LF_HUGE_AT + LF_CUT), forbid="@ 0xffffffff\\.",
+        flags=f"--start {LF_HUGE_AT}", timeout=5)
+# With a DRI, an RST cut to its 0xFF where an interval ends: the search for the
+# RST finds the end of the file at the 0xFF, as for the file cut before it (it
+# gave the end of the file, past the 0xFF)
+lf_case("LF_rst_cut", write("lf_rst_cut.jpg", ez[:EZ_RST_END - 1]),
+        ri_skipped(f"the end of the file @ 0x{EZ_RST_END - 2:08x}\\.0"), forbid=f"@ 0x{EZ_RST_END - 1:08x}\\.0")
+# A whole scan, with the EOI cut to its 0xFF: as before
+lf_case("LF_whole", write("lf_whole.jpg", lm444[:-1]), "^ERROR: Early EOF - file may be missing EOI$",
+        forbid="Scan data ends")
+
+
+# --- LR: runs of one marker with a length ---------------------------------------------
+# Each marker with a length was listed, however many in a row: an empty COM made
+# 5 lines from 4 bytes, and each line takes about 35 us and 3 KB of memory in
+# the report, so 65,536 of them took 11 s and 967 MB. After the first 20 of one
+# kind in a row, the rest of the run is parsed as usual, but not listed, and
+# reported in one line where it ends (with its fill bytes, and the error and
+# warning lines it held). A marker that ends the parsing, or after which no
+# marker starts where its length ends, is shown in full. Here, runs before the
+# scan of nl (the NL section's file), the kth marker at NL_SOS + (k - 1) * size.
+def lr_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "LR", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def lr_run(marker, count, notes, pos):
+    """The run's line: notes, after "parsed as usual", are its fill bytes and the
+    error and warning lines not shown"""
+    notes = f"; {notes}" if notes else ""
+    return (f"^  Only the first 20 {marker} markers in a row are listed: {count} more not listed "
+            f"\\(parsed as usual{notes}\\), to 0x{pos:08x}$")
+
+
+def lr_off(pos):
+    return f"^  OFFSET: 0x{pos:08x}$"
+
+
+def lr_app1_err(pos):
+    return (f"^ERROR: Identifier at \\[0x{pos + 4:08x}\\] runs past the end of its APP1 segment, at "
+            f"\\[0x{pos + 4:08x}\\]\\. Skipping\\.$")
+
+
+LR_COM = b"\xff\xfe\x00\x02"           # Empty: a COM, a DQT
+LR_DQT0 = b"\xff\xdb\x00\x02"
+LR_COMS = 1 << 16                      # 256 KB of COMs
+write("lr_com.jpg", ri_put(nl, NL_SOS, LR_COM * LR_COMS))
+lr_case("LR_com", "lr_com.jpg", lr_run("COM", LR_COMS - 20, "", NL_SOS + 4 * LR_COMS), timeout=5)
+lr_case("LR_com_20th", "lr_com.jpg", lr_off(NL_SOS + 4 * 19), forbid=lr_off(NL_SOS + 4 * 20), timeout=5)
+lr_case("LR_com_lines", "lr_com.jpg", RA_SMALL, flags="--count-lines", timeout=5)
+lr_case("LR_com_pixel", "lr_com.jpg", er_grey(4, 4, 100), flags="--pixels 4,4", timeout=5)
+# The command line's report likewise
+case("LR_com_cmdline", "LR", "cmdline", ["lr_com.jpg"], "-- -i lr_com.jpg -o log.txt", timeout=10,
+     expect=cl_log("log.txt", lr_run("COM", LR_COMS - 20, "", NL_SOS + 4 * LR_COMS)[1:-1]))
+# 20 are all listed; of 21, the last isn't
+lr_case("LR_com20", write("lr_com20.jpg", ri_put(nl, NL_SOS, LR_COM * 20)), lr_off(NL_SOS + 4 * 19),
+        forbid="Only the first 20 COM")
+lr_case("LR_com21", write("lr_com21.jpg", ri_put(nl, NL_SOS, LR_COM * 21)), lr_run("COM", 1, "", NL_SOS + 84))
+# With a fill byte before each: one run
+lr_case("LR_fill", write("lr_fill.jpg", ri_put(nl, NL_SOS, (b"\xff" + LR_COM) * 30)),
+        lr_run("COM", 10, "10 fill bytes", NL_SOS + 150))
+# Another marker between ends the run: a TEM, another kind, the scan
+lr_case("LR_apart_tem", write("lr_apart_tem.jpg", ri_put(nl, NL_SOS, LR_COM * 15 + b"\xff\x01" + LR_COM * 15)),
+        lr_off(NL_SOS + 62 + 4 * 14), forbid="Only the first 20 COM")
+lr_case("LR_apart_dqt", write("lr_apart_dqt.jpg", ri_put(nl, NL_SOS, LR_COM * 15 + LR_DQT0 + LR_COM * 15)),
+        lr_off(NL_SOS + 64 + 4 * 14), forbid="Only the first 20 COM")
+write("lr_apart_sos.jpg", ri_put(ri_put(nl, NL_AFTER, LR_COM * 15), NL_SOS, LR_COM * 15))
+lr_case("LR_apart_sos", "lr_apart_sos.jpg", lr_off(NL_AFTER + 60 + 4 * 14), forbid="Only the first 20 COM")
+# Two kinds, each a run of its own
+write("lr_two.jpg", ri_put(nl, NL_SOS, LR_COM * 25 + LR_DQT0 * 25))
+lr_case("LR_two_com", "lr_two.jpg", lr_run("COM", 5, "", NL_SOS + 100))
+lr_case("LR_two_dqt", "lr_two.jpg", lr_run("DQT", 5, "", NL_SOS + 200))
+# The errors and warnings of the markers not listed are counted, not shown: an
+# empty APP1 has an error, a JPG0 a warning, and with Relaxed Parsing a reserved
+# marker (0xFF02) two
+write("lr_app1.jpg", ri_put(nl, NL_SOS, b"\xff\xe1\x00\x02" * 25))
+lr_case("LR_errors", "lr_app1.jpg", lr_run("APP1", 5, "5 error lines not shown", NL_SOS + 100),
+        forbid=lr_app1_err(NL_SOS + 80))
+lr_case("LR_errors_20th", "lr_app1.jpg", lr_app1_err(NL_SOS + 76))
+write("lr_jpg0.jpg", ri_put(nl, NL_SOS, b"\xff\xf0\x00\x02" * 25))
+lr_case("LR_warnings", "lr_jpg0.jpg", lr_run("JPG0", 5, "5 warning lines not shown", NL_SOS + 100),
+        forbid=lr_off(NL_SOS + 80))
+# One of each: 21 APP1s, 21 JPG0s, and a fill byte before only the 21st COM;
+# and lines, not errors: a COM of length 0 gives 3 error lines
+lr_case("LR_one_error", write("lr_app1_21.jpg", ri_put(nl, NL_SOS, b"\xff\xe1\x00\x02" * 21)),
+        lr_run("APP1", 1, "1 error line not shown", NL_SOS + 84))
+lr_case("LR_one_warning", write("lr_jpg0_21.jpg", ri_put(nl, NL_SOS, b"\xff\xf0\x00\x02" * 21)),
+        lr_run("JPG0", 1, "1 warning line not shown", NL_SOS + 84))
+lr_case("LR_one_fill", write("lr_fill1.jpg", ri_put(nl, NL_SOS, LR_COM * 20 + b"\xff" + LR_COM)),
+        lr_run("COM", 1, "1 fill byte", NL_SOS + 85))
+lr_case("LR_com0", write("lr_com0.jpg", ri_put(nl, NL_SOS, b"\xff\xfe\x00\x00" * 21)),
+        lr_run("COM", 1, "3 error lines not shown", NL_SOS + 84))
+write("lr_reserved.jpg", ri_put(nl, NL_SOS, b"\xff\x02\x00\x02" * 25))
+lr_case("LR_reserved", "lr_reserved.jpg", lr_run("\\(0xFF02\\)", 5, "10 warning lines not shown", NL_SOS + 100),
+        flags="--relaxed")
+# The markers not listed are parsed: the 25th DQT's table, with a DC quantiser
+# of 2, is the one the scan uses (-224 * 2 / 8 + 128: 72 where it was 100)
+LR_DQT_AT = nl.index(b"\xff\xdb\x00\x43")
+LR_DQT = nl[LR_DQT_AT:LR_DQT_AT + 69]
+assert LR_DQT[4:] == b"\x00" + b"\x01" * 64
+write("lr_dqt.jpg", ri_put(nl, NL_SOS, LR_DQT * 24 + LR_DQT[:5] + b"\x02" + LR_DQT[6:]))
+lr_case("LR_dqt", "lr_dqt.jpg", lr_run("DQT", 5, "", NL_SOS + 69 * 25))
+lr_case("LR_dqt_parsed", "lr_dqt.jpg", er_grey(4, 4, 72), flags="--pixels 4,4")
+# A marker the parsing ends with is shown in full, after the run's line: a DRI
+# too short for its interval (an error), and a COM cut by the end of the file
+write("lr_dri_short.jpg", ri_put(nl, NL_SOS, b"\xff\xdd\x00\x04\x00\x00" * 24 + b"\xff\xdd\x00\x02"))
+lr_case("LR_end_run", "lr_dri_short.jpg", lr_run("DRI", 4, "", NL_SOS + 144))
+lr_case("LR_end_shown", "lr_dri_short.jpg", lr_off(NL_SOS + 144), forbid=lr_off(NL_SOS + 120))
+# And a COM whose length (3) takes the scan's 0xFF, so no marker follows it (it
+# was dropped, and the report gave "Expected marker 0xFF, got 0xda" after the
+# run's line, and not why)
+write("lr_wrong.jpg", ri_put(nl, NL_SOS, LR_COM * 24 + b"\xff\xfe\x00\x03"))
+lr_case("LR_wrong_run", "lr_wrong.jpg", lr_run("COM", 4, "", NL_SOS + 96))
+lr_case("LR_wrong_shown", "lr_wrong.jpg", lr_off(NL_SOS + 96), forbid=lr_off(NL_SOS + 80))
+lr_case("LR_wrong_error", "lr_wrong.jpg", f"^ERROR: Expected marker 0xFF, got 0xda @ offset 0x{NL_SOS + 101:08x}\\. ")
+write("lr_eof.jpg", nl[:NL_SOS] + LR_COM * 24 + b"\xff\xfe\x00\x10ab")
+lr_case("LR_eof_run", "lr_eof.jpg", lr_run("COM", 4, "", NL_SOS + 96))
+lr_case("LR_eof_shown", "lr_eof.jpg", lr_off(NL_SOS + 96), forbid=lr_off(NL_SOS + 80))
+# A run to the end of a file of 4 GiB - 1 bytes (after the scan, with no EOI)
+LR_HUGE = nl[:-2] + LR_COM * 25
+LR_HUGE_AT = 0xFFFFFFFF - len(LR_HUGE)
+with open(files_dir / "lr_huge_end.bin", "wb") as f:
+    f.write(bytes(random.Random(9).randrange(256) for _ in range(4096)))
+    f.seek(LR_HUGE_AT)
+    f.write(LR_HUGE)
+lr_case("LR_huge_end", "lr_huge_end.bin", lr_run("COM", 5, "", 0xFFFFFFFF), flags=f"--start {LR_HUGE_AT}",
+        timeout=5)
+# And a COM there whose length runs past the end, where the position wraps past
+# 2^32: shown in full
+LR_WRAP = nl[:-2] + LR_COM * 24 + b"\xff\xfe\x00\x10ab"
+LR_WRAP_AT = 0xFFFFFFFF - len(LR_WRAP)
+LR_WRAP_RUN = LR_WRAP_AT + len(nl) - 2
+with open(files_dir / "lr_huge_wrap.bin", "wb") as f:
+    f.write(bytes(random.Random(10).randrange(256) for _ in range(4096)))
+    f.seek(LR_WRAP_AT)
+    f.write(LR_WRAP)
+lr_case("LR_huge_wrap", "lr_huge_wrap.bin", lr_off(LR_WRAP_RUN + 96), forbid=lr_off(LR_WRAP_RUN + 80),
+        flags=f"--start {LR_WRAP_AT}", timeout=5)
+# Each scan is listed: after the scan, 22 more scan headers in a row, with no data
+LR_SOS_HDR = nl[NL_SOS:NL_SOS + 10]
+assert LR_SOS_HDR[:4] == b"\xff\xda\x00\x08"
+lr_case("LR_sos", write("lr_sos.jpg", ri_put(nl, NL_AFTER, LR_SOS_HDR * 22)), lr_off(NL_AFTER + 10 * 21),
+        forbid="Only the first 20 SOS")
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

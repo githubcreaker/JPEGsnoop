@@ -499,6 +499,7 @@ private:
   uint32_t BuffAddByte();
   void ScanFillForget();
   bool ScanFillRun(uint32_t nPos, uint32_t &nPosEnd);
+  bool ScanMarkerCut(uint32_t nPos);
   void BuffTopup();
   void ScanBuffConsume(uint32_t nNumBits);
   void ScanBuffAdd(uint32_t nNewByte, uint32_t nPtr);

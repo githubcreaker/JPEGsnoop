@@ -5129,12 +5129,184 @@ goes on, but `ValidateValue()` makes the ID 0 first.)
 **Found, not fixed (inherited):**
 - **A 0xFF as the last byte of the file, in the scan data,** is read as a stuffed 0xFF00, as
   the byte past the end reads as 0: four "Can't find huffman bitstring" errors, then "Scan
-  data ends ... @ 0x0000009d.4", past the end of the file (by the review).
-- **Markers with a length are each listed,** however many in a row (above).
+  data ends ... @ 0x0000009d.4", past the end of the file (by the review). (Fixed since: see
+  the next section.)
+- **Markers with a length are each listed,** however many in a row (above). (Fixed since for
+  runs of one kind: see the next section.)
 - The section before's other three: a marker from SOF0 on inside an interval's data is
   decoded through; without a DRI, the first MCU of each row after the data runs out is
   decoded from zeros; and without a DRI, a restart inside an MCU zeroes the luminance DC the
   status bar shows.
+
+### A 0xFF at the end of the scan data, and runs of one marker
+
+The section before's first two items, both inherited from Windows (by reading its code).
+
+**A 0xFF as the file's last byte, in the scan data.** The scan buffer read a 0xFF with the
+byte after it, and past the end of the file that byte reads as 0, so the 0xFF was a stuffed
+0xFF00: 8 bits of 1 decoded as data. djpeg (libjpeg-turbo 3.2.1) reads it as a marker that
+the end of the file cuts off: at the end of the file its source supplies an EOI (FF D9) and
+warns "Premature end of JPEG file", and its decoder takes a 0xFF before another 0xFF for a
+fill byte, so the file's last 0xFF goes with that EOI, and the image is the one without it.
+On a made-up 64x32 JPEG (`cjpeg -quality 95`, no DRI) cut just after each of its 7 stuffed
+0xFF bytes (so each lost its 0x00):
+- **djpeg:** all 7 images were the same as without the 0xFF ("Corrupt JPEG data: premature
+  end of data segment" in both).
+- **JPEGsnoop:** in all 7, "Scan data ends at the end of the file" was 1 or 2 bytes past the
+  end of the file (0x00000728.4 in a file of 0x727 bytes), and the code-length statistics
+  counted the codes the 8 bits made; in 2, the image changed; in the review's file, four
+  "Can't find huffman bitstring" errors came first.
+
+Now a 0xFF that the file ends in, or a run of them to its end, isn't data, and each of its
+bytes is marked as one past the end of the file, so the scan's data ends before it. The 7
+files decode as without the 0xFF: the same image, and the same report but for the scan
+pass's line (below). As it is now:
+- **The decode:** the error is at the 0xFF, in the MCU that has no data, as for the file cut
+  there: "Scan data ends at the end of the file in MCU(3,1) @ 0x000000d3.0" for
+  `lm_444.jpg` cut before MCU [3,1] with a 0xFF after it (it was 0x000000d6.4, and with 5
+  of them, "Can't find huffman bitstring" first).
+- **Tools > Lookup MCU Offset:** an MCU that starts at the 0xFF has no data, so "Not decoded"
+  (it gave the 0xFF's offset).
+- **Detailed Decode** shows the 0xFF as the 0 decoded in the bytes after a code
+  ("Data=[0x 50 00 00 00", where it showed "50 ff 00 00"), as last round made it show the
+  bytes decoded. So does a whole scan whose EOI is cut to its 0xFF: in Detailed Decode only
+  the bytes after its last code changed (`lf_whole.jpg`, `ml_fill_eof.jpg`).
+- **With a DRI,** a 0xFF as an interval's first byte is the end of the file likewise. And
+  the search for the RST where an interval ends stops at a run of 0xFF to the end (by the
+  review): with `ez_rst_end.jpg`'s RST0 cut to its 0xFF, "data skipped to the end of the
+  file @ 0x000000a0.0" and a compression ratio of 102.40:1, as for the file cut before the
+  0xFF (it gave 0x000000a1.0, past the 0xFF, and counted it as data: 85.33:1).
+- **The marker list's pass over the scan data** (phase 1) ends the data at a lone 0xFF at the
+  end, as it did at 2 or more (by the review). It read it with the 0 past the end, so Options
+  > Scan Dump showed it as data, and it gave "Ran out of buffer before EOI during phase 1"
+  one past that. Now the marker after the data is cut off by the end of the file, and the
+  report gives "Early EOF", as with 2 or more.
+
+djpeg decodes each `LF` file with 0xFF bytes at the end (one, 5, 2 MB, and one after an RST)
+to the image of the file cut before them.
+
+**Runs of one marker with a length.** Each marker with a length was listed, however many in
+a row: an empty COM or DQT (4 bytes) makes 5 lines, an empty APP1 7. Each line takes about
+35 µs and 3 KB of memory, in the report's Qt text widget, which the window, File > Batch
+Process and the command line all use (`--count-lines` and `/usr/bin/time -l` on the harness,
+and a scratch program on the app's own log class):
+
+| Empty COMs (4 bytes each) | Report | Time | Peak memory |
+|---|---|---|---|
+| none | 348 lines | 0.26 s | 47 MB |
+| 16,384 (64 KB) | 82,268 lines, 1.6 MB | 3.0 s | 302 MB |
+| 65,536 (256 KB) | 328,028 lines, 6.2 MB | 11.3 s | 967 MB |
+
+It grew with the file: 16 MB of them would have taken about 12 minutes and 60 GB (worked out
+from these, not run). The parsing takes no input meanwhile (the only Cancel is for hashing a
+large file), and djpeg reads the 65,536 in under 0.01 s. Undo history isn't the cost: the
+window's report keeps none, and with it off the scratch program took the same (975 MB, not
+1,003). With no lines written at all (a scratch build), 65,536 empty markers of each of 7
+kinds took 0.18 to 0.36 s in all.
+
+Now, after the first 20 of one kind in a row, each as before, the rest of the run is parsed
+as usual, but its lines are held back and dropped, and the run gets one line where it ends:
+"Only the first 20 COM markers in a row are listed: 65516 more not listed (parsed as usual),
+to 0x00040002". It adds their fill bytes ("; 10 fill bytes"), and the error and warning lines
+that weren't shown ("; 65516 error lines not shown"). It counts lines, not errors: a COM of
+length 0 gives 3 error lines. (By the review: it said "errors", and left out fill bytes.)
+- **Only the listing changes:** each marker is still parsed, so its tables and settings take
+  effect (the 25th DQT's table is the one the scan uses). The reports of 65,536 empty COMs,
+  APP1s, DQTs and JPG0s are each the old report with the run's lines taken out and the one
+  line put in, and the image is the same. 65,536 of each of 7 kinds take 0.2 to 0.55 s (11
+  to 23 s before).
+- **A marker the parsing ends with** (an error, the end of the file, or a position that
+  wrapped past 2^32) is shown in full, after the run's line. So is one after which no marker
+  starts where its length ends, as when it takes the next marker's 0xFF: the last marker not
+  listed is kept until the next one is read. (By the review: it was dropped, and the report
+  gave "Expected marker 0xFF, got 0xda" after the run's line, with no sign of why.)
+- **The run's markers are those of one code,** after any fill bytes, each with a length. Any
+  other marker ends the run, as do the scan and the end of the file. SOS isn't in runs
+  (each scan is listed), nor are markers with no length (SOI, EOI, TEM and RSTn, which have
+  the rule of the section before), nor an RSTn taken to have a length.
+- **The lines are held apart from `CDocLog::Enable()`/`Disable()`:** the EXIF parser calls
+  `Enable()` at the end of each IFD, so disabling the log for the run's markers would have
+  shown the lines after it. While the log is disabled, nothing is held.
+
+**Not covered** (by the review, with the new build). Only a run of one kind is cut short, so
+these are still listed in full, and their report still grows with the file:
+
+| Input | Size | Time | Memory |
+|---|---|---|---|
+| COM and TEM in turn | 1 MB | 60 s | 5.1 GB |
+| APP0 and APP1 in turn | 256 KB | 35 s | 1.7 GB |
+| COM and DQT in turn | 256 KB | 14 s | 1 GB |
+| 16,384 scan headers after the scan | 160 KB | 8.4 s | 663 MB |
+| 16,384 RSTn taken to have a length (Relaxed Parsing) | 64 KB | 4.75 s | |
+| 20 APP1s, each XMP of 32K short lines | 1.3 MB | 21 s | 1.7 GB |
+
+Alternating kinds at 16 MB would take about 16 minutes and 80 GB, the cost this change
+removed for runs of one kind. A single marker with many lines is the same class (an empty DHT
+table's 21 lines, the earlier "Six runaway reports" item). The lines held back are still
+built: 16 MB of DHTs take 10.9 s with Options > DHT Expand on, 3.2 s with it off. Closing
+the rest needs a different rule: count each kind across the file, not in a row, or give the
+marker list a budget of lines per file. That is left to decide.
+
+**Tests:** 47 new cases (14 `LF`, 33 `LR`): 2,118 in all. On the code before, 36 of the 47
+fail. The 11 that pass check what didn't change: the file cut without a 0xFF, and its image;
+a whole scan with its EOI cut to its 0xFF; 20 COMs, all listed; runs ended by a TEM, by
+another kind and by the scan; the 20th APP1's error; the 25th DQT's table used; the error
+after a COM whose length takes the scan's 0xFF; and 22 scan headers in a row, all listed.
+Their values are worked out from the generator's bytes:
+- a 0xFF, 5 and 2 MB of them (with Detailed Decode) after `lm_444.jpg` cut before MCU [3,1],
+  the image there (the MCU decoded from the zero bits of the end has the levels of the MCU
+  before), and Detailed Decode's bytes after one and after 5; Lookup MCU Offset; the scan
+  pass's "Early EOF"; the 0xFF at 0xfffffffe, at the end of a file of 4 GiB - 1 bytes; and
+  with a DRI, after an RST that ends an interval, and an RST cut to its 0xFF;
+- 65,536 empty COMs before the scan, in time, in few lines, with the 20th listed and not the
+  21st, the image after them, and in the command line's report; 20 and 21; a fill byte
+  before each, and before only the 21st; two kinds in turn; the error lines of empty APP1s
+  (and of one), and of COMs of length 0, the warning lines of JPG0s (and of one) and of
+  reserved markers (0xFF02, with Relaxed Parsing); the 25th DQT; a DRI too short for its
+  interval, a COM cut by the end of the file, and one whose length takes the scan's 0xFF,
+  after 24 of them, each shown in full; a run to the end of a file of 4 GiB - 1 bytes, and
+  one whose last COM wraps past 2^32 there.
+
+Each of 23 switches, put in a scratch copy, fails its own cases when on, and with them off
+all 47 pass:
+- the 0xFF taken as the end of the file, a run of them, the data's end for Lookup MCU
+  Offset, Detailed Decode's bytes, the scan pass's 0xFF, and the RST search's end;
+- the lines held, the 20 (`>=` for `>`, and 21), the run's code, SOS kept out, each of the
+  three ways a marker ends the parsing (and all), the marker kept until the next shows
+  whether a marker follows it;
+- the error and warning lines and fill bytes counted, the run's end position, the fill bytes
+  before a code, the markers parsed (passed over instead, the 25th DQT isn't used), and the
+  count reset.
+
+**Checks:**
+- **Only these reports change.** Old against new, on the tests' 578 files under 64 MB: the
+  20 new `LF` and `LR` files with a 0xFF at the end or a run, and no other. With Detailed
+  Decode over the whole image, on the 13 that end in a 0xFF: the `LF` files, and
+  `ml_fill_eof.jpg`, in the bytes shown after the last code (above).
+- **The tests pass:** all 2,105 cases before the review's fixes; after them, the 446 cases
+  of the groups they reach (`LF`, `LR`, `ML`, `MP`, `RA`, `NL`, `EZ`, `RI`, `ER`, `RC`, `LM`,
+  `D`), and the same 446 with ASan/UBSan, with no sanitizer reports.
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 245 things in the three
+  files as before, and catches a bug planted in each of the 16 functions changed (13 before
+  the review's fixes; `DecodeMarker()`, `RestartSkipToMarker()`, `LengthRunDrop()` and the
+  reworked `LengthRunBefore()` after them).
+- **No new compiler warnings** in the three files.
+- **A fresh review** (an agent given the diff) checked each case's values from the bytes,
+  timed crafted runs and cut files, and found the marker hidden after a wrong length, the RST
+  search and the scan pass, the summary's counts, and the missing cases above, all fixed,
+  and the cases not covered. A second review, of the reworked code, found no bug. It traced
+  every way `ProcessFile()` ends, runs cut anywhere and near 4 GiB, and the log disabled. It
+  timed 16 MB of empty COMs at 2.5 s and 49 MB, and of empty APP1s at 7 s. It found the
+  first item below, and measured 65,536 RSTn taken to have a length at 16 s and 1.28 GB,
+  before and after.
+
+**Found, not fixed:**
+- **A marker not listed whose length ends on a 0xFF that stops the parsing** (FF 00, or a
+  reserved marker without Relaxed Parsing) is dropped, so the report shows the run's line
+  and then the stop, without that marker (by the second review, from the code). Only the
+  listing is affected.
+- **Markers of different kinds in turn,** runs of scans, RSTn taken to have a length, and
+  markers with many lines are still listed in full (above).
 
 ## How this was reviewed
 

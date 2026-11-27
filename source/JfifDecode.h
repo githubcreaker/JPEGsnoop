@@ -47,6 +47,8 @@ class QSaveFile;
 
 static const int32_t MAX_IFD_COMPS = 150;        // Maximum number of IFD entry components to display
 static const uint32_t NO_LENGTH_RUN_LISTED = 20;  // Markers with no length in a row listed one by one
+static const uint32_t LENGTH_RUN_LISTED = 20;     // Markers of one kind with a length in a row listed one by one
+static const uint32_t LENGTH_RUN_NONE = 0x100;    // No marker (see PeekMarkerCode())
 
 static const uint32_t JFIF_SOF0 = 0xC0;
 static const uint32_t JFIF_SOF1 = 0xC1;
@@ -223,6 +225,12 @@ private:
 
   uint32_t DecodeMarker();
   void SkipNoLengthRun();
+  uint32_t PeekMarkerCode(uint32_t nPos, uint32_t &nFill);
+  static bool LengthRunCode(uint32_t nCode);
+  void LengthRunBefore();
+  void LengthRunAfter(uint32_t nRet, uint32_t nPosBefore);
+  void LengthRunDrop();
+  void LengthRunReport();
   bool WrappedSince(uint32_t nPosFrom) const;
   bool ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen);
   quint64 SegEnd(uint32_t nPosLength, uint32_t nLength) const;
@@ -406,6 +414,19 @@ private:
 
   bool m_bStateSoi;
   uint32_t m_nNoLengthRun;      // Markers with no length in a row, each listed (see SkipNoLengthRun())
+
+  // A run of markers of one kind with a length (see LengthRunBefore())
+  uint32_t m_nLengthRunCode;    // Its marker's code, or LENGTH_RUN_NONE
+  uint32_t m_nLengthRunNum;     // How many so far
+  uint32_t m_nLengthRunHeld;    // How many not listed, after the first LENGTH_RUN_LISTED
+  uint32_t m_nLengthRunErr;     // Their error and warning lines, not shown
+  uint32_t m_nLengthRunWarn;
+  uint32_t m_nLengthRunFill;    // Their fill bytes
+  uint32_t m_nLengthRunPosEnd;  // Where the last not listed ends
+  bool m_bLengthRunHolding;     // The marker being parsed isn't listed
+  bool m_bLengthRunPending;     // The last parsed wasn't listed, and its lines are kept until the next
+  uint32_t m_nLengthRunFillPending;   // (Its fill bytes, and where it ends)
+  uint32_t m_nLengthRunPosPending;
   bool m_bStateDht;
   bool m_bStateDhtOk;
   bool m_bStateDhtFake;         // Fake DHT required for AVI

@@ -232,6 +232,17 @@ void CjfifDecode::Reset()
   m_bStateAbort = false;
   m_bStateSoi = false;
   m_nNoLengthRun = 0;
+  m_nLengthRunCode = LENGTH_RUN_NONE;
+  m_nLengthRunNum = 0;
+  m_nLengthRunHeld = 0;
+  m_nLengthRunErr = 0;
+  m_nLengthRunWarn = 0;
+  m_nLengthRunFill = 0;
+  m_nLengthRunPosEnd = 0;
+  m_bLengthRunHolding = false;
+  m_bLengthRunPending = false;
+  m_nLengthRunFillPending = 0;
+  m_nLengthRunPosPending = 0;
   m_bStateDht = false;
   m_bStateDhtOk = false;
   m_bStateDhtFake = false;
@@ -8056,6 +8067,17 @@ uint32_t CjfifDecode::DecodeMarker()
 
         if(nSkipData == 0xFF)
         {
+          // A 0xFF that the file ends in is a marker the end cuts off, not a
+          // stuffed 0xFF (with the 0 read past the end), so the scan's data
+          // ends before it, as before a run of them to the end (see
+          // CimgDecode::BuffAddByte()). (The Scan Dump showed it as data, and
+          // "Ran out of buffer" was given.)
+          if(m_nPos >= nPosEof)
+          {
+            m_nPos--;
+            break;
+          }
+
           // this could either be a marker or a byte stuff
           nSkipData = Buf(m_nPos++);
           nSkipCount++;
@@ -8564,6 +8586,188 @@ void CjfifDecode::SkipNoLengthRun()
                         .arg(nPos, 8, 16, QChar('0')));
 
   m_nPos = nPos;
+}
+
+//-----------------------------------------------------------------------------
+// The code of the marker at nPos, after any fill bytes (nFill: how many), or
+// LENGTH_RUN_NONE if none starts there (not a 0xFF, or the end of the file
+// before a code)
+uint32_t CjfifDecode::PeekMarkerCode(uint32_t nPos, uint32_t &nFill)
+{
+  const uint32_t nPosEof = m_pWBuf->GetPosEof();
+
+  nFill = 0;
+
+  if((nPos >= nPosEof) || (Buf(nPos) != 0xFF))
+  {
+    return LENGTH_RUN_NONE;
+  }
+
+  uint32_t nPosCode = nPos + 1;
+
+  while((nPosCode < nPosEof) && (Buf(nPosCode) == 0xFF))
+  {
+    nPosCode++;
+  }
+
+  nFill = nPosCode - nPos - 1;
+
+  return (nPosCode < nPosEof) ? Buf(nPosCode) : LENGTH_RUN_NONE;
+}
+
+// Whether a marker with this code can be in a run of markers with a length:
+// any that DecodeMarker() reads with one, but SOS (each scan is listed). Not
+// those with no length (SOI, EOI, TEM, RSTn: see SkipNoLengthRun()), nor an
+// RSTn taken to have one.
+bool CjfifDecode::LengthRunCode(uint32_t nCode)
+{
+  return (nCode != LENGTH_RUN_NONE) && (nCode != JFIF_SOI) && (nCode != JFIF_EOI) && (nCode != JFIF_SOS) &&
+         (nCode != JFIF_TEM) && !((nCode >= JFIF_RST0) && (nCode <= JFIF_RST7));
+}
+
+//-----------------------------------------------------------------------------
+// Before DecodeMarker(): after LENGTH_RUN_LISTED markers of one kind with a
+// length in a row, each listed as before, any more of that kind in a row are
+// parsed as usual, but their lines are held back (CDocLog::HoldStart()), and
+// the run is reported in one line where it ends. Each was listed: an empty
+// COM made 5 lines from 4 bytes, so 65,536 took 11 s and 967 MB of memory
+// (each line takes about 35 us and 3 KB in the report), and 16 MB of them
+// would have taken about 12 minutes and 60 GB. Parsed without its lines, an
+// empty marker takes about 1 us.
+//
+// The last marker not listed is kept until this one: if no marker starts where
+// its length ends (nor the end of the file), the parsing ends with it, as that
+// length went wrong, so it is shown in full, after the run's line. (Dropped,
+// the report showed "Expected marker 0xFF" after the run, and not why.)
+void CjfifDecode::LengthRunBefore()
+{
+  uint32_t nFill = 0;
+  const uint32_t nCode = PeekMarkerCode(m_nPos, nFill);
+  const bool bRun = LengthRunCode(nCode);
+
+  if(m_bLengthRunPending)
+  {
+    m_bLengthRunPending = false;
+
+    if((m_nPos < m_pWBuf->GetPosEof()) && (Buf(m_nPos) != 0xFF))
+    {
+      LengthRunReport();
+      m_pLog->HeldShow();
+    }
+    else
+    {
+      LengthRunDrop();
+    }
+  }
+
+  if(!bRun || (nCode != m_nLengthRunCode))
+  {
+    LengthRunReport();
+    m_nLengthRunCode = bRun ? nCode : LENGTH_RUN_NONE;
+  }
+
+  if(bRun && (++m_nLengthRunNum > LENGTH_RUN_LISTED))
+  {
+    m_pLog->HoldStart();
+    m_bLengthRunHolding = true;
+    m_nLengthRunFillPending = nFill;
+  }
+}
+
+// After DecodeMarker() (nRet, for the marker at nPosBefore): a marker that
+// wasn't listed is kept, to be dropped from the report and counted in the run
+// when the next marker starts (LengthRunBefore()), unless the parsing ends
+// with it (an error, or the end of the file, or a position that wrapped, as
+// ProcessFile() takes them): then it is shown in full, after the run's line.
+void CjfifDecode::LengthRunAfter(uint32_t nRet, uint32_t nPosBefore)
+{
+  if(!m_bLengthRunHolding)
+  {
+    return;
+  }
+
+  m_bLengthRunHolding = false;
+  m_pLog->HoldStop();
+
+  if((nRet != DECMARK_OK) || (m_nPos > m_pWBuf->GetPosEof()) || (m_nPos <= nPosBefore))
+  {
+    LengthRunReport();
+    m_pLog->HeldShow();
+  }
+  else
+  {
+    m_bLengthRunPending = true;
+    m_nLengthRunPosPending = m_nPos;
+  }
+}
+
+// Drop the lines of the last marker not listed, and count it in the run
+void CjfifDecode::LengthRunDrop()
+{
+  uint32_t nErr = 0;
+  uint32_t nWarn = 0;
+
+  m_pLog->HeldDrop(nErr, nWarn);
+  m_nLengthRunHeld++;
+  m_nLengthRunErr += nErr;
+  m_nLengthRunWarn += nWarn;
+  m_nLengthRunFill += m_nLengthRunFillPending;
+  m_nLengthRunPosEnd = m_nLengthRunPosPending;
+}
+
+// The line for the run's markers that weren't listed, if any; the run ends
+void CjfifDecode::LengthRunReport()
+{
+  if(m_nLengthRunHeld > 0)
+  {
+    QString strMarker;
+
+    GetMarkerName(m_nLengthRunCode, strMarker);
+
+    // What they held: their fill bytes, and the error and warning lines not
+    // shown (lines, not errors: a COM of length 0 gives 3)
+    QStringList astrNotes;
+    QStringList astrHidden;
+
+    astrNotes << "parsed as usual";
+
+    if(m_nLengthRunFill > 0)
+    {
+      astrNotes << ((m_nLengthRunFill == 1) ? QString("1 fill byte") : QString("%1 fill bytes").arg(m_nLengthRunFill));
+    }
+
+    if(m_nLengthRunErr > 0)
+    {
+      astrHidden << ((m_nLengthRunErr == 1) ? QString("1 error line") : QString("%1 error lines").arg(m_nLengthRunErr));
+    }
+
+    if(m_nLengthRunWarn > 0)
+    {
+      astrHidden << ((m_nLengthRunWarn == 1) ? QString("1 warning line")
+                                             : QString("%1 warning lines").arg(m_nLengthRunWarn));
+    }
+
+    if(!astrHidden.isEmpty())
+    {
+      astrNotes << QString("%1 not shown").arg(astrHidden.join(" and "));
+    }
+
+    m_pLog->AddLineWarn(QString("  Only the first %1 %2 markers in a row are listed: %3 more not listed (%4), "
+                                "to 0x%5")
+                          .arg(LENGTH_RUN_LISTED)
+                          .arg(strMarker)
+                          .arg(m_nLengthRunHeld)
+                          .arg(astrNotes.join("; "))
+                          .arg(m_nLengthRunPosEnd, 8, 16, QChar('0')));
+    m_pLog->AddLine(" ");
+  }
+
+  m_nLengthRunCode = LENGTH_RUN_NONE;
+  m_nLengthRunNum = 0;
+  m_nLengthRunHeld = 0;
+  m_nLengthRunErr = 0;
+  m_nLengthRunWarn = 0;
+  m_nLengthRunFill = 0;
 }
 
 //-----------------------------------------------------------------------------
@@ -11116,7 +11320,9 @@ void CjfifDecode::ProcessFile(QFile *inFile)
     // Return value 0 - OK
     //              1 - Error
     //              2 - EOI
+    LengthRunBefore();
     const uint32_t nRetMarker = DecodeMarker();
+    LengthRunAfter(nRetMarker, nPosBefore);
 
     if(nRetMarker != DECMARK_OK)
     {
