@@ -505,9 +505,9 @@ and the thumbnail's count" section, `ER` in its "Two RSTs in a row"
 section, `RC` in its "A code cut short by an RST" section, `RI` in its
 "Restart intervals where the DRI puts them" section, which changed the `ER`
 and `RC` cases, `EZ`, `NL` and `EM` in its "Zeros past the end of the
-file, runs of markers with no length, and the error limit" section, and `LF`
+file, runs of markers with no length, and the error limit" section, `LF`
 and `LR` in its "A 0xFF at the end of the scan data, and runs of one marker"
-section);
+section, and `LB` in its "The lines of a marker list" section);
 `ok_*` cases are valid files that must keep decoding. The plain JPEGs must
 decode at their size, with no error or warning and the subsampling their SOF
 gives, and their pixels must be within 6 of libjpeg's decode of the same file

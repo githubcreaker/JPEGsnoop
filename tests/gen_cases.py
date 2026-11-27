@@ -7903,6 +7903,134 @@ lr_case("LR_sos", write("lr_sos.jpg", ri_put(nl, NL_AFTER, LR_SOS_HDR * 22)), lr
         forbid="Only the first 20 SOS")
 
 
+# --- LB: the lines of a marker list ---------------------------------------------------
+# Only a run of one kind was cut short (LR, NL): markers of different kinds in
+# turn were each listed (1 MB of COMs and TEMs: 60 s and 5.1 GB), as was a
+# marker of many lines (an empty DHT table gives 21), or of long ones (2,000
+# COMs of 64 KB: 92 s). Now a marker list shows at most 20,000 lines or
+# 2,000,000 characters; of the rest, those of the last marker with lines not
+# shown, and any error after it (at most the last 50), follow one line with
+# how many weren't shown. The scan's decode isn't limited: what wasn't shown
+# before it is reported there, and the limit goes on from the next marker.
+# Lines each marker gives, from the code's format: an empty APP1 7 (1 an error
+# line), an empty COM 5, a TEM 4 (1 a warning line), an EOI 3, a DHT 3 and 21
+# for each empty table, 4 for one of class 2 (1 an error line) and 1 more.
+# nl's own markers give 81 lines before its scan header (as listed before this
+# change), and its scan's 9 before the decode: the header's 7, the empty line
+# of the scan dump (off) and a blank one. The decode's lines and the rest of
+# the scan's don't count.
+def lb_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "LB", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+def lb_cut(more, among, tail, of="marker list"):
+    among = f" \\({among} among them\\)" if among else ""
+    tail = "the last line follows" if tail == 1 else f"the last {tail} lines follow"
+    return (f"^  The {of} shows at most 20000 lines or 2000000 characters: {more} more lines not shown{among}; "
+            f"the markers were parsed as usual, and {tail}$")
+
+
+LB_NL = 81 + 9
+LB_CAP = 20000
+LB_APP1 = b"\xff\xe1\x00\x02"
+LB_TEM = b"\xff\x01"
+# APP1, COM and TEM in turn, after the scan: 16 lines for each 10 bytes. The
+# first 20,000 lines end after 1,244 of them and 6 lines of the next APP1
+# (with its error line, not its blank one).
+LB_TURNS = 1 << 16
+LB_SHOWN = (LB_CAP - LB_NL) // 16
+assert LB_NL + 16 * LB_SHOWN + 6 == LB_CAP
+write("lb_turn.jpg", ri_put(nl, NL_AFTER, (LB_APP1 + LR_COM + LB_TEM) * LB_TURNS))
+lb_case("LB_turn", "lb_turn.jpg",
+        lb_cut(LB_NL + 16 * LB_TURNS + 3 - LB_CAP - 3,
+               f"{LB_TURNS - LB_SHOWN - 1} error lines and {LB_TURNS - LB_SHOWN} warning lines", 3), timeout=5)
+lb_case("LB_turn_last", "lb_turn.jpg", lr_off(NL_AFTER + 10 * LB_SHOWN),
+        forbid=lr_off(NL_AFTER + 10 * LB_SHOWN + 4), timeout=5)
+lb_case("LB_turn_eoi", "lb_turn.jpg", lr_off(NL_AFTER + 10 * LB_TURNS), timeout=5)
+lb_case("LB_turn_lines", "lb_turn.jpg", "^harness: report lines=20[0-9]{3}$", flags="--count-lines", timeout=5)
+# The edge: COM and TEM in turn (9 lines for each 6 bytes), then 5 TEMs, to
+# 20,000 lines, then the EOI: all shown (the EOI's 3 lines were kept). With a
+# COM and 4 TEMs instead, the last TEM's blank line isn't.
+LB_PAIRS = (LB_CAP - LB_NL - 20) // 9
+assert LB_NL + 9 * LB_PAIRS + 20 == LB_CAP
+lb_case("LB_edge", write("lb_edge.jpg", ri_put(nl, NL_AFTER, (LR_COM + LB_TEM) * LB_PAIRS + LB_TEM * 5)),
+        lr_off(NL_AFTER + 6 * LB_PAIRS + 10), forbid="shows at most 20000")
+lb_case("LB_one", write("lb_one.jpg", ri_put(nl, NL_AFTER, (LR_COM + LB_TEM) * LB_PAIRS + LR_COM + LB_TEM * 4)),
+        lb_cut(1, "", 3))
+# The last marker listed has more than 50 lines: a DHT of 3 empty tables and
+# one of class 2, where the file ends (Early EOF, after the list, from a pass
+# with no lines). Of its 71 lines, the first 21 aren't shown (with its
+# offset), the last 50 are, as the error is (1 line, not counted).
+LB_DHT_AT = NL_AFTER + 6 * LB_PAIRS + 10
+LB_DHT = b"\x01" + bytes(16)
+LB_DHT_BAD = b"\x25" + bytes(16)
+write("lb_tail.jpg", nl[:NL_AFTER] + (LR_COM + LB_TEM) * LB_PAIRS + LB_TEM * 5 + b"\xff\xc4"
+      + (2 + 4 * 17).to_bytes(2, "big") + LB_DHT * 3 + LB_DHT_BAD)
+lb_case("LB_tail", "lb_tail.jpg", lb_cut(21, "", 50))
+lb_case("LB_tail_error", "lb_tail.jpg", "^ERROR: Invalid DHT Class \\(2\\)\\. Aborting DHT Load\\.$",
+        forbid=lr_off(LB_DHT_AT))
+lb_case("LB_tail_eof", "lb_tail.jpg", "^ERROR: Early EOF - file may be missing EOI$")
+# The thumbnail's list: its offset leads to 1 MB of SOIs (2 lines each), then
+# an EOI (2 lines), all in its length (the list stops there)
+LB_SOIS = 1 << 19
+LB_THUMB = RP_HEAD + ow_thumb(0, 0) + RP_REST
+write("lb_thumb.jpg", RP_HEAD + ow_thumb(len(LB_THUMB) - OW_TIFF, 2 * LB_SOIS + 2) + RP_REST
+      + b"\xff\xd8" * LB_SOIS + b"\xff\xd9")
+lb_case("LB_thumb", "lb_thumb.jpg", lb_cut(2 * LB_SOIS + 2 - LB_CAP - 2, "", 2, "thumbnail's marker list"),
+        timeout=5)
+lb_case("LB_thumb_eoi", "lb_thumb.jpg", "^  \\* Embedded Thumb Marker: EOI$", timeout=5)
+# Where no marker follows: 16,384 SOIs, then "xy". The error is kept with the
+# last SOI's 2 lines (it was kept alone, and the SOI dropped).
+LB_SOIS_BAD = 1 << 14
+write("lb_thumb_bad.jpg", RP_HEAD + ow_thumb(len(LB_THUMB) - OW_TIFF, 2 * LB_SOIS_BAD + 2) + RP_REST
+      + b"\xff\xd8" * LB_SOIS_BAD + b"xy")
+lb_case("LB_thumb_bad", "lb_thumb_bad.jpg",
+        lb_cut(2 * LB_SOIS_BAD + 1 - LB_CAP - 3, "", 3, "thumbnail's marker list"))
+# And in the main list: 3,000 COM and TEM pairs after the scan, then a COM of
+# length 4 before "xy": its 5 lines and the error's 1 follow (the error alone
+# did). Shown: 2,212 pairs and 2 lines of the next COM.
+LB_BAD_AT = NL_AFTER + 6 * 3000
+LB_BAD_SHOWN = (LB_CAP - LB_NL) // 9
+assert LB_NL + 9 * LB_BAD_SHOWN + 2 == LB_CAP
+write("lb_bad.jpg", ri_put(nl, NL_AFTER, (LR_COM + LB_TEM) * 3000 + b"\xff\xfe\x00\x04ab" + b"xy"))
+lb_case("LB_bad", "lb_bad.jpg", lb_cut(LB_NL + 9 * 3000 - LB_CAP, f"{3000 - LB_BAD_SHOWN} warning lines", 6))
+lb_case("LB_bad_com", "lb_bad.jpg", lr_off(LB_BAD_AT), forbid=lr_off(LB_BAD_AT - 2))
+# A marker cut to its 0xFF by the end of the file lists nothing, so the COM
+# before it, the last with lines, is still kept (it was dropped when that
+# 0xFF's pass started), before the Early EOF
+write("lb_ff.jpg", nl[:NL_AFTER] + (LR_COM + LB_TEM) * 3000 + b"\xff\xfe\x00\x04ab" + b"\xff")
+lb_case("LB_ff", "lb_ff.jpg", lb_cut(LB_NL + 9 * 3000 - LB_CAP, f"{3000 - LB_BAD_SHOWN} warning lines", 5))
+lb_case("LB_ff_com", "lb_ff.jpg", lr_off(LB_BAD_AT))
+# The scan's decode: the same 3,000 pairs before the scan. What wasn't shown
+# is reported before the decode, with the scan's 9 lines before it (2,213
+# pairs and 2 lines of the next COM were shown), then the decode, then the
+# rest of the list, its EOI.
+LB_SCAN_NL = 81
+LB_SCAN_SHOWN = (LB_CAP - LB_SCAN_NL) // 9
+assert LB_SCAN_NL + 9 * LB_SCAN_SHOWN + 2 == LB_CAP
+write("lb_scan.jpg", ri_put(nl, NL_SOS, (LR_COM + LB_TEM) * 3000))
+lb_case("LB_scan", "lb_scan.jpg",
+        lb_cut(LB_SCAN_NL + 9 * 3000 - LB_CAP, f"{3000 - LB_SCAN_SHOWN} warning lines", 9))
+lb_case("LB_scan_decoded", "lb_scan.jpg", "^  Finished Decoding SCAN Data$")
+lb_case("LB_scan_eoi", "lb_scan.jpg", lr_off(NL_AFTER + 6 * 3000))
+# Detailed Decode of all 512 MCUs of a 256x128 image gives over 20,000 lines,
+# all in the decode: they don't count, so nothing of the list is cut
+write("lb_detail.jpg", jpeg(gradient(256, 128), quality=90, subsampling=0))
+lb_case("LB_detail", "lb_detail.jpg", "^  Finished Decoding SCAN Data$", forbid="shows at most",
+        flags="--detail 0,0,512", timeout=20)
+lb_case("LB_detail_lines", "lb_detail.jpg", "^harness: report lines=(2[0-9]|[3-9][0-9])[0-9]{3}$",
+        flags="--detail 0,0,512 --count-lines", timeout=20)
+# Long lines: 40 COMs of 65,533 bytes after the scan, each line of 65,545
+# characters, a TEM after each. A pair's lines have 65,716 characters (from
+# their text), so 30 pairs and the next COM's first 3 lines (81) are shown
+# (nl's own 90 lines have under 28,439 characters), and 87 lines aren't.
+LB_LONG = b"\xff\xfe\xff\xff" + b"A" * 65533
+LB_LONG_AT = NL_AFTER + 30 * (len(LB_LONG) + 2)
+write("lb_long.jpg", ri_put(nl, NL_AFTER, (LB_LONG + LB_TEM) * 40))
+lb_case("LB_long", "lb_long.jpg", lb_cut(2 + 4 + 9 * 9, "10 warning lines", 3))
+lb_case("LB_long_last", "lb_long.jpg", lr_off(LB_LONG_AT), forbid=lr_off(LB_LONG_AT + len(LB_LONG)))
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

@@ -32,6 +32,14 @@ CDocLog::CDocLog(void)
   m_pDoc = nullptr;
   m_bEn = true;     // master enabled the log by default; was left uninitialised
   m_bHold = false;
+  m_bLimit = false;
+  m_nLimitLeft = 0;
+  m_nLimitCut = 0;
+  m_nLimitCutErr = 0;
+  m_nLimitCutWarn = 0;
+  m_bLimitMark = false;
+  m_bLimitPaused = false;
+  m_nLimitCharsLeft = 0;
 }
 
 CDocLog::CDocLog(QPlainTextEdit *pDoc)
@@ -39,6 +47,14 @@ CDocLog::CDocLog(QPlainTextEdit *pDoc)
   m_pDoc = pDoc;
   m_bEn = true;
   m_bHold = false;
+  m_bLimit = false;
+  m_nLimitLeft = 0;
+  m_nLimitCut = 0;
+  m_nLimitCutErr = 0;
+  m_nLimitCutWarn = 0;
+  m_bLimitMark = false;
+  m_bLimitPaused = false;
+  m_nLimitCharsLeft = 0;
 }
 
 CDocLog::~CDocLog(void)
@@ -92,8 +108,35 @@ void CDocLog::appendToLog(QString strTxt, teLineKind eKind)
   {
     m_aHeld.append(qMakePair(strTxt, eKind));
   }
+  else if(m_bEn && m_bLimit && ((m_nLimitLeft == 0) || (strTxt.size() > m_nLimitCharsLeft)))
+  {
+    // Past the limit (of the characters too: then no line after this one is
+    // shown either): one of the last lines, or counted. (Those kept before
+    // LimitMark() are counted only now: if no line follows, they are the last.)
+    m_nLimitLeft = 0;
+
+    if(m_bLimitMark)
+    {
+      m_bLimitMark = false;
+      LimitDrop();
+    }
+
+    m_aTail.append(qMakePair(strTxt, eKind));
+
+    if(m_aTail.size() > qsizetype(LIMIT_TAIL))
+    {
+      LimitCount(m_aTail.first().second);
+      m_aTail.removeFirst();
+    }
+  }
   else if(m_bEn)
   {
+    if(m_bLimit)
+    {
+      m_nLimitLeft--;
+      m_nLimitCharsLeft -= strTxt.size();
+    }
+
     QTextCharFormat format;
 
     // (Normal text used to be RGB(1,1,1): invisible on a Dark Mode background)
@@ -148,6 +191,101 @@ void CDocLog::HeldDrop(uint32_t &nErr, uint32_t &nWarn)
   }
 
   m_aHeld.clear();
+}
+
+void CDocLog::LimitStart(uint32_t nMax, qsizetype nMaxChars)
+{
+  m_bLimit = true;
+  m_bLimitPaused = false;
+  m_nLimitLeft = nMax;
+  m_nLimitCharsLeft = nMaxChars;
+  m_nLimitCut = 0;
+  m_nLimitCutErr = 0;
+  m_nLimitCutWarn = 0;
+  m_bLimitMark = false;
+  m_aTail.clear();
+}
+
+void CDocLog::LimitCount(teLineKind eKind)
+{
+  m_nLimitCut++;
+
+  if(eKind == LINE_ERR)
+  {
+    m_nLimitCutErr++;
+  }
+  else if(eKind == LINE_WARN)
+  {
+    m_nLimitCutWarn++;
+  }
+}
+
+// The lines not shown so far are only counted, once a line from now on isn't
+// shown: from then on, the lines are kept
+void CDocLog::LimitMark()
+{
+  m_bLimitMark = true;
+}
+
+// Count the lines kept, no longer to be shown
+void CDocLog::LimitDrop()
+{
+  for(const QPair<QString, teLineKind> &line : std::as_const(m_aTail))
+  {
+    LimitCount(line.second);
+  }
+
+  m_aTail.clear();
+}
+
+// Stop limiting the lines, giving how many weren't shown and aren't kept
+// (nCut, nErr of them errors and nWarn warnings), and how many are kept (nTail)
+void CDocLog::LimitStop(uint32_t &nCut, uint32_t &nErr, uint32_t &nWarn, uint32_t &nTail)
+{
+  m_bLimitPaused = false;
+  m_bLimit = false;
+  nCut = m_nLimitCut;
+  nErr = m_nLimitCutErr;
+  nWarn = m_nLimitCutWarn;
+  nTail = static_cast<uint32_t>(m_aTail.size());
+}
+
+// As LimitStop(), to go on with LimitResume() (if the lines were limited)
+void CDocLog::LimitPause(uint32_t &nCut, uint32_t &nErr, uint32_t &nWarn, uint32_t &nTail)
+{
+  const bool bLimit = m_bLimit;
+
+  LimitStop(nCut, nErr, nWarn, nTail);
+  m_bLimitPaused = bLimit;
+}
+
+// After LimitPause() and LimitTailShow(): limit the lines again, to what was
+// left to show (none if the limit was reached), counting from 0
+void CDocLog::LimitResume()
+{
+  if(m_bLimitPaused)
+  {
+    m_bLimitPaused = false;
+    m_bLimit = true;
+    m_nLimitCut = 0;
+    m_nLimitCutErr = 0;
+    m_nLimitCutWarn = 0;
+    m_bLimitMark = false;
+    m_aTail.clear();
+  }
+}
+
+// After LimitStop(): show the lines kept, as they would have been shown
+void CDocLog::LimitTailShow()
+{
+  const QVector<QPair<QString, teLineKind>> aTail = m_aTail;
+
+  m_aTail.clear();
+
+  for(const QPair<QString, teLineKind> &line : aTail)
+  {
+    appendToLog(line.first, line.second);
+  }
 }
 
 // After a light/dark change, swap each coloured line to the colour for the

@@ -61,6 +61,22 @@ public:
   void HeldShow();
   void HeldDrop(uint32_t &nErr, uint32_t &nWarn);
 
+  // Show at most nMax of the lines added from now on, and nMaxChars of their
+  // characters, until LimitStop(). The rest aren't shown: the last of them
+  // since the last LimitMark() after which any weren't, at most LIMIT_TAIL,
+  // are kept for LimitTailShow(), and the others counted. LimitPause() stops
+  // it as LimitStop() does, and LimitResume() goes on with what was left to
+  // show. (A line held back by HoldStart() counts when it is shown. See
+  // CjfifDecode::MarkerListEnd().)
+  static constexpr uint32_t LIMIT_TAIL = 50;
+
+  void LimitStart(uint32_t nMax, qsizetype nMaxChars);
+  void LimitMark();
+  void LimitStop(uint32_t &nCut, uint32_t &nErr, uint32_t &nWarn, uint32_t &nTail);
+  void LimitPause(uint32_t &nCut, uint32_t &nErr, uint32_t &nWarn, uint32_t &nTail);
+  void LimitResume();
+  void LimitTailShow();
+
   // Re-colour the report after a light/dark appearance change
   void RecolorForPalette();
 
@@ -93,6 +109,19 @@ private:
 
   bool m_bHold;
   QVector<QPair<QString, teLineKind>> m_aHeld;
+
+  void LimitCount(teLineKind eKind);
+  void LimitDrop();
+
+  bool m_bLimit;
+  bool m_bLimitPaused;        // By LimitPause(), until LimitResume()
+  uint32_t m_nLimitLeft;      // Lines still to be shown, and characters
+  qsizetype m_nLimitCharsLeft;
+  uint32_t m_nLimitCut;       // Lines not shown, nor kept: all, errors, warnings
+  uint32_t m_nLimitCutErr;
+  uint32_t m_nLimitCutWarn;
+  bool m_bLimitMark;          // LimitMark() was called: the next line not shown drops m_aTail
+  QVector<QPair<QString, teLineKind>> m_aTail;   // The last lines not shown, since LimitMark()
 };
 
 #endif

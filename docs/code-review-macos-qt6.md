@@ -4033,6 +4033,7 @@ switched off one at a time in a scratch copy, fails its own cases.
   (Fixed since: see "Reads past their own field".)
 - **Empty DHT tables** (17 bytes each) give 21 lines each: a whole 64 KB DHT segment of
   them is about 81,000 lines. That grows with the file rather than from a few bytes.
+  (Fixed since: see "The lines of a marker list".)
 
 ### Reads past their own field
 
@@ -5132,7 +5133,8 @@ goes on, but `ValidateValue()` makes the ID 0 first.)
   data ends ... @ 0x0000009d.4", past the end of the file (by the review). (Fixed since: see
   the next section.)
 - **Markers with a length are each listed,** however many in a row (above). (Fixed since for
-  runs of one kind: see the next section.)
+  runs of one kind: see the next section; and for the rest, see "The lines of a marker
+  list".)
 - The section before's other three: a marker from SOF0 on inside an interval's data is
   decoded through; without a DRI, the first MCU of each row after the data runs out is
   decoded from zeros; and without a DRI, a restart inside an MCU zeroes the luminance DC the
@@ -5245,7 +5247,8 @@ removed for runs of one kind. A single marker with many lines is the same class 
 table's 21 lines, the earlier "Six runaway reports" item). The lines held back are still
 built: 16 MB of DHTs take 10.9 s with Options > DHT Expand on, 3.2 s with it off. Closing
 the rest needs a different rule: count each kind across the file, not in a row, or give the
-marker list a budget of lines per file. That is left to decide.
+marker list a budget of lines per file. That is left to decide. (Fixed since, with a budget:
+see the next section.)
 
 **Tests:** 47 new cases (14 `LF`, 33 `LR`): 2,118 in all. On the code before, 36 of the 47
 fail. The 11 that pass check what didn't change: the file cut without a 0xFF, and its image;
@@ -5306,7 +5309,133 @@ all 47 pass:
   and then the stop, without that marker (by the second review, from the code). Only the
   listing is affected.
 - **Markers of different kinds in turn,** runs of scans, RSTn taken to have a length, and
-  markers with many lines are still listed in full (above).
+  markers with many lines are still listed in full (above). (Fixed since: see the next
+  section.)
+
+### The lines of a marker list
+
+The section before's other open cost, inherited from Windows: only a run of one kind was cut
+short, so markers of different kinds in turn, runs of scan headers, RSTn taken to have a
+length and markers with many lines were still listed in full. Each line costs about 35 µs
+and 3 KB in the report.
+
+**Now each marker list shows at most 20,000 lines or 2,000,000 characters**
+(`MARKER_LIST_LINES`, `MARKER_LIST_CHARS`): the main image's (`ProcessFile()`) and the EXIF
+thumbnail's (`DecodeEmbeddedThumb()`), each on its own. Past the limit the markers are
+parsed as usual, but `CDocLog` doesn't show their lines: it counts them, with the error and
+warning lines among them, and keeps the last marker's, at most 50. Where the list ends
+(`MarkerListEnd()`), one warning line gives the counts, then the kept lines follow, so the
+report still shows how the list ended:
+
+> The marker list shows at most 20000 lines or 2000000 characters: 1028666 more lines not
+> shown (64291 error lines and 64292 warning lines among them); the markers were parsed as
+> usual, and the last 3 lines follow
+
+- **Which lines are kept:** those of the last marker with lines not shown.
+  - Where "Expected marker 0xFF" ends the list, the pass with no 0xFF goes with the marker
+    before it, whose length led there. (By the review: the error was kept alone.)
+  - A pass that shows nothing, such as a marker cut to its 0xFF at the end of the file,
+    leaves the marker before it kept.
+- **The scan's decode isn't limited, nor counted:** Detailed Decode of a 256x128 image gives
+  22,500 lines. Whatever wasn't shown before the decode is reported just before it, with the
+  scan header, and the limit goes on from the next marker. (By the review: the first version
+  counted the decode, so markers before the scan hid all of it.)
+- **Characters as well as lines** (by the review): 2,000 COMs of 64 KB each, in runs of 20,
+  are one line each, so they stayed under 20,000 lines yet took 92 s and 1.2 GB.
+- **"ERROR: Early EOF"** is now added after the list's last lines, so it is never cut. When
+  nothing is cut it is where it was.
+- **The run rule of the section before stays:** a run of one kind still gets one line, so
+  those reports stay short well under the limit.
+- **No other test file reaches the limit,** with the default options or with Relaxed
+  Parsing and DHT Expand on. The longest report among them is 8,210 lines. When nothing is
+  cut, the limit adds no line and moves none.
+
+| Input | Size | Before | After |
+|---|---|---|---|
+| COM and TEM in turn | 1 MB | 60 s, 5.1 GB | 0.97 s, 110 MB |
+| APP0 and APP1 in turn | 256 KB | 35 s, 1.7 GB | 1.1 s, 122 MB |
+| COM and DQT in turn | 256 KB | 14 s, 1 GB | 0.79 s, 104 MB |
+| 16,384 scan headers after the scan | 160 KB | 8.4 s, 663 MB | 0.89 s, 116 MB |
+| 16,384 RSTn taken to have a length (Relaxed Parsing) | 64 KB | 4.75 s | 0.82 s, 107 MB |
+| 20 APP1s, each XMP of 32K short lines | 1.3 MB | 21 s, 1.7 GB | 0.70 s, 99 MB |
+| One DHT of 3,854 empty tables | 64 KB | 3.7 s, 412 MB | 1.0 s, 137 MB |
+| A thumbnail whose offset leads to 1 MB of SOIs | 1 MB | 19 s, 1.7 GB | 0.67 s, 83 MB |
+| 2,000 COMs of 64 KB, in runs of 20 | 131 MB | 92 s, 1.2 GB | 2.1 s, 70 MB |
+
+The first six "Before" figures are the section before's. The others were measured with the
+limit switched off. The "After" figures come from files of the same shape, made again.
+
+**Tests:** 23 new cases (`LB`), 2,141 in all. With the limit switched off, as on the code
+before, 16 of them fail. The 7 that pass check what didn't change: 20,000 lines with the
+EOI's 3 after them, all shown; the Early EOF; the decode and the EOI after the markers
+before the scan; a Detailed Decode of 22,500 lines, none cut; and the COM before a final
+0xFF. Each count is worked out from the generator's bytes and the lines each marker gives,
+from the code: an empty APP1 7 (1 an error line), an empty COM 5, a TEM 4 (1 a warning
+line), an EOI 3, and an empty DHT table 21. nl's own markers give 81 lines before its scan
+header, and its scan 9 before the decode (as listed before this change). The cases:
+- APP1, COM and TEM in turn after the scan: the counts, the last offset shown and the first
+  not, the EOI after, and the report's length (and in time);
+- the edge: 20,000 lines then the EOI, all shown, and one line more;
+- a last marker of 71 lines (a DHT), of which the last 50 are shown, its error, and the
+  Early EOF after them;
+- the thumbnail's list: 1 MB of SOIs, and 16,384 SOIs before "xy";
+- a COM whose length leads to "xy", and one before a final 0xFF, each shown;
+- 3,000 COM and TEM pairs before the scan: the line before the decode, the decode, and the
+  EOI after;
+- Detailed Decode of 512 MCUs, with no line cut;
+- 40 COMs of 64 KB, cut by the characters.
+
+Each of 18 switches, put in a scratch copy, fails its own cases when on, and with them off
+all 23 pass:
+- **The limit:** off; off for the thumbnail only; 19,999 and 20,001 lines; and the
+  characters off.
+- **The lines kept:** 49 and 51 of them; never restarted; restarted at once rather than at
+  the next line cut; not counted when dropped; and a pass with no 0xFF kept apart, in each
+  list.
+- **The counts:** the error lines and the warning lines.
+- **The rest:**
+  - the Early EOF inside the limit;
+  - the line given when nothing was cut;
+  - no report before the decode;
+  - no limit after it.
+
+**Checks:**
+- **The tests pass:**
+  - all 2,129 cases with the first version, before the review's fixes;
+  - after the fixes, the 23 `LB` cases, both plain and with ASan/UBSan, with no sanitizer
+    reports;
+  - after the fixes, every test file decoded with both sets of options, which showed that
+    only the `LB` files reach the limit.
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds the same 179 things in the two
+  files as before. It adds two style notes for the new `qsizetype` member, which is
+  assigned in the constructors as every member of the class is. It catches a bug planted in
+  each of the 13 functions changed or added: 10 before the review's fixes, and after them
+  the 2 added and the 3 changed most.
+- **No new compiler warnings** in the two files.
+- **A fresh review** (an agent given the diff) found the three problems above, all fixed. It
+  also checked:
+  - that every path through the two loops stops the limit, on all three callers, and with
+    the log disabled;
+  - the counts at the edges;
+  - the run rule's held lines;
+  - the moved Early EOF.
+
+  There was no second review.
+
+**Found, not fixed:**
+- **Lines past the limit are still built, then dropped.** The review timed these on the
+  first version, whose cost of dropping them this round didn't change:
+  - 16 MB of COMs and TEMs: 3.5 s and 109 MB;
+  - 16 MB of 64 KB DHTs of empty tables, between TEMs: 8 s and 135 MB;
+  - a thumbnail of 16 MB of SOIs: 1.1 s.
+- **The limit is fixed.** No option shows the rest. A real file with a huge XMP (Photoshop's
+  document-ancestors lists can reach tens of thousands of lines) is now cut, with the count.
+- **The EXIF parser's `Enable()` at the end of each IFD** undoes Extract All's `Disable()`
+  (inherited). By the review, from the code: after the first frame with EXIF, each later
+  frame's report is added to the report. Not run, as it needs the GUI. The limit still
+  starts and stops in pairs there.
+- **The section before's hidden marker** (one not listed in a run, whose length ends on a
+  0xFF that stops the parsing) is unchanged.
 
 ## How this was reviewed
 

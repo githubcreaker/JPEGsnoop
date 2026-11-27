@@ -49,6 +49,8 @@ static const int32_t MAX_IFD_COMPS = 150;        // Maximum number of IFD entry 
 static const uint32_t NO_LENGTH_RUN_LISTED = 20;  // Markers with no length in a row listed one by one
 static const uint32_t LENGTH_RUN_LISTED = 20;     // Markers of one kind with a length in a row listed one by one
 static const uint32_t LENGTH_RUN_NONE = 0x100;    // No marker (see PeekMarkerCode())
+static const uint32_t MARKER_LIST_LINES = 20000;  // Lines shown of a marker list (see MarkerListEnd())
+static const uint32_t MARKER_LIST_CHARS = 2000000;  // And characters
 
 static const uint32_t JFIF_SOF0 = 0xC0;
 static const uint32_t JFIF_SOF1 = 0xC1;
@@ -231,6 +233,7 @@ private:
   void LengthRunAfter(uint32_t nRet, uint32_t nPosBefore);
   void LengthRunDrop();
   void LengthRunReport();
+  void MarkerListEnd(const QString &strList, bool bPause = false);
   bool WrappedSince(uint32_t nPosFrom) const;
   bool ExpectMarkerEnd(uint32_t nMarkerStart, uint32_t nMarkerLen);
   quint64 SegEnd(uint32_t nPosLength, uint32_t nLength) const;

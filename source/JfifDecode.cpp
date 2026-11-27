@@ -8273,6 +8273,11 @@ uint32_t CjfifDecode::DecodeMarker()
           // way that m_pImgSrcDirty is set
           if(m_pImgSrcDirty)
           {
+            // The scan's decode isn't part of the marker list: its lines
+            // aren't limited (Detailed Decode can give many), and those of the
+            // list not shown so far are reported before it (MarkerListEnd()).
+            // The limit goes on from the next marker (ProcessFile()).
+            MarkerListEnd("marker list", true);
             m_pImgDec->DecodeScanImg(nPosScanStart, true, false);
             m_pImgSrcDirty = false;
           }
@@ -8768,6 +8773,77 @@ void CjfifDecode::LengthRunReport()
   m_nLengthRunErr = 0;
   m_nLengthRunWarn = 0;
   m_nLengthRunFill = 0;
+}
+
+//-----------------------------------------------------------------------------
+// After a marker list (strList: which), or before the scan's decode in it
+// (bPause), its lines past the first MARKER_LIST_LINES, or MARKER_LIST_CHARS
+// characters, weren't shown (CDocLog::LimitStart()). If any, one line says
+// how many, and the last lines kept follow it, those of the last marker with
+// lines not shown, with any that say no marker followed it (at most the last
+// CDocLog::LIMIT_TAIL), so that how the list ended is shown. (2,000 COMs of
+// 64 KB, each one line, took 92 s and 1.2 GB.) Each line takes about 35 us
+// and 3 KB in the report: a run of one kind is cut short before (see
+// LengthRunBefore()), but markers of different kinds in turn were all listed
+// (1 MB of COMs and TEMs: 60 s and 5.1 GB), as was a marker with many lines
+// (an empty DHT table gives 21, so a 64 KB DHT about 81,000).
+void CjfifDecode::MarkerListEnd(const QString &strList, bool bPause)
+{
+  uint32_t nCut = 0;
+  uint32_t nErr = 0;
+  uint32_t nWarn = 0;
+  uint32_t nTail = 0;
+
+  if(bPause)
+  {
+    m_pLog->LimitPause(nCut, nErr, nWarn, nTail);
+  }
+  else
+  {
+    m_pLog->LimitStop(nCut, nErr, nWarn, nTail);
+  }
+
+  if(nCut > 0)
+  {
+    QStringList astrHidden;
+
+    if(nErr > 0)
+    {
+      astrHidden << ((nErr == 1) ? QString("1 error line") : QString("%1 error lines").arg(nErr));
+    }
+
+    if(nWarn > 0)
+    {
+      astrHidden << ((nWarn == 1) ? QString("1 warning line") : QString("%1 warning lines").arg(nWarn));
+    }
+
+    QString strHidden;
+
+    if(!astrHidden.isEmpty())
+    {
+      strHidden = QString(" (%1 among them)").arg(astrHidden.join(" and "));
+    }
+
+    QString strTail;
+
+    if(nTail > 0)
+    {
+      strTail = (nTail == 1) ? QString(", and the last line follows")
+                             : QString(", and the last %1 lines follow").arg(nTail);
+    }
+
+    m_pLog->AddLineWarn(QString("  The %1 shows at most %2 lines or %3 characters: %4 more lines not shown%5; "
+                                "the markers were parsed as usual%6")
+                          .arg(strList)
+                          .arg(MARKER_LIST_LINES)
+                          .arg(MARKER_LIST_CHARS)
+                          .arg(nCut)
+                          .arg(strHidden)
+                          .arg(strTail));
+    m_pLog->AddLine(" ");
+  }
+
+  m_pLog->LimitTailShow();
 }
 
 //-----------------------------------------------------------------------------
@@ -10149,8 +10225,18 @@ void CjfifDecode::DecodeEmbeddedThumb()
       bDone = true;
     }
 
+    // At most MARKER_LIST_LINES lines of the list, as for the main image's
+    // (see MarkerListEnd()): each marker listed takes at least 2, so a
+    // thumbnail whose offset leads to 1 MB of SOIs gave 1 million
+    m_pLog->LimitStart(MARKER_LIST_LINES, MARKER_LIST_CHARS);
+
     while(!bDone)
     {
+      if((m_nPos < nPosEof) && (Buf(m_nPos) == 0xFF))
+      {
+        m_pLog->LimitMark();
+      }
+
       // For some reason, I have found files that have a nLength of 0
       if(WrappedSince(static_cast<uint32_t>(m_nImgExifThumbOffset)))
       {
@@ -10540,6 +10626,8 @@ void CjfifDecode::DecodeEmbeddedThumb()
         }
       }                         // if !bDone
     }                           // while !bDone
+
+    MarkerListEnd("thumbnail's marker list");
 
     // Now calculate the signature
     if(!bErrorAny)
@@ -11310,6 +11398,10 @@ void CjfifDecode::ProcessFile(QFile *inFile)
   uint32_t nDataAfterEof = 0;
 
   bool bDone = false;
+  bool bEarlyEof = false;
+
+  // At most MARKER_LIST_LINES lines of the list (see MarkerListEnd())
+  m_pLog->LimitStart(MARKER_LIST_LINES, MARKER_LIST_CHARS);
 
   while(!bDone)
   {
@@ -11320,9 +11412,19 @@ void CjfifDecode::ProcessFile(QFile *inFile)
     // Return value 0 - OK
     //              1 - Error
     //              2 - EOI
+    // (Where no marker starts, the lines that say so are the last marker's,
+    // whose length led there: see MarkerListEnd())
+    if((m_nPos < m_pWBuf->GetPosEof()) && (Buf(m_nPos) == 0xFF))
+    {
+      m_pLog->LimitMark();
+    }
+
     LengthRunBefore();
     const uint32_t nRetMarker = DecodeMarker();
     LengthRunAfter(nRetMarker, nPosBefore);
+
+    // After a scan's decode, the list's lines are limited again
+    m_pLog->LimitResume();
 
     if(nRetMarker != DECMARK_OK)
     {
@@ -11342,10 +11444,17 @@ void CjfifDecode::ProcessFile(QFile *inFile)
       // (see WrappedSince())
       if((m_nPos > m_pWBuf->GetPosEof()) || (m_nPos <= nPosBefore))
       {
-        m_pLog->AddLineErr("ERROR: Early EOF - file may be missing EOI");
+        bEarlyEof = true;
         bDone = true;
       }
     }
+  }
+
+  MarkerListEnd("marker list");
+
+  if(bEarlyEof)
+  {
+    m_pLog->AddLineErr("ERROR: Early EOF - file may be missing EOI");
   }
 
   // -----------------------------------------------------------
