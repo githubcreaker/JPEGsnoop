@@ -2,7 +2,7 @@
 //
 // decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y[/X,Y...]] [--start N]
 //     [--detail X,Y,LEN] [--preview-md5] [--relaxed] [--expand-dht] [--count-lines]
-//     [--maker-notes]
+//     [--maker-notes] [--timed]
 //     Decode one file with the app's decoder classes (CjfifDecode, CimgDecode,
 //     CwindowBuf, ...) in non-interactive mode and print the report to stdout,
 //     followed by a "harness:" summary line. --ac: full IDCT; --histo:
@@ -17,7 +17,9 @@
 //     --preview-md5 prints an MD5 of the decoded preview's pixels;
 //     --relaxed turns on Options > Relaxed Parsing; --expand-dht, Options >
 //     DHT Expand; --count-lines prints "harness: report lines=N" after the
-//     report; --maker-notes turns on Options > Maker Notes.
+//     report; --maker-notes turns on Options > Maker Notes. --timed (in any
+//     mode) marks a case that checks the time taken: built with the
+//     sanitizers, the driver prints "harness: skipped: ..." instead.
 //
 // gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first] [--histo]
 //     [--cycle-channels] [--repeat N] [--max-growth-mb N] [--zoom PCT]
@@ -561,7 +563,7 @@ static void usage()
   fprintf(stderr,
           "usage: jpegsnoop-harness decode <file> [--ac] [--histo] [--unknown-exif]\n"
           "                         [--pixels X,Y[/X,Y...]] [--start N] [--detail X,Y,LEN] [--preview-md5]\n"
-          "                         [--relaxed] [--expand-dht] [--count-lines] [--maker-notes]\n"
+          "                         [--relaxed] [--expand-dht] [--count-lines] [--maker-notes] [--timed]\n"
           "       jpegsnoop-harness gui <file> [<file> ...] [--mouse] [--log] [--reprocess-first]\n"
           "                         [--histo] [--cycle-channels] [--repeat N] [--max-growth-mb N]\n"
           "                         [--zoom PCT] [--max-zoom-mb N] [--check-preview] [--check-histo]\n"
@@ -7153,6 +7155,7 @@ int main(int argc, char **argv)
   const bool bExpandDht = args.removeAll("--expand-dht") > 0;
   const bool bMakerNotes = args.removeAll("--maker-notes") > 0;
   const bool bCountLines = args.removeAll("--count-lines") > 0;
+  const bool bTimed = args.removeAll("--timed") > 0;
   GuiOptions guiOpts;
   guiOpts.bMouse = args.removeAll("--mouse") > 0;
   guiOpts.bLog = args.removeAll("--log") > 0;
@@ -7368,6 +7371,18 @@ int main(int argc, char **argv)
       batchOpts.nCloseAfter = nVal;
     else
       guiOpts.nMaxZoomMb = nVal;
+  }
+
+  // A case whose timeout is what it checks: the sanitizers slow some code far
+  // more than the rest (std::function, unoptimized, about 35 times, so the
+  // lines kept past the report's limit took 62 s to 141 s, where the timeout
+  // times 4 gives 16 s), so there the time shows nothing
+  if(bTimed)
+  {
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+    QTextStream(stdout) << "harness: skipped: --timed: the case checks the time taken, which the sanitizers change\n";
+    return 0;
+#endif
   }
 
   QTemporaryDir tmpDir;

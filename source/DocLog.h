@@ -26,7 +26,7 @@
 #define DOCLOG_H
 
 #include <cstdint>
-#include <QPair>
+#include <functional>
 #include <QString>
 #include <QVector>
 #include <QPlainTextEdit>
@@ -46,6 +46,21 @@ public:
   void AddLineWarn(QString str);
   void AddLineErr(QString str);
   void AddLineGood(QString str);
+
+  // As AddLine() and the others, but the line's text is made by fnTxt only if
+  // the line is shown: one held back (HoldStart()) or past the limit
+  // (LimitStart()) mostly isn't, and making their text was most of the time
+  // past the limit (DHTs of empty tables: 7.9 billion instructions a MB, and
+  // 0.51 with the text not made). fnTxt is called later, so it must
+  // not read anything that can change before then: it captures values, never
+  // `this`, by reference or by default.
+  using TxtFn = std::function<QString()>;
+
+  void AddLineF(TxtFn fnTxt);
+  void AddLineHdrF(TxtFn fnTxt);
+  void AddLineHdrDescF(TxtFn fnTxt);
+  void AddLineWarnF(TxtFn fnTxt);
+  void AddLineErrF(TxtFn fnTxt);
 
   void Clear();
 
@@ -99,16 +114,24 @@ private:
     LINE_GOOD
   };
 
+  // A line, with its text, or what makes it (fnTxt) if it isn't made yet
+  struct CLine
+  {
+    QString strTxt;
+    TxtFn fnTxt;
+    teLineKind eKind = LINE_NORMAL;
+  };
+
   static QColor lineColor(teLineKind eKind, bool bDark);
   bool isDark() const;
-  void appendToLog(QString strTxt, teLineKind eKind);
+  void appendLine(CLine line);
   QString rTrim(const QString& str);
 
   QPlainTextEdit *m_pDoc;
   bool m_bEn;
 
   bool m_bHold;
-  QVector<QPair<QString, teLineKind>> m_aHeld;
+  QVector<CLine> m_aHeld;
 
   void LimitCount(teLineKind eKind);
   void LimitDrop();
@@ -121,7 +144,7 @@ private:
   uint32_t m_nLimitCutErr;
   uint32_t m_nLimitCutWarn;
   bool m_bLimitMark;          // LimitMark() was called: the next line not shown drops m_aTail
-  QVector<QPair<QString, teLineKind>> m_aTail;   // The last lines not shown, since LimitMark()
+  QVector<CLine> m_aTail;     // The last lines not shown, since LimitMark()
 };
 
 #endif

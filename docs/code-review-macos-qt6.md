@@ -5423,8 +5423,9 @@ all 23 pass:
   There was no second review.
 
 **Found, not fixed:**
-- **Lines past the limit are still built, then dropped.** The review timed these on the
-  first version, whose cost of dropping them this round didn't change:
+- **Lines past the limit are still built, then dropped.** (Fixed since: see "Lines not
+  shown aren't made", below.) The review timed these on the first version, whose cost of
+  dropping them this round didn't change:
   - 16 MB of COMs and TEMs: 3.5 s and 109 MB;
   - 16 MB of 64 KB DHTs of empty tables, between TEMs: 8 s and 135 MB;
   - a thumbnail of 16 MB of SOIs: 1.1 s.
@@ -5436,6 +5437,137 @@ all 23 pass:
   starts and stops in pairs there.
 - **The section before's hidden marker** (one not listed in a run, whose length ends on a
   0xFF that stops the parsing) is unchanged.
+
+### Lines not shown aren't made
+
+The section before's first open item: past the limit, each line's text was still made,
+then dropped, as was the text of a run's lines held back (LR). Making it, mostly
+`QString::arg()`, was most of the time left. Past the limit each MB of markers took about
+0.06 to 0.7 s, by kind (a 14 MB photo takes 1.2 s in all), so the time grew with the file.
+
+**Now a line's text is made only if it is shown.** `CDocLog::AddLineF()`, and its kinds
+(`AddLineHdrF()`, `AddLineHdrDescF()`, `AddLineWarnF()`, `AddLineErrF()`), take a function
+that makes the text. A line held back, or past the limit, keeps the function. It is called
+only if the line is shown: one of the last marker's lines, or of a held marker shown in
+full. Otherwise it is dropped, uncalled, and counted as before.
+- **What a line shows is what the code read:** each function captures the values when the
+  line is added, never `this` (the compiler refuses a member read without it). Arrays and
+  byte strings are copied: a DHT line's codes, a DQT row, an APP0 thumbnail row.
+- **Which lines:** each that `DecodeMarker()`, `DecodeDHT()` and `AddHeader()` add, 114
+  changed by a script (the format and its arguments moved as they were), and about 10 by
+  hand (lines made in parts: a DHT's codes, a DQT's rows, APP0's density and thumbnail,
+  SOF's and SOS's components, APP14's transform, a COM's text). Left as they were:
+  - lines that can't run: in `#if 0`, in the `#else` of an `#if 1`, and the dumps under
+    `m_bVerbose`, which nothing sets;
+  - EXIF's TIFF identifier, after which the EXIF parser's own lines follow;
+  - the scan dump, an option, at most 20 lines a scan;
+  - the lines of the helpers (`SegOverrun()`, `ValidateValue()` and others, errors), and of
+    the EXIF, ICC and Photoshop parsers.
+- **The report is the same:** every test file was decoded by the code before and after,
+  with the default options, Relaxed Parsing, and DHT Expand: the 646 files' reports match,
+  byte for byte. (10 entries are folders or links, which the decode mode doesn't take.)
+
+The cost, in instructions retired (billions: `/usr/bin/time -l`), which the machine's load
+doesn't change: it was swapping and busy for most of this round. A 14 MB photo's 13.4 take
+1.2 s in all, so a billion is about 0.09 s. Peak memory is the same, within 6 MB.
+
+| Input | Size | Before | After |
+|---|---|---|---|
+| 384 DHTs of 3,854 empty tables, a TEM after each (`LZ_time`) | 24 MB | 200 | 24 |
+| The same DHTs in a row (`LZ_run`) | 24 MB | 200 | 22 |
+| 256 such DHTs between TEMs (the review's, in the section before) | 16 MB | 138 | 20 |
+| COM and TEM in turn | 16 MB | 55 | 19 |
+| A thumbnail whose offset leads to SOIs (its list isn't changed) | 16 MB | 14.3 | 14.6 |
+| 2,000 COMs of 64 KB, in runs of 20 | 131 MB | 32.2 | 32.0 |
+| A photo (noise, quality 95; the limit isn't reached) | 14 MB | 13.4 | 13.4 |
+
+In wall time, on the first version's 16 MB time files with the machine less busy: 7.6 s to
+1.44 s with TEMs, 7.8 s to 1.38 s in a row.
+
+Past the limit, each MB of one kind, in turn with an empty COM (the COMs alone, in a run),
+from 1 MB and 5 MB files:
+
+| Kind | Before | After |
+|---|---|---|
+| DHT (64 KB of empty tables) | 7.9 | 0.51 |
+| APP1 (empty, which gives an error line; the rest of its cost wasn't looked into) | 5.1 | 2.75 |
+| SOF0 (1 component) | 4.2 | 0.80 |
+| DAC | 4.1 | 0.68 |
+| DQT | 3.5 | 0.28 |
+| COM | 2.6 | 0.56 |
+| JPG0 | 2.5 | 0.50 |
+| APP5 | 2.4 | 0.48 |
+| DRI | 2.2 | 0.41 |
+| APP0 (JFIF) | 1.9 | 0.33 |
+| APP1 (XMP of 13,000 short lines) | 0.69 | 0.33 |
+
+**Tests:** 13 new cases (`LZ`), 2,154 in all. Each expected line is worked out from the
+generator's bytes.
+- **Text made late** (10 cases): a marker past the limit, where the file ends, so its lines
+  are the last shown and made then:
+  - a DHT's line of 16 codes, then one of 4 after 41 spaces;
+  - one of exactly 16, then an empty line, with no line of 41 spaces;
+  - a DQT's first and last rows (zigzag order to row order, 3 wide);
+  - an APP0's thumbnail row, and its density (72 x 72 DPI);
+  - a SOF's first and last components (subsampled 2 x 1);
+  - a COM's text.
+
+  These pass on the code before too: they check that the text made late is the text the
+  code made at once.
+- **The time** (3 cases): 384 DHTs of 3,854 empty tables (24 MB) after the scan, in a 5 s
+  limit, which the code before runs past (see the table):
+  - with a TEM between them: the counts (31,061,818 more lines not shown, 384 warning
+    lines among them), and the EOI's offset;
+  - in a row: the run's line (364 more not listed).
+
+  They pass `--timed`, a new flag of the test driver: built with the sanitizers, the driver
+  skips the case. The sanitizers slow the lines kept about 35 times (62 s to 141 s, where
+  the limit times 4 gives 16 s), so the time shows nothing there.
+
+Each of 12 switches, put in a scratch copy, fails its own cases when on, and with them off
+all 13 pass:
+- **Made at once:** every line; those past the limit; those held back. Each fails the time
+  cases it should: all 3; the two with TEMs; the run.
+- **Shown without their text:** the lines kept (all 10 text cases); the held lines (4 `LR`
+  cases, those of a held marker shown in full).
+- **A DHT's codes:** lost when made late; a line of more codes without its spaces; the
+  empty line given them.
+- **The rest:** a DQT row's values reversed; a thumbnail row's last pixel lost; the
+  density's units lost; a component's sampling factors swapped.
+
+**Checks:**
+- **The tests pass** with the new code, in a scratch build:
+  - every case but the GUI's: 1,133 passed, and 5 were skipped, which need the app built
+    beside the driver. (The GUI's 1,016 cases weren't run: their reports come from the same
+    code, whose output is the same.)
+  - with ASan/UBSan, through `tests/run-tests.sh --asan`: the `LZ`, `LB`, `LR` and `NL`
+    cases, 94 passed and the 3 time cases skipped, with no sanitizer reports.
+- **cppcheck 2.22,** at `--check-level=exhaustive`, finds nothing new in the two files. It
+  had found two unused strings and a member with no initial value, both fixed. It catches a
+  bug planted in `appendLine()`, `AddDhtCodesLine()`, `DhtCodesLine()`, and in a function
+  made for a line.
+- **No new compiler warnings** in the two files: the same 58 as before.
+- **A fresh review** (an agent given the diff) found no bug in the code. It checked each
+  converted line's function against the old text, the strings no longer set, and
+  `appendLine()` against the old function. It also decoded its own made-up files with the
+  code before and after: 80 segments of each converted kind, shown at once, as the last
+  past the limit, held and shown, held and dropped, held past the limit, and before the
+  scan. Their 1,796 reports match. Also clean with ASan/UBSan: 450 of those, the kept and
+  held ones. It found two problems in the tests, both fixed:
+  - the time cases couldn't pass with the sanitizers (the `--timed` flag above);
+  - no case had a DHT length with exactly 16 codes (the case above).
+
+  There was no second review.
+
+**Found, not fixed:**
+- **Lines still made past the limit:** those of the EXIF, ICC and Photoshop parsers, of the
+  helpers, of the thumbnail's own list (`DecodeEmbeddedThumb()`; its markers give 2 lines
+  each), and EXIF's TIFF identifier.
+- **Showing the 20,000 lines** takes about 0.7 to 1 s of every report that reaches the
+  limit.
+- **A line's function is stored in the line,** and it allocates when it holds over 24 bytes:
+  a DHT line with codes, a thumbnail row, a SOF component. They're made only where those
+  are.
 
 ## How this was reviewed
 

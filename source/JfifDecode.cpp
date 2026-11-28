@@ -5498,8 +5498,6 @@ bool CjfifDecode::DecodeDHT(bool bInject)
   uint32_t nLength;
   uint32_t nTmpVal;
 
-  QString strTmp, strFull;
-
   uint32_t nPosSaved = 0;
 
   bool bRet;
@@ -5528,8 +5526,9 @@ bool CjfifDecode::DecodeDHT(bool bInject)
   const quint64 nPosEnd = bInject ? (quint64(nPosLength) + nLength) : SegEnd(nPosLength, nLength);
 
   m_nPos += 2;
-  strTmp = QString("  Huffman table length = %1").arg(nLength);
-  m_pLog->AddLine(strTmp);
+
+  // (The text of each line is made only if it is shown: see CDocLog::AddLineF())
+  m_pLog->AddLineF([nLength] { return QString("  Huffman table length = %1").arg(nLength); });
 
   uint32_t nDhtClass_Tc;        // Range 0..1
   uint32_t nDhtHuffTblId_Th;    // Range 0..3
@@ -5566,21 +5565,19 @@ bool CjfifDecode::DecodeDHT(bool bInject)
       }
     }
 
-    m_pLog->AddLine("  ----");
+    m_pLog->AddLineF([] { return QString("  ----"); });
 
     nTmpVal = Buf(m_nPos++);
     nDhtClass_Tc = (nTmpVal & 0xF0) >> 4;       // Tc, range 0..1
     nDhtHuffTblId_Th = nTmpVal & 0x0F;  // Th, range 0..3
-    strTmp = QString("  Destination ID = %1").arg(nDhtHuffTblId_Th);
-    m_pLog->AddLine(strTmp);
-    strTmp = QString("  Class = %1 (%2)").arg(nDhtClass_Tc).arg(nDhtClass_Tc ? "AC Table" : "DC / Lossless Table");
-    m_pLog->AddLine(strTmp);
+    m_pLog->AddLineF([nDhtHuffTblId_Th] { return QString("  Destination ID = %1").arg(nDhtHuffTblId_Th); });
+    m_pLog->AddLineF([nDhtClass_Tc]
+                     { return QString("  Class = %1 (%2)").arg(nDhtClass_Tc).arg(nDhtClass_Tc ? "AC Table" : "DC / Lossless Table"); });
 
     // Add in some error checking to prevent
     if(nDhtClass_Tc >= MAX_DHT_CLASS)
     {
-      strTmp = QString("ERROR: Invalid DHT Class (%1). Aborting DHT Load.").arg(nDhtClass_Tc);
-      m_pLog->AddLineErr(strTmp);
+      m_pLog->AddLineErrF([nDhtClass_Tc] { return QString("ERROR: Invalid DHT Class (%1). Aborting DHT Load.").arg(nDhtClass_Tc); });
       m_nPos = static_cast<uint32_t>(nPosEnd);
       //m_bStateAbort = true; // Stop decoding
       break;
@@ -5588,8 +5585,8 @@ bool CjfifDecode::DecodeDHT(bool bInject)
 
     if(nDhtHuffTblId_Th >= MAX_DHT_DEST_ID)
     {
-      strTmp = QString("ERROR: Invalid DHT Dest ID (%1). Aborting DHT Load.").arg(nDhtHuffTblId_Th);
-      m_pLog->AddLineErr(strTmp);
+      m_pLog->AddLineErrF([nDhtHuffTblId_Th]
+                          { return QString("ERROR: Invalid DHT Dest ID (%1). Aborting DHT Load.").arg(nDhtHuffTblId_Th); });
       m_nPos = static_cast<uint32_t>(nPosEnd);
       //m_bStateAbort = true; // Stop decoding
       break;
@@ -5622,27 +5619,29 @@ bool CjfifDecode::DecodeDHT(bool bInject)
       // Keep a total count of the number of DHT codes read
       nDhtCodesTotal += m_anDhtNumCodesLen_Li[nIndLen];
 
-      strFull = QString("    Codes of length %1 bits (%2 total): ")
-          .arg(nIndLen, 2, 10, QChar('0'))
-          .arg(m_anDhtNumCodesLen_Li[nIndLen], 3, 10, QChar('0'));
+      // Each line's codes, at most 16, and which line it is (see DhtCodesLine())
+      const uint32_t nNumCodes = m_anDhtNumCodesLen_Li[nIndLen];
+      teDhtCodesLine eLine = DHT_CODES_FIRST;
+      std::array<uint8_t, 16> anCodes{};
+      uint32_t nCodes = 0;
 
       for(uint32_t nIndCode = 0; ((!m_bStateAbort) && (nIndCode < m_anDhtNumCodesLen_Li[nIndLen])); nIndCode++)
       {
         // Start a new line for every 16 codes
         if((nIndCode != 0) && ((nIndCode % 16) == 0))
         {
-          strFull = "                                         ";
+          eLine = DHT_CODES_MORE;
         }
 
         nTmpVal = Buf(m_nPos++);
-        strTmp = QString("%1 ").arg(nTmpVal, 2, 16, QChar('0'));
-        strFull += strTmp;
+        anCodes[nCodes++] = static_cast<uint8_t>(nTmpVal);
 
         // Only write 16 codes per line
         if((nIndCode % 16) == 15)
         {
-          m_pLog->AddLine(strFull);
-          strFull = "";
+          AddDhtCodesLine(eLine, nIndLen, nNumCodes, anCodes, nCodes);
+          eLine = DHT_CODES_NONE;
+          nCodes = 0;
         }
 
         // Save the huffman code
@@ -5656,16 +5655,15 @@ bool CjfifDecode::DecodeDHT(bool bInject)
         }
       }
 
-      m_pLog->AddLine(strFull);
+      AddDhtCodesLine(eLine, nIndLen, nNumCodes, anCodes, nCodes);
     }
 
-    strTmp = QString("    Total number of codes: %1").arg(nDhtCodesTotal, 3, 10, QChar('0'));
-    m_pLog->AddLine(strTmp);
+    m_pLog->AddLineF([nDhtCodesTotal] { return QString("    Total number of codes: %1").arg(nDhtCodesTotal, 3, 10, QChar('0')); });
 
     if(nDhtCodesTotal > DECODE_DHT_MAX_DHT)
     {
-      strTmp = QString("Excessive DHT entries (%1): only the first %2 are used").arg(nDhtCodesTotal).arg(DECODE_DHT_MAX_DHT);
-      m_pLog->AddLineErr(strTmp);
+      m_pLog->AddLineErrF([nDhtCodesTotal]
+                          { return QString("Excessive DHT entries (%1): only the first %2 are used").arg(nDhtCodesTotal).arg(DECODE_DHT_MAX_DHT); });
     }
 
     uint32_t nDhtLookupInd = 0;
@@ -5677,8 +5675,8 @@ bool CjfifDecode::DecodeDHT(bool bInject)
 
     if(m_pAppConfig->expandDht())
     {
-      m_pLog->AddLine("");
-      m_pLog->AddLine("  Expanded Form of Codes:");
+      m_pLog->AddLineF([] { return QString(""); });
+      m_pLog->AddLineF([] { return QString("  Expanded Form of Codes:"); });
     }
 
     // This may redefine a table: drop what the previous definition left
@@ -5690,8 +5688,7 @@ bool CjfifDecode::DecodeDHT(bool bInject)
       {
         if(m_pAppConfig->expandDht())
         {
-          strTmp = QString("    Codes of length %1 bits:").arg(nBitLen, 2, 10, QChar('0'));
-          m_pLog->AddLine(strTmp);
+          m_pLog->AddLineF([nBitLen] { return QString("    Codes of length %1 bits:").arg(nBitLen, 2, 10, QChar('0')); });
         }
 
         // Codes exist for this bit-length
@@ -5704,42 +5701,44 @@ bool CjfifDecode::DecodeDHT(bool bInject)
             bit_ind++)
         {
           uint32_t nDecVal = nCodeVal;
-          uint32_t nBinBit;
-
-          char acBinStr[17] = "";
-
-          uint32_t nBinStrLen = 0;
 
           // If the user has enabled output of DHT expanded tables,
           // report the bit-string sequences.
           if(m_pAppConfig->expandDht())
           {
-            for(uint32_t nBinInd = nBitLen; nBinInd >= 1; nBinInd--)
+            const uint32_t nCode = anDhtCodeVal[nDhtInd];
+            const bool bAc = (nDhtClass_Tc == DHT_CLASS_AC);
+
+            m_pLog->AddLineF([nDecVal, nBitLen, nCode, bAc]
             {
-              nBinBit = (nDecVal >> (nBinInd - 1)) & 1;
-              acBinStr[nBinStrLen++] = (nBinBit) ? '1' : '0';
-            }
+              char acBinStr[17] = "";
+              uint32_t nBinStrLen = 0;
 
-            acBinStr[nBinStrLen] = '\0';
-            strFull = QString("      %1 = %2").arg(acBinStr).arg(anDhtCodeVal[nDhtInd], 2, 16, QChar('0'));
-
-            // The following are only valid for AC components
-            // Bug [3442132]
-            if(nDhtClass_Tc == DHT_CLASS_AC)
-            {
-              if(anDhtCodeVal[nDhtInd] == 0x00)
+              for(uint32_t nBinInd = nBitLen; nBinInd >= 1; nBinInd--)
               {
-                strFull += " (EOB)";
+                const uint32_t nBinBit = (nDecVal >> (nBinInd - 1)) & 1;
+                acBinStr[nBinStrLen++] = (nBinBit) ? '1' : '0';
               }
-              if(anDhtCodeVal[nDhtInd] == 0xF0)
+
+              acBinStr[nBinStrLen] = '\0';
+              QString strFull = QString("      %1 = %2").arg(acBinStr).arg(nCode, 2, 16, QChar('0'));
+
+              // The following are only valid for AC components
+              // Bug [3442132]
+              if(bAc)
               {
-                strFull += " (ZRL)";
+                if(nCode == 0x00)
+                {
+                  strFull += " (EOB)";
+                }
+                if(nCode == 0xF0)
+                {
+                  strFull += " (ZRL)";
+                }
               }
-            }
 
-            strTmp = QString("%1 (Total Len = %2)").arg(strFull, -40).arg(nBitLen + (anDhtCodeVal[nDhtInd] & 0xF), 2);
-
-            m_pLog->AddLine(strTmp);
+              return QString("%1 (Total Len = %2)").arg(strFull, -40).arg(nBitLen + (nCode & 0xF), 2);
+            });
           }
 
           // Store the lookup value
@@ -5774,7 +5773,7 @@ bool CjfifDecode::DecodeDHT(bool bInject)
       DecodeErrCheck(bRet);
     }
 
-    m_pLog->AddLine("");
+    m_pLog->AddLineF([] { return QString(""); });
   }
 
   // Then past the end, as the tables read to the segment's end left it, so
@@ -5792,6 +5791,55 @@ bool CjfifDecode::DecodeDHT(bool bInject)
   }
 
   return bGoOn;
+}
+
+//-----------------------------------------------------------------------------
+// In DecodeDHT(): a line of a table's codes of length nLen (bits), of which
+// it has nNumCodes, with nCodes of them (anCodes). Its text is made only if it
+// is shown (see CDocLog::AddLineF()).
+void CjfifDecode::AddDhtCodesLine(teDhtCodesLine eLine, uint32_t nLen, uint32_t nNumCodes,
+                                  const std::array<uint8_t, 16> &anCodes, uint32_t nCodes)
+{
+  if(nCodes == 0)
+  {
+    // (Most lines have none: without the codes the function stores the
+    // values in itself, instead of allocating)
+    m_pLog->AddLineF([eLine, nLen, nNumCodes] { return DhtCodesLine(eLine, nLen, nNumCodes, {}, 0); });
+  }
+  else
+  {
+    m_pLog->AddLineF([eLine, nLen, nNumCodes, anCodes, nCodes]
+                     { return DhtCodesLine(eLine, nLen, nNumCodes, anCodes, nCodes); });
+  }
+}
+
+// The text of a line of AddDhtCodesLine()
+QString CjfifDecode::DhtCodesLine(teDhtCodesLine eLine, uint32_t nLen, uint32_t nNumCodes,
+                                  const std::array<uint8_t, 16> &anCodes, uint32_t nCodes)
+{
+  QString strFull;
+
+  if(eLine == DHT_CODES_FIRST)
+  {
+    strFull = QString("    Codes of length %1 bits (%2 total): ")
+        .arg(nLen, 2, 10, QChar('0'))
+        .arg(nNumCodes, 3, 10, QChar('0'));
+  }
+  else if(eLine == DHT_CODES_MORE)
+  {
+    strFull = "                                         ";
+  }
+  else
+  {
+    strFull = "";
+  }
+
+  for(uint32_t nInd = 0; nInd < nCodes; nInd++)
+  {
+    strFull += QString("%1 ").arg(uint32_t(anCodes[nInd]), 2, 16, QChar('0'));
+  }
+
+  return strFull;
 }
 
 //-----------------------------------------------------------------------------
@@ -6190,17 +6238,21 @@ uint32_t CjfifDecode::DecodeMarker()
       // Don't give error message if we've already alerted them of AVI / PSD
       if((!m_bAvi) && (!m_bPsd))
       {
-        strTmp = "NOTE: File did not start with JPEG marker. Consider using [Tools->Img Search Fwd] to locate embedded JPEG.";
-        m_pLog->AddLineErr(strTmp);
+        m_pLog->AddLineErrF([]
+        {
+          return QString("NOTE: File did not start with JPEG marker. Consider using [Tools->Img Search Fwd] to locate "
+                         "embedded JPEG.");
+        });
       }
     }
     else
     {
-      strTmp =
-        QString("ERROR: Expected marker 0xFF, got 0x%1 @ offset 0x%2. Consider using [Tools->Img Search Fwd/Rev].")
-          .arg(Buf(m_nPos), 2, 16, QChar('0'))
-          .arg(m_nPos, 8, 16, QChar('0'));
-      m_pLog->AddLineErr(strTmp);
+      m_pLog->AddLineErrF([nByte = Buf(m_nPos), nPos = m_nPos]
+      {
+        return QString("ERROR: Expected marker 0xFF, got 0x%1 @ offset 0x%2. Consider using [Tools->Img Search Fwd/Rev].")
+          .arg(nByte, 2, 16, QChar('0'))
+          .arg(nPos, 8, 16, QChar('0'));
+      });
     }
 
     m_nPos++;
@@ -6240,8 +6292,8 @@ uint32_t CjfifDecode::DecodeMarker()
   // Report out any padding
   if(nSkipMarkerPad > 0)
   {
-    strTmp = QString("*** Skipped %1 marker pad bytes ***").arg(nSkipMarkerPad);
-    m_pLog->AddLineHdr(strTmp);
+    m_pLog->AddLineHdrF([nSkipMarkerPad]
+                        { return QString("*** Skipped %1 marker pad bytes ***").arg(nSkipMarkerPad); });
   }
 
   // Cut short by the end of the file, which ProcessFile() reports: the
@@ -6285,8 +6337,7 @@ uint32_t CjfifDecode::DecodeMarker()
       // Photoshop DUCKY (Save For Web)
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       //nLength = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
-      strTmp = QString("  Length          = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Length          = %1").arg(nLength); });
 
       nPosSaved = m_nPos;
       nPosSegEnd = SegEnd(nPosSaved, nLength);
@@ -6294,13 +6345,13 @@ uint32_t CjfifDecode::DecodeMarker()
       m_nPos += 2;              // Move past length now that we've used it
 
       abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
-      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([abIdentifier]
+                       { return QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier)); });
       TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP12 segment", acIdentifier, 1);
 
       if(strcmp(acIdentifier, "Ducky") != 0)
       {
-        m_pLog->AddLine("    Not Photoshop DUCKY. Skipping remainder.");
+        m_pLog->AddLineF([] { return QString("    Not Photoshop DUCKY. Skipping remainder."); });
       }
       else if(!SegHas(quint64(m_nPos) + 6, 1, nPosSegEnd))
       {
@@ -6312,8 +6363,8 @@ uint32_t CjfifDecode::DecodeMarker()
         // Please see reference on http://cpan.uwinnipeg.ca/htdocs/Image-ExifTool/Image/ExifTool/APP12.pm.html
         // A direct indexed approach should be safe
         m_nImgQualPhotoshopSfw = Buf(m_nPos + 6);
-        strTmp = QString("  Photoshop Save For Web Quality = [%1]").arg(m_nImgQualPhotoshopSfw);
-        m_pLog->AddLine(strTmp);
+        m_pLog->AddLineF([m_nImgQualPhotoshopSfw = m_nImgQualPhotoshopSfw]
+                         { return QString("  Photoshop Save For Web Quality = [%1]").arg(m_nImgQualPhotoshopSfw); });
       }
 
       // Restore original position in file to a point
@@ -6325,15 +6376,14 @@ uint32_t CjfifDecode::DecodeMarker()
       // JPEG Adobe  tag
 
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
-      strTmp = QString("  Length            = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Length            = %1").arg(nLength); });
 
       nPosSaved = m_nPos;
 
       // Some files had very short segment (eg. nLength=2)
       if(nLength < 2 + 12)
       {
-        m_pLog->AddLine("    Segment too short for Identifier. Skipping remainder.");
+        m_pLog->AddLineF([] { return QString("    Segment too short for Identifier. Skipping remainder."); });
         m_nPos = nPosSaved + nLength;
         break;
       }
@@ -6356,36 +6406,38 @@ uint32_t CjfifDecode::DecodeMarker()
       }
 
       nTmpVal = Buf(m_nPos + 0) * 256 + Buf(m_nPos + 1);
-      strTmp = QString("  DCTEncodeVersion  = %1").arg(nTmpVal);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nTmpVal] { return QString("  DCTEncodeVersion  = %1").arg(nTmpVal); });
 
       nTmpVal = Buf(m_nPos + 2) * 256 + Buf(m_nPos + 3);
-      strTmp = QString("  APP14Flags0       = %1").arg(nTmpVal);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nTmpVal] { return QString("  APP14Flags0       = %1").arg(nTmpVal); });
 
       nTmpVal = Buf(m_nPos + 4) * 256 + Buf(m_nPos + 5);
-      strTmp = QString("  APP14Flags1       = %1").arg(nTmpVal);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nTmpVal] { return QString("  APP14Flags1       = %1").arg(nTmpVal); });
 
       nColTransform = Buf(m_nPos + 6);
 
-      switch (nColTransform)
       {
-        case APP14_COLXFM_UNK_RGB:
-          strTmp = QString("  ColorTransform    = %1 [Unknown (RGB or CMYK)]").arg(nColTransform);
-          break;
-        case APP14_COLXFM_YCC:
-          strTmp = QString("  ColorTransform    = %1 [YCbCr]").arg(nColTransform);
-          break;
-        case APP14_COLXFM_YCCK:
-          strTmp = QString("  ColorTransform    = %1 [YCCK]").arg(nColTransform);
-          break;
-        default:
-          strTmp = QString("  ColorTransform    = %1 [???]").arg(nColTransform);
-          break;
+        const char *pcColXfm;
+
+        switch (nColTransform)
+        {
+          case APP14_COLXFM_UNK_RGB:
+            pcColXfm = "  ColorTransform    = %1 [Unknown (RGB or CMYK)]";
+            break;
+          case APP14_COLXFM_YCC:
+            pcColXfm = "  ColorTransform    = %1 [YCbCr]";
+            break;
+          case APP14_COLXFM_YCCK:
+            pcColXfm = "  ColorTransform    = %1 [YCCK]";
+            break;
+          default:
+            pcColXfm = "  ColorTransform    = %1 [???]";
+            break;
+        }
+
+        m_pLog->AddLineF([pcColXfm, nColTransform] { return QString(pcColXfm).arg(nColTransform); });
       }
 
-      m_pLog->AddLine(strTmp);
       m_nApp14ColTransform = (nColTransform & 0xFF);
 
       // Restore original position in file to a point
@@ -6398,15 +6450,14 @@ uint32_t CjfifDecode::DecodeMarker()
       // Photoshop (Save As)
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       //nLength = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
-      strTmp = QString("  Length          = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Length          = %1").arg(nLength); });
 
       nPosSaved = m_nPos;
 
       // Some files had very short segment (eg. nLength=2)
       if(nLength < 2 + 20)
       {
-        m_pLog->AddLine("    Segment too short for Identifier. Skipping remainder.");
+        m_pLog->AddLineF([] { return QString("    Segment too short for Identifier. Skipping remainder."); });
         m_nPos = nPosSaved + nLength;
         break;
       }
@@ -6415,13 +6466,13 @@ uint32_t CjfifDecode::DecodeMarker()
 
       nPosSegEnd = SegEnd(nPosSaved, nLength);
       abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
-      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([abIdentifier]
+                       { return QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier)); });
       TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP13 segment", acIdentifier, 1);
 
       if(strcmp(acIdentifier, "Photoshop 3.0") != 0)
       {
-        m_pLog->AddLine("    Not Photoshop. Skipping remainder.");
+        m_pLog->AddLineF([] { return QString("    Not Photoshop. Skipping remainder."); });
       }
       else                      // Photoshop
       {
@@ -6436,8 +6487,7 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_APP1:
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       //nLength = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
-      strTmp = QString("  Length          = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Length          = %1").arg(nLength); });
 
       nPosSaved = m_nPos;
       nPosSegEnd = SegEnd(nPosSaved, nLength);
@@ -6445,15 +6495,15 @@ uint32_t CjfifDecode::DecodeMarker()
       m_nPos += 2;              // Move past length now that we've used it
 
       abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
-      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([abIdentifier]
+                       { return QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier)); });
       TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP1 segment", acIdentifier, 0);
 
       if(strncmp(acIdentifier, "http://ns.adobe.com/xap/1.0/\x00", 29) == 0)
       {                         //@@
         // XMP
 
-        m_pLog->AddLine("    XMP = ");
+        m_pLog->AddLineF([] { return QString("    XMP = "); });
 
         m_nPos++;
 
@@ -6476,7 +6526,7 @@ uint32_t CjfifDecode::DecodeMarker()
         auto flushLine = [&]() {
           if(bNonSpace)
           {
-            m_pLog->AddLine(QString("          |") + QString::fromUtf8(abLine));
+            m_pLog->AddLineF([abLine] { return QString("          |") + QString::fromUtf8(abLine); });
           }
 
           abLine.clear();
@@ -6554,18 +6604,19 @@ uint32_t CjfifDecode::DecodeMarker()
           case 0x4949:         // "II"
             // Intel alignment
             m_nImgExifEndian = 0;
-            m_pLog->AddLine("  Endian          = Intel (little)");
+            m_pLog->AddLineF([] { return QString("  Endian          = Intel (little)"); });
             break;
           case 0x4D4D:         // "MM"
             // Motorola alignment
             m_nImgExifEndian = 1;
-            m_pLog->AddLine("  Endian          = Motorola (big)");
+            m_pLog->AddLineF([] { return QString("  Endian          = Motorola (big)"); });
             break;
           default:
             // Anything read with it would be garbage (the byte order was
             // left from the previous file, or never set)
             bByteOrderKnown = false;
-            m_pLog->AddLineErr("  ERROR: Unknown EXIF byte order (expected \"II\" or \"MM\"). Skipping the EXIF IFDs.");
+            m_pLog->AddLineErrF([]
+                                { return QString("  ERROR: Unknown EXIF byte order (expected \"II\" or \"MM\"). Skipping the EXIF IFDs."); });
             break;
         }
 
@@ -6573,8 +6624,7 @@ uint32_t CjfifDecode::DecodeMarker()
         uint32_t test_002a;
 
         test_002a = ByteSwap2(acIdentifierTiff[2], acIdentifierTiff[3]);
-        strTmp = QString("  TAG Mark x002A  = 0x%1").arg(test_002a, 4, 16, QChar('0'));
-        m_pLog->AddLine(strTmp);
+        m_pLog->AddLineF([test_002a] { return QString("  TAG Mark x002A  = 0x%1").arg(test_002a, 4, 16, QChar('0')); });
 
         uint32_t nIfdCount;     // Current IFD #
 
@@ -6611,7 +6661,7 @@ uint32_t CjfifDecode::DecodeMarker()
         {
           // We've run out of space for any IFD, so cancel now
           exif_done = true;
-          m_pLog->AddLine("  NOTE: No IFD entries");
+          m_pLog->AddLineF([] { return QString("  NOTE: No IFD entries"); });
         }
 
         nIfdCount = 0;
@@ -6624,16 +6674,18 @@ uint32_t CjfifDecode::DecodeMarker()
         {
           if(anIfdSeen.contains(nOffsetIfd1) || (anIfdSeen.size() >= 32))
           {
-            strTmp = QString("  ERROR: IFD%1 at offset 0x%2 repeats an earlier IFD or the IFD chain is too long. Stopping.")
+            m_pLog->AddLineErrF([nIfdCount, nOffsetIfd1]
+            {
+              return QString("  ERROR: IFD%1 at offset 0x%2 repeats an earlier IFD or the IFD chain is too long. Stopping.")
                 .arg(nIfdCount)
                 .arg(nOffsetIfd1, 8, 16, QChar('0'));
-            m_pLog->AddLineErr(strTmp);
+            });
             break;
           }
 
           anIfdSeen.append(nOffsetIfd1);
 
-          m_pLog->AddLine("");
+          m_pLog->AddLineF([] { return QString(""); });
 
           strTmp = QString("IFD%1").arg(nIfdCount);
 
@@ -6660,8 +6712,8 @@ uint32_t CjfifDecode::DecodeMarker()
             nOffsetIfd1 = ByteSwap4(Buf(m_nPos + 0), Buf(m_nPos + 1), Buf(m_nPos + 2), Buf(m_nPos + 3));
             m_nPos += 4;
 
-            strTmp = QString("    Offset to Next IFD = 0x%1").arg(nOffsetIfd1, 8, 16, QChar('0'));
-            m_pLog->AddLine(strTmp);
+            m_pLog->AddLineF([nOffsetIfd1]
+                             { return QString("    Offset to Next IFD = 0x%1").arg(nOffsetIfd1, 8, 16, QChar('0')); });
           }
 
           if(nOffsetIfd1 == 0x00000000)
@@ -6679,32 +6731,32 @@ uint32_t CjfifDecode::DecodeMarker()
         // If EXIF SubIFD was defined, then handle it now
         if(m_nImgExifSubIfdPtr != 0)
         {
-          m_pLog->AddLine("");
+          m_pLog->AddLineF([] { return QString(""); });
           DecodeExifIfd("SubIFD", nPosExifStart, m_nImgExifSubIfdPtr);
         }
 
         if(m_nImgExifMakerPtr != 0)
         {
-          m_pLog->AddLine("");
+          m_pLog->AddLineF([] { return QString(""); });
           DecodeExifIfd("MakerIFD", nPosExifStart, m_nImgExifMakerPtr);
         }
 
         if(m_nImgExifGpsIfdPtr != 0)
         {
-          m_pLog->AddLine("");
+          m_pLog->AddLineF([] { return QString(""); });
           DecodeExifIfd("GPSIFD", nPosExifStart, m_nImgExifGpsIfdPtr);
         }
 
         if(m_nImgExifInteropIfdPtr != 0)
         {
-          m_pLog->AddLine("");
+          m_pLog->AddLineF([] { return QString(""); });
           DecodeExifIfd("InteropIFD", nPosExifStart, m_nImgExifInteropIfdPtr);
         }
       }
       else
       {
-        strTmp = QString("Identifier [%1] not supported. Skipping remainder.").arg(IdentifierShown(abIdentifier));
-        m_pLog->AddLine(strTmp);
+        m_pLog->AddLineF([abIdentifier]
+                         { return QString("Identifier [%1] not supported. Skipping remainder.").arg(IdentifierShown(abIdentifier)); });
       }
 
       //////////
@@ -6745,8 +6797,7 @@ uint32_t CjfifDecode::DecodeMarker()
       // Photoshop (Save As)
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       //nLength = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
-      strTmp = QString("  Length          = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Length          = %1").arg(nLength); });
 
       nPosSaved = m_nPos;
       nPosSegEnd = SegEnd(nPosSaved, nLength);
@@ -6754,25 +6805,25 @@ uint32_t CjfifDecode::DecodeMarker()
       m_nPos += 2;              // Move past length now that we've used it
 
       abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
-      strTmp = QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier));
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([abIdentifier]
+                       { return QString("  Identifier      = [%1]").arg(IdentifierShown(abIdentifier)); });
       TakeIdentifier(abIdentifier, bIdEnds, nPosSegEnd, "APP2 segment", acIdentifier, 1);
 
       if(strcmp(acIdentifier, "FPXR") == 0)
       {
         // Photoshop
-        m_pLog->AddLine("    FlashPix:");
+        m_pLog->AddLineF([] { return QString("    FlashPix:"); });
         DecodeApp2Flashpix(nPosSegEnd);
       }
       else if(strcmp(acIdentifier, "ICC_PROFILE") == 0)
       {
         // ICC Profile
-        m_pLog->AddLine("    ICC Profile:");
+        m_pLog->AddLineF([] { return QString("    ICC Profile:"); });
         DecodeApp2IccProfile(nPosSegEnd);
       }
       else
       {
-        m_pLog->AddLine("    Not supported. Skipping remainder.");
+        m_pLog->AddLineF([] { return QString("    Not supported. Skipping remainder."); });
       }
 
       // Restore original position in file to a point
@@ -6795,7 +6846,7 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_APP15:
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       //nLength = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
-      m_pLog->AddLine(QString("  Length     = %1").arg(nLength));
+      m_pLog->AddLineF([nLength] { return QString("  Length     = %1").arg(nLength); });
 
       if(m_bVerbose)
       {
@@ -6867,13 +6918,11 @@ uint32_t CjfifDecode::DecodeMarker()
       //nLength = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
       nPosSaved = m_nPos;       // Segment ends at nPosSaved + nLength
       m_nPos += 2;
-      strTmp = QString("  Length     = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Length     = %1").arg(nLength); });
 
       nPosSegEnd = SegEnd(nPosSaved, nLength);
       abIdentifier = ReadIdentifier(m_nPos, nPosSegEnd, bIdEnds);
-      strTmp = QString("  Identifier = [%1]").arg(IdentifierShown(abIdentifier));
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([abIdentifier] { return QString("  Identifier = [%1]").arg(IdentifierShown(abIdentifier)); });
       {
         // (The position moves on in the JFIF decode below)
         const uint32_t nPosId = m_nPos;
@@ -6903,8 +6952,8 @@ uint32_t CjfifDecode::DecodeMarker()
 
         m_nImgVersionMajor = Buf(m_nPos++);
         m_nImgVersionMinor = Buf(m_nPos++);
-        strTmp = QString("  version    = [%1.%2]").arg(m_nImgVersionMajor).arg(m_nImgVersionMinor);
-        m_pLog->AddLine(strTmp);
+        m_pLog->AddLineF([m_nImgVersionMajor = m_nImgVersionMajor, m_nImgVersionMinor = m_nImgVersionMinor]
+                         { return QString("  version    = [%1.%2]").arg(m_nImgVersionMajor).arg(m_nImgVersionMinor); });
 
         m_nImgUnits = Buf(m_nPos++);
 
@@ -6914,41 +6963,50 @@ uint32_t CjfifDecode::DecodeMarker()
         m_nImgDensityY = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
         //m_nImgDensityY = m_pWBuf->BufX(m_nPos,2,!m_nImgExifEndian);
         m_nPos += 2;
-        strTmp = QString("  density    = %1 x %2 ").arg(m_nImgDensityX).arg(m_nImgDensityY);
-        strFull = strTmp;
-
-        switch (m_nImgUnits)
         {
-          case 0:
-            strFull += "(aspect ratio)";
-            m_pLog->AddLine(strFull);
-            break;
+          const auto fnDensity = [nDensityX = m_nImgDensityX, nDensityY = m_nImgDensityY, nUnits = m_nImgUnits]
+          {
+            QString strLine = QString("  density    = %1 x %2 ").arg(nDensityX).arg(nDensityY);
 
-          case 1:
-            strFull += "DPI (dots per inch)";
-            m_pLog->AddLine(strFull);
-            break;
+            switch (nUnits)
+            {
+              case 0:
+                strLine += "(aspect ratio)";
+                break;
 
-          case 2:
-            strFull += "DPcm (dots per cm)";
-            m_pLog->AddLine(strFull);
-            break;
+              case 1:
+                strLine += "DPI (dots per inch)";
+                break;
 
-          default:
-            strTmp = QString("ERROR: Unknown ImgUnits parameter [%1]").arg(m_nImgUnits);
-            strFull += strTmp;
-            m_pLog->AddLineWarn(strFull);
+              case 2:
+                strLine += "DPcm (dots per cm)";
+                break;
+
+              default:
+                strLine += QString("ERROR: Unknown ImgUnits parameter [%1]").arg(nUnits);
+                break;
+            }
+
+            return strLine;
+          };
+
+          if((m_nImgUnits == 0) || (m_nImgUnits == 1) || (m_nImgUnits == 2))
+          {
+            m_pLog->AddLineF(fnDensity);
+          }
+          else
+          {
+            m_pLog->AddLineWarnF(fnDensity);
             //return DECMARK_ERR;
-            break;
+          }
         }
 
         m_nImgThumbSizeX = Buf(m_nPos++);
         m_nImgThumbSizeY = Buf(m_nPos++);
-        strTmp = QString("  thumbnail  = %1 x %2").arg(m_nImgThumbSizeX).arg(m_nImgThumbSizeY);
-        m_pLog->AddLine(strTmp);
+        m_pLog->AddLineF([m_nImgThumbSizeX = m_nImgThumbSizeX, m_nImgThumbSizeY = m_nImgThumbSizeY]
+                         { return QString("  thumbnail  = %1 x %2").arg(m_nImgThumbSizeX).arg(m_nImgThumbSizeY); });
 
         // Unpack the thumbnail:
-        uint32_t thumbnail_r, thumbnail_g, thumbnail_b;
 
         // The RGB thumbnail must fit in the rest of the APP0 segment, and of the
         // file (past its end it was shown as zeros)
@@ -6956,31 +7014,46 @@ uint32_t CjfifDecode::DecodeMarker()
 
         if((nThumbBytes > 0) && !SegHas(m_nPos, nThumbBytes, nPosSegEnd))
         {
-          strTmp = QString("  ERROR: Thumbnail (%1 bytes) larger than the rest of the APP0 segment. Not shown.")
+          m_pLog->AddLineErrF([nThumbBytes]
+          {
+            return QString("  ERROR: Thumbnail (%1 bytes) larger than the rest of the APP0 segment. Not shown.")
               .arg(nThumbBytes);
-          m_pLog->AddLineErr(strTmp);
+          });
         }
         else if(m_nImgThumbSizeX && m_nImgThumbSizeY)
         {
           for(uint32_t y = 0; y < m_nImgThumbSizeY; y++)
           {
-            strFull = QString("   Thumb[%1] = ").arg(y, 3, 10, QChar('0'));
+            // The row's bytes, red, green and blue for each pixel
+            QByteArray abRow;
 
-            for(uint32_t x = 0; x < m_nImgThumbSizeX; x++)
+            abRow.reserve(qsizetype(3) * m_nImgThumbSizeX);
+
+            for(uint32_t x = 0; x < 3 * m_nImgThumbSizeX; x++)
             {
-              thumbnail_r = Buf(m_nPos++);
-              thumbnail_g = Buf(m_nPos++);
-              thumbnail_b = Buf(m_nPos++);
-              strTmp = QString("(0x%1,0x%2,0x%3) ")
-                  .arg(thumbnail_r, 2, 16, QChar('0'))
-                  .arg(thumbnail_g, 2, 16, QChar('0'))
-                  .arg(thumbnail_b, 2, 16, QChar('0'));
-              strFull += strTmp;
+              abRow.append(static_cast<char>(Buf(m_nPos++)));
             }
 
             // One line per thumbnail row (this used to log the growing
             // line after every pixel)
-            m_pLog->AddLine(strFull);
+            m_pLog->AddLineF([y, abRow]
+            {
+              QString strLine = QString("   Thumb[%1] = ").arg(y, 3, 10, QChar('0'));
+
+              for(qsizetype nInd = 0; nInd + 2 < abRow.size(); nInd += 3)
+              {
+                const uint32_t thumbnail_r = static_cast<uint8_t>(abRow[nInd]);
+                const uint32_t thumbnail_g = static_cast<uint8_t>(abRow[nInd + 1]);
+                const uint32_t thumbnail_b = static_cast<uint8_t>(abRow[nInd + 2]);
+
+                strLine += QString("(0x%1,0x%2,0x%3) ")
+                    .arg(thumbnail_r, 2, 16, QChar('0'))
+                    .arg(thumbnail_g, 2, 16, QChar('0'))
+                    .arg(thumbnail_b, 2, 16, QChar('0'));
+              }
+
+              return strLine;
+            });
           }
         }
 
@@ -7011,9 +7084,9 @@ uint32_t CjfifDecode::DecodeMarker()
         // Need to fill in predefined DHT table from spec:
         //   OpenDML file format for AVI, section "Proposed Data Chunk Format"
         //   Described in MMREG.H
-        m_pLog->AddLine("  Detected MotionJPEG");
-        m_pLog->AddLine("  Importing standard Huffman table...");
-        m_pLog->AddLine("");
+        m_pLog->AddLineF([] { return QString("  Detected MotionJPEG"); });
+        m_pLog->AddLineF([] { return QString("  Importing standard Huffman table..."); });
+        m_pLog->AddLineF([] { return QString(""); });
 
         AddHeader(JFIF_DHT_FAKE);
 
@@ -7029,7 +7102,7 @@ uint32_t CjfifDecode::DecodeMarker()
       else
       {
         // Not JFIF or AVI1
-        m_pLog->AddLine("    Not known APP0 type. Skipping remainder.");
+        m_pLog->AddLineF([] { return QString("    Not known APP0 type. Skipping remainder."); });
         m_nPos += nLength - 2;
       }
 
@@ -7047,12 +7120,11 @@ uint32_t CjfifDecode::DecodeMarker()
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Lq
       nPosDqtEnd = SegEnd(m_nPos, nLength);
       m_nPos += 2;
-      strTmp = QString("  Table length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Table length = %1").arg(nLength); });
 
       while((nPosDqtEnd > m_nPos) && !WrappedSince(nPosMarkerStart))
       {
-        m_pLog->AddLine("  ----");
+        m_pLog->AddLineF([] { return QString("  ----"); });
 
         nPosDqtTable = m_nPos;
         nTmpVal = Buf(m_nPos++);        // Pq | Tq
@@ -7071,7 +7143,8 @@ uint32_t CjfifDecode::DecodeMarker()
         }
         else
         {
-          m_pLog->AddLineWarn(QString("    Unsupported precision value [%1]").arg(nDqtPrecision_Pq));
+          m_pLog->AddLineWarnF([nDqtPrecision_Pq]
+                               { return QString("    Unsupported precision value [%1]").arg(nDqtPrecision_Pq); });
           strDqtPrecision = "???";
           // FIXME: Consider terminating marker parsing early
         }
@@ -7082,8 +7155,7 @@ uint32_t CjfifDecode::DecodeMarker()
         if(!ValidateValue(nDqtQuantDestId_Tq, 0, 3, "DQT Destination ID <Tq>", true, 0))
           return DECMARK_ERR;
 
-        strTmp = QString("  Precision=%1").arg(strDqtPrecision);
-        m_pLog->AddLine(strTmp);
+        m_pLog->AddLineF([strDqtPrecision] { return QString("  Precision=%1").arg(strDqtPrecision); });
 #else
         // Decode with additional DQT extension (ITU-T-JPEG-Plus-Proposal_R3.doc)
 
@@ -7159,43 +7231,48 @@ uint32_t CjfifDecode::DecodeMarker()
           }
         }
 #endif
-        strTmp = QString("  Destination ID=%1").arg(nDqtQuantDestId_Tq);
+        m_pLog->AddLineF([nDqtQuantDestId_Tq]
+        {
+          QString strLine = QString("  Destination ID=%1").arg(nDqtQuantDestId_Tq);
 
-        if(nDqtQuantDestId_Tq == 0)
-        {
-          strTmp += " (Luminance)";
-        }
-        else if(nDqtQuantDestId_Tq == 1)
-        {
-          strTmp += " (Chrominance)";
-        }
-        else if(nDqtQuantDestId_Tq == 2)
-        {
-          strTmp += " (Chrominance)";
-        }
-        else
-        {
-          strTmp += " (???)";
-        }
+          if(nDqtQuantDestId_Tq == 0)
+          {
+            strLine += " (Luminance)";
+          }
+          else if(nDqtQuantDestId_Tq == 1)
+          {
+            strLine += " (Chrominance)";
+          }
+          else if(nDqtQuantDestId_Tq == 2)
+          {
+            strLine += " (Chrominance)";
+          }
+          else
+          {
+            strLine += " (???)";
+          }
 
-        m_pLog->AddLine(strTmp);
+          return strLine;
+        });
 
         // FIXME: The following is somewhat superseded by ValidateValue() above with the exception of skipping remainder
         if(nDqtQuantDestId_Tq >= MAX_DQT_DEST_ID)
         {
-          m_pLog->AddLineErr(QString("ERROR: Destination ID <Tq> = %1, >= %2").arg(nDqtQuantDestId_Tq).arg(MAX_DQT_DEST_ID));
+          m_pLog->AddLineErrF([nDqtQuantDestId_Tq]
+                              { return QString("ERROR: Destination ID <Tq> = %1, >= %2").arg(nDqtQuantDestId_Tq).arg(MAX_DQT_DEST_ID); });
 
           if(!m_pAppConfig->relaxedParsing())
           {
-            m_pLog->AddLineErr("  Stopping decode");
+            m_pLog->AddLineErrF([] { return QString("  Stopping decode"); });
             return DECMARK_ERR;
           }
           else
           {
             // Now skip remainder of DQT
             // FIXME
-            m_pLog->AddLineWarn(QString("  Skipping remainder of marker [%1 bytes]").arg(nPosMarkerStart + nLength - m_nPos));
-            m_pLog->AddLine("");
+            m_pLog->AddLineWarnF([nPosMarkerStart, nLength, m_nPos = m_nPos]
+                                 { return QString("  Skipping remainder of marker [%1 bytes]").arg(nPosMarkerStart + nLength - m_nPos); });
+            m_pLog->AddLineF([] { return QString(""); });
             m_nPos = nPosMarkerStart + nLength;
             return DECMARK_OK;
           }
@@ -7294,12 +7371,13 @@ uint32_t CjfifDecode::DecodeMarker()
         // Now display the table
         for(uint32_t nDqtY = 0; nDqtY < 8; nDqtY++)
         {
-          strFull = QString("    DQT, Row #%1: ").arg(nDqtY);
+          // The row's values (the text is made only if it is shown: see CDocLog::AddLineF())
+          std::array<uint16_t, 8> anRow{};
 
           for(uint32_t nDqtX = 0; nDqtX < 8; nDqtX++)
           {
             nCoeffInd = nDqtY * 8 + nDqtX;
-            strFull += QString("%1 ").arg(m_anImgDqtTbl[nDqtQuantDestId_Tq][nCoeffInd], 3);
+            anRow[nDqtX] = m_anImgDqtTbl[nDqtQuantDestId_Tq][nCoeffInd];
 
             // Store the DQT entry into the Image Decoder
             bRet = m_pImgDec->SetDqtEntry(nDqtQuantDestId_Tq, nCoeffInd, glb_anUnZigZag[nCoeffInd],
@@ -7323,7 +7401,17 @@ uint32_t CjfifDecode::DecodeMarker()
              strFull += ">";
            */
 
-          m_pLog->AddLine(strFull);
+          m_pLog->AddLineF([nDqtY, anRow]
+          {
+            QString strLine = QString("    DQT, Row #%1: ").arg(nDqtY);
+
+            for(const uint16_t nVal : anRow)
+            {
+              strLine += QString("%1 ").arg(nVal, 3);
+            }
+
+            return strLine;
+          });
         }
 
         // Perform some statistical analysis of the quality factor
@@ -7347,10 +7435,13 @@ uint32_t CjfifDecode::DecodeMarker()
 
         // Save the quality rating for later
         m_adImgDqtQual[nDqtQuantDestId_Tq] = dQuality;
-        m_pLog->AddLine(QString("    Approx quality factor = %1 (scaling=%2 variance=%3)")
-                        .arg(dQuality, 0, 'f', 2)
-                        .arg(dSumPercent, 0, 'f', 2)
-                        .arg(dVariance, 0, 'f', 2));
+        m_pLog->AddLineF([dQuality, dSumPercent, dVariance]
+        {
+          return QString("    Approx quality factor = %1 (scaling=%2 variance=%3)")
+            .arg(dQuality, 0, 'f', 2)
+            .arg(dSumPercent, 0, 'f', 2)
+            .arg(dVariance, 0, 'f', 2);
+        });
       }
 
       m_bStateDqtOk = true;
@@ -7371,8 +7462,7 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_DAC:             // DAC (Arithmetic Coding)
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // La
       m_nPos += 2;
-      strTmp = QString("  Arithmetic coding header length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Arithmetic coding header length = %1").arg(nLength); });
 
       uint32_t nDAC_n;
       uint32_t nDAC_Tc, nDAC_Tb;
@@ -7394,20 +7484,26 @@ uint32_t CjfifDecode::DecodeMarker()
         nTmpVal = Buf(m_nPos++);        // Tc,Tb
         nDAC_Tc = (nTmpVal & 0xF0) >> 4;
         nDAC_Tb = (nTmpVal & 0x0F);
-        strTmp = QString("  #%1: Table class                  = %2")
+        m_pLog->AddLineF([nInd, nDAC_Tc]
+        {
+          return QString("  #%1: Table class                  = %2")
             .arg(nInd + 1, 2, 10, QChar('0'))
             .arg(nDAC_Tc);
-        m_pLog->AddLine(strTmp);
-        strTmp = QString("  #%1: Table destination identifier = %2")
+        });
+        m_pLog->AddLineF([nInd, nDAC_Tb]
+        {
+          return QString("  #%1: Table destination identifier = %2")
             .arg(nInd + 1, 2, 10, QChar('0'))
             .arg(nDAC_Tb);
-        m_pLog->AddLine(strTmp);
+        });
 
         nDAC_Cs = Buf(m_nPos++);        // Cs
-        strTmp = QString("  #%1: Conditioning table value     = %2")
+        m_pLog->AddLineF([nInd, nDAC_Cs]
+        {
+          return QString("  #%1: Conditioning table value     = %2")
             .arg(nInd + 1, 2, 10, QChar('0'))
             .arg(nDAC_Cs);
-        m_pLog->AddLine(strTmp);
+        });
 
         if(!ValidateValue(nDAC_Tc, 0, 1, "Table class <Tc>", true, 0))
           return DECMARK_ERR;
@@ -7437,8 +7533,7 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_DNL:             // DNL (Define number of lines)
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Ld
       m_nPos += 2;
-      strTmp = QString("  Header length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Header length = %1").arg(nLength); });
 
       nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
 
@@ -7450,8 +7545,7 @@ uint32_t CjfifDecode::DecodeMarker()
 
       nTmpVal = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // NL
       m_nPos += 2;
-      strTmp = QString("  Number of lines = %1").arg(nTmpVal);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nTmpVal] { return QString("  Number of lines = %1").arg(nTmpVal); });
 
       if(!ValidateValue(nTmpVal, 1, 65535, "Number of lines <NL>", true, 1))
         return DECMARK_ERR;
@@ -7464,8 +7558,7 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_EXP:
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Le
       m_nPos += 2;
-      strTmp = QString("  Header length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Header length = %1").arg(nLength); });
 
       uint32_t nEXP_Eh, nEXP_Ev;
 
@@ -7484,10 +7577,8 @@ uint32_t CjfifDecode::DecodeMarker()
       nEXP_Eh = (nTmpVal & 0xF0) >> 4;
       nEXP_Ev = (nTmpVal & 0x0F);
       m_nPos += 1;
-      strTmp = QString("  Expand horizontally = %1").arg(nEXP_Eh);
-      m_pLog->AddLine(strTmp);
-      strTmp = QString("  Expand vertically   = %1").arg(nEXP_Ev);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nEXP_Eh] { return QString("  Expand horizontally = %1").arg(nEXP_Eh); });
+      m_pLog->AddLineF([nEXP_Ev] { return QString("  Expand vertically   = %1").arg(nEXP_Ev); });
 
       if(!ValidateValue(nEXP_Eh, 0, 1, "Expand horizontally <Eh>", true, 0))
         return DECMARK_ERR;
@@ -7546,8 +7637,7 @@ uint32_t CjfifDecode::DecodeMarker()
 
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Lf
       m_nPos += 2;
-      strTmp = QString("  Frame header length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Frame header length = %1").arg(nLength); });
 
       // The precision, size and number of components (6 bytes), and then 3
       // bytes for each component, are in the segment. (They were read on into
@@ -7563,30 +7653,30 @@ uint32_t CjfifDecode::DecodeMarker()
       }
 
       m_nSofPrecision_P = Buf(m_nPos++);        // P
-      strTmp = QString("  Precision = %1").arg(m_nSofPrecision_P);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_nSofPrecision_P = m_nSofPrecision_P]
+                       { return QString("  Precision = %1").arg(m_nSofPrecision_P); });
 
       if(!ValidateValue(m_nSofPrecision_P, 2, 16, "Precision <P>", true, 8))
         return DECMARK_ERR;
 
       m_nSofNumLines_Y = Buf(m_nPos) * 256 + Buf(m_nPos + 1);   // Y
       m_nPos += 2;
-      strTmp = QString("  Number of Lines = %1").arg(m_nSofNumLines_Y);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_nSofNumLines_Y = m_nSofNumLines_Y]
+                       { return QString("  Number of Lines = %1").arg(m_nSofNumLines_Y); });
 
       if(!ValidateValue(m_nSofNumLines_Y, 0, 65535, "Number of Lines <Y>", true, 0))
         return DECMARK_ERR;
 
       m_nSofSampsPerLine_X = Buf(m_nPos) * 256 + Buf(m_nPos + 1);       // X
       m_nPos += 2;
-      strTmp = QString("  Samples per Line = %1").arg(m_nSofSampsPerLine_X);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_nSofSampsPerLine_X = m_nSofSampsPerLine_X]
+                       { return QString("  Samples per Line = %1").arg(m_nSofSampsPerLine_X); });
 
       if(!ValidateValue(m_nSofSampsPerLine_X, 1, 65535, "Samples per Line <X>", true, 1))
         return DECMARK_ERR;
 
-      strTmp = QString("  Image Size = %1 x %2").arg(m_nSofSampsPerLine_X).arg(m_nSofNumLines_Y);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_nSofSampsPerLine_X = m_nSofSampsPerLine_X, m_nSofNumLines_Y = m_nSofNumLines_Y]
+                       { return QString("  Image Size = %1 x %2").arg(m_nSofSampsPerLine_X).arg(m_nSofNumLines_Y); });
 
       // Determine orientation
       //   m_nSofSampsPerLine_X = X
@@ -7596,12 +7686,12 @@ uint32_t CjfifDecode::DecodeMarker()
       if(m_nSofNumLines_Y > m_nSofSampsPerLine_X)
         m_eImgLandscape = ENUM_LANDSCAPE_NO;
 
-      strTmp = QString("  Raw Image Orientation = %1").arg(m_eImgLandscape == ENUM_LANDSCAPE_YES ? "Landscape" : "Portrait");
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_eImgLandscape = m_eImgLandscape]
+                       { return QString("  Raw Image Orientation = %1").arg(m_eImgLandscape == ENUM_LANDSCAPE_YES ? "Landscape" : "Portrait"); });
 
       m_nSofNumComps_Nf = Buf(m_nPos++);        // Nf, range 1..255
-      strTmp = QString("  Number of Img components = %1").arg(m_nSofNumComps_Nf);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_nSofNumComps_Nf = m_nSofNumComps_Nf]
+                       { return QString("  Number of Img components = %1").arg(m_nSofNumComps_Nf); });
 
       if(!ValidateValue(m_nSofNumComps_Nf, 1, 255, "Number of Img components <Nf>", true, 1))
         return DECMARK_ERR;
@@ -7675,78 +7765,84 @@ uint32_t CjfifDecode::DecodeMarker()
       {
         nCompIdent = m_anSofQuantCompId[nCompInd];
 
-        // Create subsampling ratio
-        // - Protect against division-by-zero
-        QString strSubsampH = "?";
-        QString strSubsampV = "?";
-
-        if(m_anSofHorzSampFact_Hi[nCompIdent] > 0)
+        // (The text is made only if the line is shown: see CDocLog::AddLineF())
+        m_pLog->AddLineF([nCompInd, nCompIdent, nSampFact = anSofSampFact[nCompIdent],
+                          nHmax = m_nSofHorzSampFactMax_Hmax, nHi = m_anSofHorzSampFact_Hi[nCompIdent],
+                          nVmax = m_nSofVertSampFactMax_Vmax, nVi = m_anSofVertSampFact_Vi[nCompIdent],
+                          nTqi = m_anSofQuantTblSel_Tqi[nCompIdent], nNf = m_nSofNumComps_Nf]
         {
-          strSubsampH = QString("%1").arg(m_nSofHorzSampFactMax_Hmax / m_anSofHorzSampFact_Hi[nCompIdent]);
-        }
+          // Create subsampling ratio
+          // - Protect against division-by-zero
+          QString strSubsampH = "?";
+          QString strSubsampV = "?";
 
-        if(m_anSofVertSampFact_Vi[nCompIdent] > 0)
-        {
-          strSubsampV = QString("%1").arg(m_nSofVertSampFactMax_Vmax / m_anSofVertSampFact_Vi[nCompIdent]);
-        }
-
-        strFull = QString("    Component[%1]: ").arg(nCompInd); // Note i in Ci is 1-based
-        strTmp = QString("ID=0x%1, Samp Fac=0x%2 (Subsamp %3 x %4), Quant Tbl Sel=0x%5")
-            .arg(nCompIdent, 2, 16, QChar('0'))
-            .arg(anSofSampFact[nCompIdent], 2, 16, QChar('0'))
-            .arg(strSubsampH)
-            .arg(strSubsampV)
-            .arg(m_anSofQuantTblSel_Tqi[nCompIdent], 2, 16, QChar('0'));
-        strFull += strTmp;
-
-        // Mapping from component index (not ID) to colour channel per JFIF
-        if(m_nSofNumComps_Nf == 1)
-        {
-          // Assume grayscale
-          strFull += " (Lum: Y)";
-        }
-        else if(m_nSofNumComps_Nf == 3)
-        {
-          // Assume YCC
-          if(nCompInd == SCAN_COMP_Y)
+          if(nHi > 0)
           {
+            strSubsampH = QString("%1").arg(nHmax / nHi);
+          }
+
+          if(nVi > 0)
+          {
+            strSubsampV = QString("%1").arg(nVmax / nVi);
+          }
+
+          QString strFull = QString("    Component[%1]: ").arg(nCompInd); // Note i in Ci is 1-based
+          strFull += QString("ID=0x%1, Samp Fac=0x%2 (Subsamp %3 x %4), Quant Tbl Sel=0x%5")
+              .arg(nCompIdent, 2, 16, QChar('0'))
+              .arg(nSampFact, 2, 16, QChar('0'))
+              .arg(strSubsampH)
+              .arg(strSubsampV)
+              .arg(nTqi, 2, 16, QChar('0'));
+
+          // Mapping from component index (not ID) to colour channel per JFIF
+          if(nNf == 1)
+          {
+            // Assume grayscale
             strFull += " (Lum: Y)";
           }
-          else if(nCompInd == SCAN_COMP_CB)
+          else if(nNf == 3)
           {
-            strFull += " (Chrom: Cb)";
+            // Assume YCC
+            if(nCompInd == SCAN_COMP_Y)
+            {
+              strFull += " (Lum: Y)";
+            }
+            else if(nCompInd == SCAN_COMP_CB)
+            {
+              strFull += " (Chrom: Cb)";
+            }
+            else if(nCompInd == SCAN_COMP_CR)
+            {
+              strFull += " (Chrom: Cr)";
+            }
           }
-          else if(nCompInd == SCAN_COMP_CR)
+          else if(nNf == 4)
           {
-            strFull += " (Chrom: Cr)";
+            // Assume YCCK
+            if(nCompInd == 1)
+            {
+              strFull += " (Y)";
+            }
+            else if(nCompInd == 2)
+            {
+              strFull += " (Cb)";
+            }
+            else if(nCompInd == 3)
+            {
+              strFull += " (Cr)";
+            }
+            else if(nCompInd == 4)
+            {
+              strFull += " (K)";
+            }
           }
-        }
-        else if(m_nSofNumComps_Nf == 4)
-        {
-          // Assume YCCK
-          if(nCompInd == 1)
+          else
           {
-            strFull += " (Y)";
+            strFull += " (???)";  // Unknown
           }
-          else if(nCompInd == 2)
-          {
-            strFull += " (Cb)";
-          }
-          else if(nCompInd == 3)
-          {
-            strFull += " (Cr)";
-          }
-          else if(nCompInd == 4)
-          {
-            strFull += " (K)";
-          }
-        }
-        else
-        {
-          strFull += " (???)";  // Unknown
-        }
 
-        m_pLog->AddLine(strFull);
+          return strFull;
+        });
       }
 
       // Test for bad input, clean up if bad
@@ -7810,8 +7906,7 @@ uint32_t CjfifDecode::DecodeMarker()
     case JFIF_COM:             // COM
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
       m_nPos += 2;
-      strTmp = QString("  Comment length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Comment length = %1").arg(nLength); });
 
       // Check for JPEG COM vulnerability
       //   http://marc.info/?l=bugtraq&m=109524346729948
@@ -7822,10 +7917,8 @@ uint32_t CjfifDecode::DecodeMarker()
 
       if((nLength == 0) || (nLength == 1))
       {
-        strTmp = QString("    JPEG Comment Field Vulnerability detected!");
-        m_pLog->AddLineErr(strTmp);
-        strTmp = QString("    Skipping data until next marker...");
-        m_pLog->AddLineErr(strTmp);
+        m_pLog->AddLineErrF([] { return QString("    JPEG Comment Field Vulnerability detected!"); });
+        m_pLog->AddLineErrF([] { return QString("    Skipping data until next marker..."); });
         nLength = 2;
 
         bool bDoneSearch = false;
@@ -7849,15 +7942,14 @@ uint32_t CjfifDecode::DecodeMarker()
           }
         }
 
-        strTmp = QString("    Skipped %1 bytes").arg(m_nPos - nSkipStart);
-        m_pLog->AddLineErr(strTmp);
+        m_pLog->AddLineErrF([m_nPos = m_nPos, nSkipStart]
+                            { return QString("    Skipped %1 bytes").arg(m_nPos - nSkipStart); });
 
         // Break out of case statement
         break;
       }
 
       // Assume COM field valid length (ie. >= 2)
-      strFull = "    Comment=";
       m_strComment = "";
 
       // The text stops at the end of the file, which ProcessFile() then reports
@@ -7885,8 +7977,7 @@ uint32_t CjfifDecode::DecodeMarker()
         }
       }
 
-      strFull += m_strComment;
-      m_pLog->AddLine(strFull);
+      m_pLog->AddLineF([strComment = m_strComment] { return QString("    Comment=") + strComment; });
 
       break;
 
@@ -7919,13 +8010,11 @@ uint32_t CjfifDecode::DecodeMarker()
       // Ensure that we have seen proper markers before we try this one!
       if(!m_bStateSofOk)
       {
-        strTmp = QString("  ERROR: SOS before valid SOF defined");
-        m_pLog->AddLineErr(strTmp);
+        m_pLog->AddLineErrF([] { return QString("  ERROR: SOS before valid SOF defined"); });
         return DECMARK_ERR;
       }
 
-      strTmp = QString("  Scan header length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Scan header length = %1").arg(nLength); });
 
       // The number of components, 2 bytes for each, and the 3 bytes after them
       // are in the segment. (They were read on into the scan data, whose
@@ -7939,16 +8028,16 @@ uint32_t CjfifDecode::DecodeMarker()
       }
 
       m_nSosNumCompScan_Ns = Buf(m_nPos++);     // Ns, range 1..4
-      strTmp = QString("  Number of img components = %1").arg(m_nSosNumCompScan_Ns);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_nSosNumCompScan_Ns = m_nSosNumCompScan_Ns]
+                       { return QString("  Number of img components = %1").arg(m_nSosNumCompScan_Ns); });
 
       // Just in case something got corrupted, don't want to get out
       // of range here. Note that this will be a hard abort, and
       // will not resume decoding.
       if(m_nSosNumCompScan_Ns > MAX_SOS_COMP_NS)
       {
-        strTmp = QString("  ERROR: Scan decode does not support > %1 components").arg(MAX_SOS_COMP_NS);
-        m_pLog->AddLineErr(strTmp);
+        m_pLog->AddLineErrF([]
+                            { return QString("  ERROR: Scan decode does not support > %1 components").arg(MAX_SOS_COMP_NS); });
         return DECMARK_ERR;
       }
 
@@ -7967,17 +8056,18 @@ uint32_t CjfifDecode::DecodeMarker()
           return (eSeg == SEG_STOP_EOF) ? DECMARK_OK : DECMARK_ERR;
         }
 
-        strFull = QString("    Component[%1]: ").arg(nScanCompInd);
         nSosCompSel_Cs = Buf(m_nPos++); // Cs, range 0..255
         nSosHuffTblSel = Buf(m_nPos++);
         nSosHuffTblSelDc_Td = (nSosHuffTblSel & 0xf0) >> 4;     // Td, range 0..3
         nSosHuffTblSelAc_Ta = (nSosHuffTblSel & 0x0f);  // Ta, range 0..3
-        strTmp = QString("selector=0x%1, table=%2(DC),%3(AC)")
-            .arg(nSosCompSel_Cs, 2, 16, QChar('0'))
-            .arg(nSosHuffTblSelDc_Td)
-            .arg(nSosHuffTblSelAc_Ta);
-        strFull += strTmp;
-        m_pLog->AddLine(strFull);
+        m_pLog->AddLineF([nScanCompInd, nSosCompSel_Cs, nSosHuffTblSelDc_Td, nSosHuffTblSelAc_Ta]
+        {
+          return QString("    Component[%1]: ").arg(nScanCompInd) +
+                 QString("selector=0x%1, table=%2(DC),%3(AC)")
+                   .arg(nSosCompSel_Cs, 2, 16, QChar('0'))
+                   .arg(nSosHuffTblSelDc_Td)
+                   .arg(nSosHuffTblSelAc_Ta);
+        });
 
         bRet = m_pImgDec->SetDhtTables(nScanCompInd, nSosHuffTblSelDc_Td, nSosHuffTblSelAc_Ta);
 
@@ -7994,12 +8084,14 @@ uint32_t CjfifDecode::DecodeMarker()
       m_nSosSpectralEnd_Se = Buf(m_nPos++);
       m_nSosSuccApprox_A = Buf(m_nPos++);
 
-      strTmp = QString("  Spectral selection = %1 .. %2")
+      m_pLog->AddLineF([m_nSosSpectralStart_Ss = m_nSosSpectralStart_Ss, m_nSosSpectralEnd_Se = m_nSosSpectralEnd_Se]
+      {
+        return QString("  Spectral selection = %1 .. %2")
           .arg(m_nSosSpectralStart_Ss)
           .arg(m_nSosSpectralEnd_Se);
-      m_pLog->AddLine(strTmp);
-      strTmp = QString("  Successive approximation = 0x%1").arg(m_nSosSuccApprox_A, 2, 16, QChar('0'));
-      m_pLog->AddLine(strTmp);
+      });
+      m_pLog->AddLineF([m_nSosSuccApprox_A = m_nSosSuccApprox_A]
+                       { return QString("  Successive approximation = 0x%1").arg(m_nSosSuccApprox_A, 2, 16, QChar('0')); });
 
       // Cut short by the end of the file: the scan would be read from its start
       if(WrappedSince(nPosMarkerStart))
@@ -8009,8 +8101,8 @@ uint32_t CjfifDecode::DecodeMarker()
 
       if(m_pAppConfig->scanDump())
       {
-        m_pLog->AddLine("");
-        m_pLog->AddLine("  Scan Data: (after bitstuff removed)");
+        m_pLog->AddLineF([] { return QString(""); });
+        m_pLog->AddLineF([] { return QString("  Scan Data: (after bitstuff removed)"); });
       }
 
       // Save the scan data segment position
@@ -8135,7 +8227,7 @@ uint32_t CjfifDecode::DecodeMarker()
           {
             if(!bScanDumpTrunc)
             {
-              m_pLog->AddLineWarn("    WARNING: Dump truncated.");
+              m_pLog->AddLineWarnF([] { return QString("    WARNING: Dump truncated."); });
               bScanDumpTrunc = true;
             }
           }
@@ -8169,8 +8261,8 @@ uint32_t CjfifDecode::DecodeMarker()
         {
           // (Said to be @ 0x00000000 at the end of the largest file)
           const quint64 nPosPast = m_nPos + (WrappedSince(nPosScanStart) ? Q_UINT64_C(0x100000000) : 0);
-          strTmp = QString("ERROR: Ran out of buffer before EOI during phase 1 of Scan decode @ 0x%1").arg(nPosPast, 8, 16, QChar('0'));
-          m_pLog->AddLineErr(strTmp);
+          m_pLog->AddLineErrF([nPosPast]
+                              { return QString("ERROR: Ran out of buffer before EOI during phase 1 of Scan decode @ 0x%1").arg(nPosPast, 8, 16, QChar('0')); });
           break;
         }
 
@@ -8180,10 +8272,13 @@ uint32_t CjfifDecode::DecodeMarker()
 
       if(nFillStuffed > 0)
       {
-        m_pLog->AddLineWarn(QString("  WARNING: 0xFF fill bytes from 0x%1 before a stuffed 0xFF00 (%2 in the scan data), "
-                                    "which T.81 allows only before a marker: each run is read as one 0xFF of data")
-                              .arg(nPosFillStuffed, 8, 16, QChar('0'))
-                              .arg((nFillStuffed == 1) ? QString("1 run") : QString("%1 runs").arg(nFillStuffed)));
+        m_pLog->AddLineWarnF([nPosFillStuffed, nFillStuffed]
+        {
+          return QString("  WARNING: 0xFF fill bytes from 0x%1 before a stuffed 0xFF00 (%2 in the scan data), "
+            "which T.81 allows only before a marker: each run is read as one 0xFF of data")
+            .arg(nPosFillStuffed, 8, 16, QChar('0'))
+            .arg((nFillStuffed == 1) ? QString("1 run") : QString("%1 runs").arg(nFillStuffed));
+        });
       }
 
 //              }
@@ -8193,27 +8288,27 @@ uint32_t CjfifDecode::DecodeMarker()
       if(m_pAppConfig->decodeImage() && m_bImgSofUnsupported)
       {
         // SOF marker was of type we don't support, so skip decoding
-        m_pLog->AddLineWarn("  NOTE: Scan parsing doesn't support this SOF mode.");
+        m_pLog->AddLineWarnF([] { return QString("  NOTE: Scan parsing doesn't support this SOF mode."); });
 #ifndef DEBUG_YCCK
       }
       else if(m_pAppConfig->decodeImage() && (m_nSofNumComps_Nf == 4))
       {
-        m_pLog->AddLineWarn("  NOTE: Scan parsing doesn't support CMYK files yet.");
+        m_pLog->AddLineWarnF([] { return QString("  NOTE: Scan parsing doesn't support CMYK files yet."); });
 #endif
       }
       else if(m_pAppConfig->decodeImage() && !m_bImgSofUnsupported)
       {
         if(!m_bStateSofOk)
         {
-          m_pLog->AddLineWarn("  NOTE: Scan decode disabled as SOF not decoded.");
+          m_pLog->AddLineWarnF([] { return QString("  NOTE: Scan decode disabled as SOF not decoded."); });
         }
         else if(!m_bStateDqtOk)
         {
-          m_pLog->AddLineWarn("  NOTE: Scan decode disabled as DQT not decoded.");
+          m_pLog->AddLineWarnF([] { return QString("  NOTE: Scan decode disabled as DQT not decoded."); });
         }
         else if(!m_bStateDhtOk)
         {
-          m_pLog->AddLineWarn("  NOTE: Scan decode disabled as DHT not decoded.");
+          m_pLog->AddLineWarnF([] { return QString("  NOTE: Scan decode disabled as DHT not decoded."); });
         }
         else if(m_nScanDecodeNum > 0)
         {
@@ -8222,20 +8317,26 @@ uint32_t CjfifDecode::DecodeMarker()
           // the first scan filled (a 3-component scan after a Y-only one
           // left null chroma maps that the preview then read).
           m_nScanDecodeNum++;
-          m_pLog->AddLine("");
-          m_pLog->AddLineWarn(QString("  NOTE: Scan %1 isn't decoded: only the first scan is decoded, so the preview "
-                                      "doesn't include this one.").arg(m_nScanDecodeNum));
+          m_pLog->AddLineF([] { return QString(""); });
+          m_pLog->AddLineWarnF([m_nScanDecodeNum = m_nScanDecodeNum]
+          {
+            return QString("  NOTE: Scan %1 isn't decoded: only the first scan is decoded, so the preview "
+              "doesn't include this one.").arg(m_nScanDecodeNum);
+          });
         }
         else
         {
           m_nScanDecodeNum++;
-          m_pLog->AddLine("");
+          m_pLog->AddLineF([] { return QString(""); });
 
           if(m_nSosNumCompScan_Ns < m_nSofNumComps_Nf)
           {
-            m_pLog->AddLineWarn(QString("  NOTE: This scan has %1 of the image's %2 components, and only the first "
-                                        "scan is decoded: the preview is incomplete.")
-                                  .arg(m_nSosNumCompScan_Ns).arg(m_nSofNumComps_Nf));
+            m_pLog->AddLineWarnF([m_nSosNumCompScan_Ns = m_nSosNumCompScan_Ns, m_nSofNumComps_Nf = m_nSofNumComps_Nf]
+            {
+              return QString("  NOTE: This scan has %1 of the image's %2 components, and only the first "
+                "scan is decoded: the preview is incomplete.")
+                .arg(m_nSosNumCompScan_Ns).arg(m_nSofNumComps_Nf);
+            });
           }
 
           // Set the primary image details
@@ -8264,7 +8365,8 @@ uint32_t CjfifDecode::DecodeMarker()
 
           if(bRgb)
           {
-            m_pLog->AddLine("  Components are R, G and B (not Y, Cb and Cr): no YCbCr conversion");
+            m_pLog->AddLineF([]
+                             { return QString("  Components are R, G and B (not Y, Cb and Cr): no YCbCr conversion"); });
           }
 
           // Only recalculate the scan decoding if we need to (i.e. file
@@ -8292,8 +8394,7 @@ uint32_t CjfifDecode::DecodeMarker()
       uint32_t nVal;
 
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
-      strTmp = QString("  Length     = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([nLength] { return QString("  Length     = %1").arg(nLength); });
 
       // (An interval past the segment was taken from the next one, and used)
       nPosSegEnd = SegEnd(nPosMarkerStart, nLength);
@@ -8318,8 +8419,8 @@ uint32_t CjfifDecode::DecodeMarker()
         m_nImgRstEn = false;
       }
 
-      strTmp = QString("  interval   = %1").arg(m_nImgRstInterval);
-      m_pLog->AddLine(strTmp);
+      m_pLog->AddLineF([m_nImgRstInterval = m_nImgRstInterval]
+                       { return QString("  interval   = %1").arg(m_nImgRstInterval); });
       m_nPos += 4;
 
       if(!ExpectMarkerEnd(nPosMarkerStart, nLength))
@@ -8328,7 +8429,7 @@ uint32_t CjfifDecode::DecodeMarker()
         break;
 
     case JFIF_EOI:             // EOI
-      m_pLog->AddLine("");
+      m_pLog->AddLineF([] { return QString(""); });
 
       // Save the EOI file position
       // NOTE: If the file is missing the EOI, then this variable will be
@@ -8362,9 +8463,8 @@ uint32_t CjfifDecode::DecodeMarker()
       // Unsupported marker
       // - Provide generic decode based on length
       nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);    // Length
-      strTmp = QString("  Header length = %1").arg(nLength);
-      m_pLog->AddLine(strTmp);
-      m_pLog->AddLineWarn("  Skipping unsupported marker");
+      m_pLog->AddLineF([nLength] { return QString("  Header length = %1").arg(nLength); });
+      m_pLog->AddLineWarnF([] { return QString("  Skipping unsupported marker"); });
       m_nPos += nLength;
       break;
 
@@ -8372,7 +8472,7 @@ uint32_t CjfifDecode::DecodeMarker()
       // Unsupported, and with no length (T.81 Table B.1, as RSTn, SOI and
       // EOI): the next 2 bytes were taken for one, so the marker after it was
       // skipped with them (a length of 65534 before a COM)
-      m_pLog->AddLineWarn("  Skipping unsupported marker");
+      m_pLog->AddLineWarnF([] { return QString("  Skipping unsupported marker"); });
       bNoLength = true;
       break;
 
@@ -8389,14 +8489,14 @@ uint32_t CjfifDecode::DecodeMarker()
       // But for the sake of robustness, we can check here to see if treating
       // as a standalone marker will arrive at another marker (ie. OK). If not,
       // proceed to assume there is a length indicator.
-      strTmp = QString("  WARNING: Restart marker [0xFF%1] detected outside scan").arg(nCode, 2, 16, QChar('0'));
-      m_pLog->AddLineWarn(strTmp);
+      m_pLog->AddLineWarnF([nCode]
+                           { return QString("  WARNING: Restart marker [0xFF%1] detected outside scan").arg(nCode, 2, 16, QChar('0')); });
 
       if(!m_pAppConfig->relaxedParsing())
       {
         // Abort
-        m_pLog->AddLineErr("  Stopping decode");
-        m_pLog->AddLine("  Use [Img Search Fwd/Rev] to locate other valid embedded JPEGs");
+        m_pLog->AddLineErrF([] { return QString("  Stopping decode"); });
+        m_pLog->AddLineF([] { return QString("  Use [Img Search Fwd/Rev] to locate other valid embedded JPEGs"); });
         return DECMARK_ERR;
       }
       else
@@ -8424,38 +8524,36 @@ uint32_t CjfifDecode::DecodeMarker()
         if(!bWithLength)
         {
           // Looks like standalone
-          m_pLog->AddLineWarn("  Ignoring standalone marker. Proceeding with decode.");
+          m_pLog->AddLineWarnF([] { return QString("  Ignoring standalone marker. Proceeding with decode."); });
           bNoLength = true;
         }
         else
         {
           // Looks like marker with length
-          strTmp = QString("  Header length = %1").arg(nLength);
-          m_pLog->AddLine(strTmp);
-          m_pLog->AddLineWarn("  Skipping marker");
+          m_pLog->AddLineF([nLength] { return QString("  Header length = %1").arg(nLength); });
+          m_pLog->AddLineWarnF([] { return QString("  Skipping marker"); });
           m_nPos += nLength;
         }
       }
       break;
 
     default:
-      strTmp = QString("  WARNING: Unknown marker [0xFF%1]").arg(nCode, 2, 16, QChar('0'));
-      m_pLog->AddLineWarn(strTmp);
+      m_pLog->AddLineWarnF([nCode]
+                           { return QString("  WARNING: Unknown marker [0xFF%1]").arg(nCode, 2, 16, QChar('0')); });
 
       if(!m_pAppConfig->relaxedParsing())
       {
         // Abort
-        m_pLog->AddLineErr("  Stopping decode");
-        m_pLog->AddLine("  Use [Img Search Fwd/Rev] to locate other valid embedded JPEGs");
+        m_pLog->AddLineErrF([] { return QString("  Stopping decode"); });
+        m_pLog->AddLineF([] { return QString("  Use [Img Search Fwd/Rev] to locate other valid embedded JPEGs"); });
         return DECMARK_ERR;
       }
       else
       {
         // Skip
         nLength = Buf(m_nPos) * 256 + Buf(m_nPos + 1);
-        strTmp = QString("  Header length = %1").arg(nLength);
-        m_pLog->AddLine(strTmp);
-        m_pLog->AddLineWarn("  Skipping marker");
+        m_pLog->AddLineF([nLength] { return QString("  Header length = %1").arg(nLength); });
+        m_pLog->AddLineWarnF([] { return QString("  Skipping marker"); });
         m_nPos += nLength;
       }
   }
@@ -8471,7 +8569,7 @@ uint32_t CjfifDecode::DecodeMarker()
   }
 
   // Add white-space between each marker
-  m_pLog->AddLine(" ");
+  m_pLog->AddLineF([] { return QString(" "); });
 
   // If we decided to abort for any reason, make sure we trap it now.
   // This will stop the ProcessFile() while loop. We can set m_bStateAbort
@@ -8850,136 +8948,138 @@ void CjfifDecode::MarkerListEnd(const QString &strList, bool bPause)
 // Print out a header for the current JFIF marker code
 void CjfifDecode::AddHeader(uint32_t nCode)
 {
-  QString strTmp;
+  // The text of each line is made only if it is shown (see CDocLog::AddLineF())
+  const char *pcHdr = nullptr;
+  const char *pcDesc = nullptr;
 
   switch (nCode)
   {
     case JFIF_SOI:
-      m_pLog->AddLineHdr("*** Marker: SOI (xFFD8) ***");
+      pcHdr = "*** Marker: SOI (xFFD8) ***";
       break;
 
     case JFIF_APP0:
-      m_pLog->AddLineHdr("*** Marker: APP0 (xFFE0) ***");
+      pcHdr = "*** Marker: APP0 (xFFE0) ***";
       break;
 
     case JFIF_APP1:
-      m_pLog->AddLineHdr("*** Marker: APP1 (xFFE1) ***");
+      pcHdr = "*** Marker: APP1 (xFFE1) ***";
       break;
 
     case JFIF_APP2:
-      m_pLog->AddLineHdr("*** Marker: APP2 (xFFE2) ***");
+      pcHdr = "*** Marker: APP2 (xFFE2) ***";
       break;
 
     case JFIF_APP3:
-      m_pLog->AddLineHdr("*** Marker: APP3 (xFFE3) ***");
+      pcHdr = "*** Marker: APP3 (xFFE3) ***";
       break;
 
     case JFIF_APP4:
-      m_pLog->AddLineHdr("*** Marker: APP4 (xFFE4) ***");
+      pcHdr = "*** Marker: APP4 (xFFE4) ***";
       break;
 
     case JFIF_APP5:
-      m_pLog->AddLineHdr("*** Marker: APP5 (xFFE5) ***");
+      pcHdr = "*** Marker: APP5 (xFFE5) ***";
       break;
 
     case JFIF_APP6:
-      m_pLog->AddLineHdr("*** Marker: APP6 (xFFE6) ***");
+      pcHdr = "*** Marker: APP6 (xFFE6) ***";
       break;
 
     case JFIF_APP7:
-      m_pLog->AddLineHdr("*** Marker: APP7 (xFFE7) ***");
+      pcHdr = "*** Marker: APP7 (xFFE7) ***";
       break;
 
     case JFIF_APP8:
-      m_pLog->AddLineHdr("*** Marker: APP8 (xFFE8) ***");
+      pcHdr = "*** Marker: APP8 (xFFE8) ***";
       break;
 
     case JFIF_APP9:
-      m_pLog->AddLineHdr("*** Marker: APP9 (xFFE9) ***");
+      pcHdr = "*** Marker: APP9 (xFFE9) ***";
       break;
 
     case JFIF_APP10:
-      m_pLog->AddLineHdr("*** Marker: APP10 (xFFEA) ***");
+      pcHdr = "*** Marker: APP10 (xFFEA) ***";
       break;
 
     case JFIF_APP11:
-      m_pLog->AddLineHdr("*** Marker: APP11 (xFFEB) ***");
+      pcHdr = "*** Marker: APP11 (xFFEB) ***";
       break;
 
     case JFIF_APP12:
-      m_pLog->AddLineHdr("*** Marker: APP12 (xFFEC) ***");
+      pcHdr = "*** Marker: APP12 (xFFEC) ***";
       break;
 
     case JFIF_APP13:
-      m_pLog->AddLineHdr("*** Marker: APP13 (xFFED) ***");
+      pcHdr = "*** Marker: APP13 (xFFED) ***";
       break;
 
     case JFIF_APP14:
-      m_pLog->AddLineHdr("*** Marker: APP14 (xFFEE) ***");
+      pcHdr = "*** Marker: APP14 (xFFEE) ***";
       break;
 
     case JFIF_APP15:
-      m_pLog->AddLineHdr("*** Marker: APP15 (xFFEF) ***");
+      pcHdr = "*** Marker: APP15 (xFFEF) ***";
       break;
 
     case JFIF_SOF0:
-      m_pLog->AddLineHdr("*** Marker: SOF0 (Baseline DCT) (xFFC0) ***");
+      pcHdr = "*** Marker: SOF0 (Baseline DCT) (xFFC0) ***";
       break;
 
     case JFIF_SOF1:
-      m_pLog->AddLineHdr("*** Marker: SOF1 (Extended Sequential DCT, Huffman) (xFFC1) ***");
+      pcHdr = "*** Marker: SOF1 (Extended Sequential DCT, Huffman) (xFFC1) ***";
       break;
 
     case JFIF_SOF2:
-      m_pLog->AddLineHdr("*** Marker: SOF2 (Progressive DCT, Huffman) (xFFC2) ***");
+      pcHdr = "*** Marker: SOF2 (Progressive DCT, Huffman) (xFFC2) ***";
       break;
 
     case JFIF_SOF3:
-      m_pLog->AddLineHdr("*** Marker: SOF3 (Lossless Process, Huffman) (xFFC3) ***");
+      pcHdr = "*** Marker: SOF3 (Lossless Process, Huffman) (xFFC3) ***";
       break;
 
     case JFIF_SOF5:
-      m_pLog->AddLineHdr("*** Marker: SOF5 (Differential Sequential DCT, Huffman) (xFFC4) ***");
+      pcHdr = "*** Marker: SOF5 (Differential Sequential DCT, Huffman) (xFFC4) ***";
       break;
 
     case JFIF_SOF6:
-      m_pLog->AddLineHdr("*** Marker: SOF6 (Differential Progressive DCT, Huffman) (xFFC5) ***");
+      pcHdr = "*** Marker: SOF6 (Differential Progressive DCT, Huffman) (xFFC5) ***";
       break;
 
     case JFIF_SOF7:
-      m_pLog->AddLineHdr("*** Marker: SOF7 (Differential Lossless Process, Huffman) (xFFC6) ***");
+      pcHdr = "*** Marker: SOF7 (Differential Lossless Process, Huffman) (xFFC6) ***";
       break;
 
     case JFIF_SOF9:
-      m_pLog->AddLineHdr("*** Marker: SOF9 (Sequential DCT, Arithmetic) (xFFC9) ***");
+      pcHdr = "*** Marker: SOF9 (Sequential DCT, Arithmetic) (xFFC9) ***";
       break;
 
     case JFIF_SOF10:
-      m_pLog->AddLineHdr("*** Marker: SOF10 (Progressive DCT, Arithmetic) (xFFCA) ***");
+      pcHdr = "*** Marker: SOF10 (Progressive DCT, Arithmetic) (xFFCA) ***";
       break;
 
     case JFIF_SOF11:
-      m_pLog->AddLineHdr("*** Marker: SOF11 (Lossless Process, Arithmetic) (xFFCB) ***");
+      pcHdr = "*** Marker: SOF11 (Lossless Process, Arithmetic) (xFFCB) ***";
       break;
 
     case JFIF_SOF13:
-      m_pLog->AddLineHdr("*** Marker: SOF13 (Differential Sequential, Arithmetic) (xFFCD) ***");
+      pcHdr = "*** Marker: SOF13 (Differential Sequential, Arithmetic) (xFFCD) ***";
       break;
 
     case JFIF_SOF14:
-      m_pLog->AddLineHdr("*** Marker: SOF14 (Differential Progressive DCT, Arithmetic) (xFFCE) ***");
+      pcHdr = "*** Marker: SOF14 (Differential Progressive DCT, Arithmetic) (xFFCE) ***";
       break;
 
     case JFIF_SOF15:
-      m_pLog->AddLineHdr("*** Marker: SOF15 (Differential Lossless Process, Arithmetic) (xFFCF) ***");
+      pcHdr = "*** Marker: SOF15 (Differential Lossless Process, Arithmetic) (xFFCF) ***";
       break;
 
     case JFIF_JPG:
-      m_pLog->AddLineHdr("*** Marker: JPG (xFFC8) ***");
+      pcHdr = "*** Marker: JPG (xFFC8) ***";
       break;
 
     case JFIF_DAC:
-      m_pLog->AddLineHdr("*** Marker: DAC (xFFCC) ***");
+      pcHdr = "*** Marker: DAC (xFFCC) ***";
       break;
 
     case JFIF_RST0:
@@ -8990,102 +9090,113 @@ void CjfifDecode::AddHeader(uint32_t nCode)
     case JFIF_RST5:
     case JFIF_RST6:
     case JFIF_RST7:
-      m_pLog->AddLineHdr("*** Marker: RST# ***");
+      pcHdr = "*** Marker: RST# ***";
       break;
 
     case JFIF_DQT:             // Define quantization tables
-      m_pLog->AddLineHdr("*** Marker: DQT (xFFDB) ***");
-      m_pLog->AddLineHdrDesc("  Define a Quantization Table.");
+      pcHdr = "*** Marker: DQT (xFFDB) ***";
+      pcDesc = "  Define a Quantization Table.";
       break;
 
     case JFIF_COM:             // COM
-      m_pLog->AddLineHdr("*** Marker: COM (Comment) (xFFFE) ***");
+      pcHdr = "*** Marker: COM (Comment) (xFFFE) ***";
       break;
 
     case JFIF_DHT:             // DHT
-      m_pLog->AddLineHdr("*** Marker: DHT (Define Huffman Table) (xFFC4) ***");
+      pcHdr = "*** Marker: DHT (Define Huffman Table) (xFFC4) ***";
       break;
 
     case JFIF_DHT_FAKE:        // DHT from standard table (MotionJPEG)
-      m_pLog->AddLineHdr("*** Marker: DHT from MotionJPEG standard (Define Huffman Table) ***");
+      pcHdr = "*** Marker: DHT from MotionJPEG standard (Define Huffman Table) ***";
       break;
 
     case JFIF_SOS:             // SOS
-      m_pLog->AddLineHdr("*** Marker: SOS (Start of Scan) (xFFDA) ***");
+      pcHdr = "*** Marker: SOS (Start of Scan) (xFFDA) ***";
       break;
 
     case JFIF_DRI:             // DRI
-      m_pLog->AddLineHdr("*** Marker: DRI (Restart Interval) (xFFDD) ***");
+      pcHdr = "*** Marker: DRI (Restart Interval) (xFFDD) ***";
       break;
 
     case JFIF_EOI:             // EOI
-      m_pLog->AddLineHdr("*** Marker: EOI (End of Image) (xFFD9) ***");
+      pcHdr = "*** Marker: EOI (End of Image) (xFFD9) ***";
       break;
 
     case JFIF_DNL:
-      m_pLog->AddLineHdr("*** Marker: DNL (Define Number of Lines) (xFFDC) ***");
+      pcHdr = "*** Marker: DNL (Define Number of Lines) (xFFDC) ***";
       break;
     case JFIF_DHP:
-      m_pLog->AddLineHdr("*** Marker: DHP (Define Hierarchical Progression) (xFFDE) ***");
+      pcHdr = "*** Marker: DHP (Define Hierarchical Progression) (xFFDE) ***";
       break;
     case JFIF_EXP:
-      m_pLog->AddLineHdr("*** Marker: EXP (Expand Reference Components) (xFFDF) ***");
+      pcHdr = "*** Marker: EXP (Expand Reference Components) (xFFDF) ***";
       break;
     case JFIF_JPG0:
-      m_pLog->AddLineHdr("*** Marker: JPG0 (JPEG Extension) (xFFF0) ***");
+      pcHdr = "*** Marker: JPG0 (JPEG Extension) (xFFF0) ***";
       break;
     case JFIF_JPG1:
-      m_pLog->AddLineHdr("*** Marker: JPG1 (JPEG Extension) (xFFF1) ***");
+      pcHdr = "*** Marker: JPG1 (JPEG Extension) (xFFF1) ***";
       break;
     case JFIF_JPG2:
-      m_pLog->AddLineHdr("*** Marker: JPG2 (JPEG Extension) (xFFF2) ***");
+      pcHdr = "*** Marker: JPG2 (JPEG Extension) (xFFF2) ***";
       break;
     case JFIF_JPG3:
-      m_pLog->AddLineHdr("*** Marker: JPG3 (JPEG Extension) (xFFF3) ***");
+      pcHdr = "*** Marker: JPG3 (JPEG Extension) (xFFF3) ***";
       break;
     case JFIF_JPG4:
-      m_pLog->AddLineHdr("*** Marker: JPG4 (JPEG Extension) (xFFF4) ***");
+      pcHdr = "*** Marker: JPG4 (JPEG Extension) (xFFF4) ***";
       break;
     case JFIF_JPG5:
-      m_pLog->AddLineHdr("*** Marker: JPG5 (JPEG Extension) (xFFF5) ***");
+      pcHdr = "*** Marker: JPG5 (JPEG Extension) (xFFF5) ***";
       break;
     case JFIF_JPG6:
-      m_pLog->AddLineHdr("*** Marker: JPG6 (JPEG Extension) (xFFF6) ***");
+      pcHdr = "*** Marker: JPG6 (JPEG Extension) (xFFF6) ***";
       break;
     case JFIF_JPG7:
-      m_pLog->AddLineHdr("*** Marker: JPG7 (JPEG Extension) (xFFF7) ***");
+      pcHdr = "*** Marker: JPG7 (JPEG Extension) (xFFF7) ***";
       break;
     case JFIF_JPG8:
-      m_pLog->AddLineHdr("*** Marker: JPG8 (JPEG Extension) (xFFF8) ***");
+      pcHdr = "*** Marker: JPG8 (JPEG Extension) (xFFF8) ***";
       break;
     case JFIF_JPG9:
-      m_pLog->AddLineHdr("*** Marker: JPG9 (JPEG Extension) (xFFF9) ***");
+      pcHdr = "*** Marker: JPG9 (JPEG Extension) (xFFF9) ***";
       break;
     case JFIF_JPG10:
-      m_pLog->AddLineHdr("*** Marker: JPG10 (JPEG Extension) (xFFFA) ***");
+      pcHdr = "*** Marker: JPG10 (JPEG Extension) (xFFFA) ***";
       break;
     case JFIF_JPG11:
-      m_pLog->AddLineHdr("*** Marker: JPG11 (JPEG Extension) (xFFFB) ***");
+      pcHdr = "*** Marker: JPG11 (JPEG Extension) (xFFFB) ***";
       break;
     case JFIF_JPG12:
-      m_pLog->AddLineHdr("*** Marker: JPG12 (JPEG Extension) (xFFFC) ***");
+      pcHdr = "*** Marker: JPG12 (JPEG Extension) (xFFFC) ***";
       break;
     case JFIF_JPG13:
-      m_pLog->AddLineHdr("*** Marker: JPG13 (JPEG Extension) (xFFFD) ***");
+      pcHdr = "*** Marker: JPG13 (JPEG Extension) (xFFFD) ***";
       break;
     case JFIF_TEM:
-      m_pLog->AddLineHdr("*** Marker: TEM (Temporary) (xFF01) ***");
+      pcHdr = "*** Marker: TEM (Temporary) (xFF01) ***";
       break;
 
     default:
-      strTmp = QString("*** Marker: ??? (Unknown) (xFF%1) ***").arg(nCode, 2, 16, QChar('0'));
-      m_pLog->AddLineHdr(strTmp);
       break;
   }
 
+  if(pcHdr)
+  {
+    m_pLog->AddLineHdrF([pcHdr] { return QString(pcHdr); });
+  }
+  else
+  {
+    m_pLog->AddLineHdrF([nCode] { return QString("*** Marker: ??? (Unknown) (xFF%1) ***").arg(nCode, 2, 16, QChar('0')); });
+  }
+
+  if(pcDesc)
+  {
+    m_pLog->AddLineHdrDescF([pcDesc] { return QString(pcDesc); });
+  }
+
   // Adjust position to account for the word used in decoding the marker!
-  strTmp = QString("  OFFSET: 0x%1").arg(m_nPos - 2, 8, 16, QChar('0'));
-  m_pLog->AddLine(strTmp);
+  m_pLog->AddLineF([nPos = m_nPos - 2] { return QString("  OFFSET: 0x%1").arg(nPos, 8, 16, QChar('0')); });
 }
 
 //-----------------------------------------------------------------------------

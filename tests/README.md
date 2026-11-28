@@ -23,7 +23,7 @@ when it is installed, so Pillow needn't be installed separately).
   `JPEGsnoopQt.pri`) plus a small driver:
   - `decode <file> [--ac] [--histo] [--unknown-exif] [--pixels X,Y/X,Y...]
     [--start N] [--detail X,Y,LEN] [--preview-md5] [--relaxed] [--expand-dht]
-    [--count-lines] [--maker-notes]` decodes one
+    [--count-lines] [--maker-notes] [--timed]` decodes one
     file in non-interactive mode and prints the report
     (`--unknown-exif` also reports unknown EXIF tags, which the app hides by
     default; `--pixels` prints the decoded colour at each point; with
@@ -31,7 +31,8 @@ when it is installed, so Pillow needn't be installed separately).
     `--start` decodes from file offset N (up to 4294967295); `--preview-md5` prints an MD5 of the
     decoded image; `--relaxed` turns on Options > Relaxed Parsing, and `--expand-dht` Options > DHT Expand;
     `--count-lines` prints the report's number of lines, and `--maker-notes`
-    turns on Options > Maker Notes).
+    turns on Options > Maker Notes; `--timed` marks a case that checks the time
+    taken, see below).
     `--detail` turns on Options > Scan Segment > Detailed
     Decode for LEN MCUs from MCU X,Y, prints a `harness: detail blocks=...`
     summary of what the report shows (ending with the DC of the first 8
@@ -463,6 +464,9 @@ when it is installed, so Pillow needn't be installed separately).
   can't run on this Mac, printing `harness: skipped: REASON` (the Print Setup
   panel's, without a printer set up), is listed as `SKIP` and counted apart;
   it doesn't fail the run.
+  A case whose time limit is what it checks passes `--timed`: with `--asan`
+  the driver skips it, as the sanitizers slow some code far more than the
+  rest (the lines kept past the report's limit about 35 times).
 
 Case ids start with the finding they cover in
 [docs/code-review-macos-qt6.md](../docs/code-review-macos-qt6.md)
@@ -507,7 +511,8 @@ section, `RC` in its "A code cut short by an RST" section, `RI` in its
 and `RC` cases, `EZ`, `NL` and `EM` in its "Zeros past the end of the
 file, runs of markers with no length, and the error limit" section, `LF`
 and `LR` in its "A 0xFF at the end of the scan data, and runs of one marker"
-section, and `LB` in its "The lines of a marker list" section);
+section, `LB` in its "The lines of a marker list" section, and `LZ` in its
+"Lines not shown aren't made" section);
 `ok_*` cases are valid files that must keep decoding. The plain JPEGs must
 decode at their size, with no error or warning and the subsampling their SOF
 gives, and their pixels must be within 6 of libjpeg's decode of the same file

@@ -8031,6 +8031,78 @@ lb_case("LB_long", "lb_long.jpg", lb_cut(2 + 4 + 9 * 9, "10 warning lines", 3))
 lb_case("LB_long_last", "lb_long.jpg", lr_off(LB_LONG_AT), forbid=lr_off(LB_LONG_AT + len(LB_LONG)))
 
 
+# --- LZ: lines not shown aren't made ---------------------------------------------------
+# Past the limit (LB) a marker's lines were still made, then dropped, as were
+# those of a run held back (LR): making their text was most of the time, 0.1 to
+# 0.66 s a MB of markers, by kind. Now a line's text is made only if it is shown
+# (CDocLog::AddLineF()). Those past the limit that are shown, the last marker's,
+# are made after the parsing has gone on: from what it read, kept with them. Each
+# case ends its list with a marker past the limit (after 3,000 COM and TEM pairs,
+# 27,000 lines), where the file ends, so its lines are the last shown. Their
+# values aren't those of nl's own markers.
+def lz_case(cid, name, expect, forbid="-", flags="", timeout=10):
+    case(cid, "LZ", "decode", name, flags or "-", timeout=timeout, expect=expect, forbid=forbid)
+
+
+LZ_PRE = nl[:NL_AFTER] + (LR_COM + LB_TEM) * 3000
+# A DHT of one table with 20 codes of 16 bits: a line of 16, then one of 4 after
+# 41 spaces (as for the 17th code on)
+write("lz_dht.jpg", LZ_PRE + b"\xff\xc4" + (2 + 17 + 20).to_bytes(2, "big") + b"\x00" + bytes(15) + b"\x14"
+      + bytes(range(20)))
+lz_case("LZ_dht", "lz_dht.jpg",
+        "^    Codes of length 16 bits \\(020 total\\): " + "".join(f"{c:02x} " for c in range(16)) + "$")
+lz_case("LZ_dht_more", "lz_dht.jpg", "^ {41}10 11 12 13 $")
+# With 16: the line of 16 codes, then an empty one (no line of 41 spaces only)
+write("lz_dht16.jpg", LZ_PRE + b"\xff\xc4" + (2 + 17 + 16).to_bytes(2, "big") + b"\x00" + bytes(15) + b"\x10"
+      + bytes(range(0x20, 0x30)))
+lz_case("LZ_dht_16", "lz_dht16.jpg",
+        "^    Codes of length 16 bits \\(016 total\\): " + "".join(f"{c:02x} " for c in range(0x20, 0x30)) + "$",
+        forbid="^ {41}$")
+# A DQT whose values in the file (zigzag order) are 1 to 64: each row gives
+# them in row order, 3 wide
+LZ_DQT = [0] * 64
+for k in range(64):
+    LZ_DQT[DQ_ZIGZAG[k]] = k + 1
+write("lz_dqt.jpg", LZ_PRE + b"\xff\xdb" + (2 + 65).to_bytes(2, "big") + b"\x00" + bytes(range(1, 65)))
+lz_case("LZ_dqt", "lz_dqt.jpg", "^    DQT, Row #0: " + "".join(f"{v:3d} " for v in LZ_DQT[0:8]) + "$")
+lz_case("LZ_dqt_last", "lz_dqt.jpg", "^    DQT, Row #7: " + "".join(f"{v:3d} " for v in LZ_DQT[56:64]) + "$")
+# An APP0 JFIF of 72 x 72 DPI with a 2 x 1 thumbnail: its row, red, green and
+# blue for each pixel
+write("lz_app0.jpg", LZ_PRE + b"\xff\xe0" + (2 + 14 + 6).to_bytes(2, "big") + b"JFIF\x00\x01\x02\x01\x00\x48\x00\x48"
+      + b"\x02\x01\x12\x34\x56\xab\xcd\xef")
+lz_case("LZ_app0", "lz_app0.jpg", "^   Thumb\\[000\\] = \\(0x12,0x34,0x56\\) \\(0xab,0xcd,0xef\\) $")
+lz_case("LZ_app0_density", "lz_app0.jpg", "^  density    = 72 x 72 DPI \\(dots per inch\\)$")
+# A SOF0 of 3 components, the first 2 x 1, the others 1 x 1 (so subsampled 2 x
+# 1), with tables 0, 2 and 3
+write("lz_sof.jpg", LZ_PRE + b"\xff\xc0" + (2 + 6 + 9).to_bytes(2, "big") + b"\x08\x00\x10\x00\x10\x03"
+      + b"\x0a\x21\x00\x0b\x11\x02\x0c\x11\x03")
+lz_case("LZ_sof", "lz_sof.jpg",
+        "^    Component\\[1\\]: ID=0x0a, Samp Fac=0x21 \\(Subsamp 1 x 1\\), Quant Tbl Sel=0x00 \\(Lum: Y\\)$")
+lz_case("LZ_sof_last", "lz_sof.jpg",
+        "^    Component\\[3\\]: ID=0x0c, Samp Fac=0x11 \\(Subsamp 2 x 1\\), Quant Tbl Sel=0x03 \\(Chrom: Cr\\)$")
+# A COM's text: LB_bad's last marker
+lz_case("LZ_com", "lb_bad.jpg", "^    Comment=ab$")
+# The time: 384 DHTs of 3,854 empty tables, 24 MB, each of 80,938 lines (3, 21
+# a table and the blank one), after the scan. Between them, TEMs (4 lines, 1 a
+# warning): the limit is reached in the first DHT, and the EOI's 3 lines are
+# the last shown. Making their text and dropping it took 200 billion
+# instructions; not made, 24 billion (16 MB of the same: 7.6 s, now 1.44 s).
+# --timed: not run with the sanitizers, which slow the lines kept about 35 times.
+LZ_DHT64 = b"\xff\xc4" + (2 + 17 * 3854).to_bytes(2, "big") + (b"\x00" + bytes(16)) * 3854
+LZ_DHT64_NL = 3 + 21 * 3854 + 1
+LZ_UNITS = 384
+write("lz_time.jpg", ri_put(nl, NL_AFTER, (LZ_DHT64 + LB_TEM) * LZ_UNITS))
+lz_case("LZ_time", "lz_time.jpg",
+        lb_cut(LB_NL + (LZ_DHT64_NL + 4) * LZ_UNITS + 3 - LB_CAP - 3, f"{LZ_UNITS} warning lines", 3),
+        flags="--timed", timeout=5)
+lz_case("LZ_time_eoi", "lz_time.jpg", lr_off(NL_AFTER + (len(LZ_DHT64) + 2) * LZ_UNITS), flags="--timed", timeout=5)
+# In a row (LR): the first 20 listed, the rest held back and dropped: 200
+# billion, now 22 (16 MB: 7.8 s, now 1.38 s)
+write("lz_run.jpg", ri_put(nl, NL_AFTER, LZ_DHT64 * LZ_UNITS))
+lz_case("LZ_run", "lz_run.jpg", lr_run("DHT", LZ_UNITS - 20, "", NL_AFTER + len(LZ_DHT64) * LZ_UNITS),
+        flags="--timed", timeout=5)
+
+
 with open(out_dir / "cases.tsv", "w") as f:
     for row in cases:
         f.write("\t".join(row) + "\n")

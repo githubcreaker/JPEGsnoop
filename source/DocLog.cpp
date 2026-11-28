@@ -102,13 +102,31 @@ bool CDocLog::isDark() const
   return m_pDoc && (m_pDoc->palette().color(QPalette::Base).lightness() < 128);
 }
 
-void CDocLog::appendToLog(QString strTxt, teLineKind eKind)
+// Hold the line back, keep it past the limit, or show it. Its text is made (if
+// it isn't yet: AddLineF()) only to show it, or to measure it against the
+// characters left; a line held back, or past the limit, keeps fnTxt instead.
+void CDocLog::appendLine(CLine line)
 {
-  if(m_bEn && m_bHold)
+  if(!m_bEn)
   {
-    m_aHeld.append(qMakePair(strTxt, eKind));
+    return;
   }
-  else if(m_bEn && m_bLimit && ((m_nLimitLeft == 0) || (strTxt.size() > m_nLimitCharsLeft)))
+
+  if(m_bHold)
+  {
+    m_aHeld.append(std::move(line));
+    return;
+  }
+
+  const bool bPast = m_bLimit && (m_nLimitLeft == 0);
+
+  if(!bPast && line.fnTxt)
+  {
+    line.strTxt = line.fnTxt();
+    line.fnTxt = nullptr;
+  }
+
+  if(bPast || (m_bLimit && (line.strTxt.size() > m_nLimitCharsLeft)))
   {
     // Past the limit (of the characters too: then no line after this one is
     // shown either): one of the last lines, or counted. (Those kept before
@@ -121,33 +139,33 @@ void CDocLog::appendToLog(QString strTxt, teLineKind eKind)
       LimitDrop();
     }
 
-    m_aTail.append(qMakePair(strTxt, eKind));
+    m_aTail.append(std::move(line));
 
     if(m_aTail.size() > qsizetype(LIMIT_TAIL))
     {
-      LimitCount(m_aTail.first().second);
+      LimitCount(m_aTail.first().eKind);
       m_aTail.removeFirst();
     }
   }
-  else if(m_bEn)
+  else
   {
     if(m_bLimit)
     {
       m_nLimitLeft--;
-      m_nLimitCharsLeft -= strTxt.size();
+      m_nLimitCharsLeft -= line.strTxt.size();
     }
 
     QTextCharFormat format;
 
     // (Normal text used to be RGB(1,1,1): invisible on a Dark Mode background)
-    if(eKind != LINE_NORMAL)
+    if(line.eKind != LINE_NORMAL)
     {
-      format.setForeground(QBrush(lineColor(eKind, isDark())));
+      format.setForeground(QBrush(lineColor(line.eKind, isDark())));
     }
 
     m_pDoc->setCurrentCharFormat(format);
 //    m_pDoc->appendPlainText(rTrim(strTxt));
-    m_pDoc->appendPlainText(strTxt);
+    m_pDoc->appendPlainText(line.strTxt);
 //    qDebug() << strTxt;
   }
 }
@@ -161,13 +179,13 @@ void CDocLog::HoldStart()
 // After HoldStop(): show the lines held back, as they would have been shown
 void CDocLog::HeldShow()
 {
-  const QVector<QPair<QString, teLineKind>> aHeld = m_aHeld;
+  const QVector<CLine> aHeld = m_aHeld;
 
   m_aHeld.clear();
 
-  for(const QPair<QString, teLineKind> &line : aHeld)
+  for(const CLine &line : aHeld)
   {
-    appendToLog(line.first, line.second);
+    appendLine(line);
   }
 }
 
@@ -178,13 +196,13 @@ void CDocLog::HeldDrop(uint32_t &nErr, uint32_t &nWarn)
   nErr = 0;
   nWarn = 0;
 
-  for(const QPair<QString, teLineKind> &line : std::as_const(m_aHeld))
+  for(const CLine &line : std::as_const(m_aHeld))
   {
-    if(line.second == LINE_ERR)
+    if(line.eKind == LINE_ERR)
     {
       nErr++;
     }
-    else if(line.second == LINE_WARN)
+    else if(line.eKind == LINE_WARN)
     {
       nWarn++;
     }
@@ -230,9 +248,9 @@ void CDocLog::LimitMark()
 // Count the lines kept, no longer to be shown
 void CDocLog::LimitDrop()
 {
-  for(const QPair<QString, teLineKind> &line : std::as_const(m_aTail))
+  for(const CLine &line : std::as_const(m_aTail))
   {
-    LimitCount(line.second);
+    LimitCount(line.eKind);
   }
 
   m_aTail.clear();
@@ -278,13 +296,13 @@ void CDocLog::LimitResume()
 // After LimitStop(): show the lines kept, as they would have been shown
 void CDocLog::LimitTailShow()
 {
-  const QVector<QPair<QString, teLineKind>> aTail = m_aTail;
+  const QVector<CLine> aTail = m_aTail;
 
   m_aTail.clear();
 
-  for(const QPair<QString, teLineKind> &line : aTail)
+  for(const CLine &line : aTail)
   {
-    appendToLog(line.first, line.second);
+    appendLine(line);
   }
 }
 
@@ -364,37 +382,64 @@ void CDocLog::RecolorDocument(QTextDocument *pDoc, bool bDark)
 // Add a basic text line to the log
 void CDocLog::AddLine(QString strTxt)
 {
-  appendToLog(strTxt, LINE_NORMAL);
+  appendLine(CLine{strTxt, nullptr, LINE_NORMAL});
 }
 
 // Add a header text line to the log
 void CDocLog::AddLineHdr(QString strTxt)
 {
-  appendToLog(strTxt, LINE_HDR);
+  appendLine(CLine{strTxt, nullptr, LINE_HDR});
 }
 
 // Add a header description text line to the log
 void CDocLog::AddLineHdrDesc(QString strTxt)
 {
-  appendToLog(strTxt, LINE_HDR_DESC);
+  appendLine(CLine{strTxt, nullptr, LINE_HDR_DESC});
 }
 
 // Add a warning text line to the log
 void CDocLog::AddLineWarn(QString strTxt)
 {
-  appendToLog(strTxt, LINE_WARN);
+  appendLine(CLine{strTxt, nullptr, LINE_WARN});
 }
 
 // Add an error text line to the log
 void CDocLog::AddLineErr(QString strTxt)
 {
-  appendToLog(strTxt, LINE_ERR);
+  appendLine(CLine{strTxt, nullptr, LINE_ERR});
 }
 
 // Add a "good" indicator text line to the log
 void CDocLog::AddLineGood(QString strTxt)
 {
-  appendToLog(strTxt, LINE_GOOD);
+  appendLine(CLine{strTxt, nullptr, LINE_GOOD});
+}
+
+// As those above, with the text made only if the line is shown (see the
+// header)
+void CDocLog::AddLineF(TxtFn fnTxt)
+{
+  appendLine(CLine{QString(), std::move(fnTxt), LINE_NORMAL});
+}
+
+void CDocLog::AddLineHdrF(TxtFn fnTxt)
+{
+  appendLine(CLine{QString(), std::move(fnTxt), LINE_HDR});
+}
+
+void CDocLog::AddLineHdrDescF(TxtFn fnTxt)
+{
+  appendLine(CLine{QString(), std::move(fnTxt), LINE_HDR_DESC});
+}
+
+void CDocLog::AddLineWarnF(TxtFn fnTxt)
+{
+  appendLine(CLine{QString(), std::move(fnTxt), LINE_WARN});
+}
+
+void CDocLog::AddLineErrF(TxtFn fnTxt)
+{
+  appendLine(CLine{QString(), std::move(fnTxt), LINE_ERR});
 }
 
 QString CDocLog::rTrim(const QString& str)

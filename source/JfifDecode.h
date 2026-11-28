@@ -27,6 +27,8 @@
 #ifndef JFIFDECODE_H
 #define JFIFDECODE_H
 
+#include <array>
+
 #include <QMessageBox>
 #include <QObject>
 #include <QString>
@@ -202,6 +204,19 @@ private:
   // Display routines
   void DbgAddLine(QString strLine);
   void AddHeader(uint32_t nCode);
+
+  // A line of a DHT table's codes of one length (see DecodeDHT())
+  enum teDhtCodesLine
+  {
+    DHT_CODES_FIRST,            // The first, with the length and its count
+    DHT_CODES_MORE,             // A line of more codes, after 16
+    DHT_CODES_NONE              // After a line of 16, and none since: empty
+  };
+
+  void AddDhtCodesLine(teDhtCodesLine eLine, uint32_t nLen, uint32_t nNumCodes, const std::array<uint8_t, 16> &anCodes,
+                       uint32_t nCodes);
+  static QString DhtCodesLine(teDhtCodesLine eLine, uint32_t nLen, uint32_t nNumCodes,
+                              const std::array<uint8_t, 16> &anCodes, uint32_t nCodes);
   QString PrintAsHexUC(uint8_t *anBytes, uint32_t nCount);
   QString PrintAsHex8(uint32_t *anBytes, uint32_t nCount);
   QString PrintAsHex32(uint32_t *anWords, uint32_t nCount);
